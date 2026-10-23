@@ -8,9 +8,10 @@ import net
 // request context, the context points back, and a cleanup closure stored
 // in the session captures the session itself. Reference counting alone
 // would leak several objects per request (W0001 warns about both types);
-// the cycle collector (ZELL_CYCLES=auto, the default) frees them on the
-// way, so the number of live objects stays bounded however many requests
-// are served, and the program passes --leak-check.
+// the cycle collector (ZELL_CYCLES=auto, the default) frees them as the
+// server runs, so the live objects stay a fraction of what would leak, a
+// collection at the end reclaims the rest, and the program passes
+// --leak-check.
 
 struct Session {
     Id      int
@@ -53,8 +54,7 @@ async func main() void! {
     var base = fmt.Format("http://127.0.0.1:{0}", srv.Port())
 
     var requests = 10000
-    var firstHalf = 0
-    var secondHalf = 0
+    var peak = 0
     for i in 0..requests {
         var r = await http.Get(base + "/item")?
         if i < 2 {
@@ -62,18 +62,20 @@ async func main() void! {
         }
         if i % 250 == 0 {
             var live = diag.Runtime().LiveObjects
-            if i < requests / 2 && live > firstHalf {
-                firstHalf = live
-            }
-            if i >= requests / 2 && live > secondHalf {
-                secondHalf = live
+            if live > peak {
+                peak = live
             }
         }
     }
     println("requests", requests, "sessions", opened, "closed", closed)
-    // Without the collector the second half would end with twice as many
-    // live objects as the first.
-    println("live objects stay bounded:", secondHalf <= firstHalf)
+    // Without the collector the peak would be about 5 objects per request
+    // (49k here); with it, how high the peak gets depends on when the
+    // automatic collections land, so the check that holds on every machine
+    // is that one more collection brings the live count back down to the
+    // server's own objects: the cycles were reclaimable all along.
+    runtime.CollectCycles()
+    var after = diag.Runtime().LiveObjects
+    println("cycles reclaimed:", after < peak / 4)
     var st = runtime.CycleStats()
     println("collector:", st.Mode, "collections ran:", st.Runs > 0, "cycles freed:", st.Collected > 0)
 

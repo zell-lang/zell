@@ -1,6 +1,6 @@
 user0 /item
 user1 /item
 requests 10000 sessions 10000 closed 10000
-live objects stay bounded: true
+cycles reclaimed: true
 collector: auto collections ran: true cycles freed: true
 server stopped

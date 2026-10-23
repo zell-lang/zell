@@ -27,13 +27,18 @@ is listed here in priority order, each item sized for one agent run.
 
 ## Items
 
-### 1. `examples/cycle_server` flaky (15 min)
-Prints `live objects stay bounded: false` on 3-4 of 4 runs on a 16-core
-machine, also on the pre-wave baseline: it samples the live-object maximum
-every 250 requests and the first cycle collection may land right after the
-half boundary. Make the check robust (compare after a forced collection, or
-compare the second half's minimum/median against the first half's maximum),
-keep the example's purpose and `.out` byte-exact otherwise.
+### 1. `examples/cycle_server` flaky — DONE 2026-10-23
+The half-vs-half comparison of sampled live-object peaks depended on when
+the automatic collections landed; the example now forces one collection at
+the end and checks that the live count drops to the server's own objects
+(`cycles reclaimed: true`), which holds on 1 and 16 workers.
+Finding worth a follow-up (collector pacing, `runtime/src/cycles.c`): over
+10k requests leaving 2 candidate roots each, auto mode ran only 4-5
+collections with `g_threshold` at its minimum 1024 — about one per 2000
+requests instead of one per 512 — on 1, 4 and 16 workers alike; the live
+peak was 20-27k objects against 49k with the collector off. The request
+to collect (`g_pub_req` in `record_count`) seems to be honoured late;
+check where `maybe_collect` is actually reached on a worker thread.
 
 ### 2. `timers` lateness regression (30 min, `runtime/src/task.c`)
 Mean lateness 19 ms vs 0.1 ms in Go after the scheduler rewrite: the timer
