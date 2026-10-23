@@ -1,25 +1,40 @@
 namespace strings
 
-// strings.Builder: accumulates text; String() joins the pieces once.
+// strings.Builder: accumulates text in one growing byte buffer (capacity
+// doubles, so n writes cost O(n) copying); String() builds the string once.
 struct Builder {
-    parts []string
-    n     int
+    buf []byte
+    n   int
 
     func Write(s string) {
-        this.parts = append(this.parts, s)
-        this.n += len(s)
+        var need = this.n + len(s)
+        if need > len(this.buf) {
+            this.grow(need)
+        }
+        rtCopyString(this.buf, this.n, s, 0, len(s))
+        this.n = need
+    }
+
+    func grow(need int) {
+        var c = len(this.buf) * 2
+        if c < 64 {
+            c = 64
+        }
+        if c < need {
+            c = need
+        }
+        var nb = rtMakeBytes(c)
+        if this.n > 0 {
+            rtCopy(nb, 0, this.buf, 0, this.n)
+        }
+        this.buf = nb
     }
 
     func String() string {
-        if len(this.parts) == 0 {
+        if this.n == 0 {
             return ""
         }
-        if len(this.parts) > 1 {
-            var s = Join(this.parts, "")
-            this.parts = [s]
-            return s
-        }
-        return this.parts[0]
+        return FromBytes(this.buf[..this.n])
     }
 
     func Len() int {
@@ -27,7 +42,7 @@ struct Builder {
     }
 
     func Reset() {
-        this.parts = nil
+        this.buf = nil
         this.n = 0
     }
 }

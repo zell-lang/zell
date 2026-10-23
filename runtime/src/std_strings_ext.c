@@ -311,3 +311,120 @@ zell_string *zell_strings_from_bytes(const zell_slice *bytes) {
     if (!bytes || bytes->len == 0) return zell__string_alloc(0);
     return zell_string_from_bytes(bytes);
 }
+
+/* ---- byte-buffer primitives for the Zell-source strings.Builder and io
+ * (ABI.md section 14, "rt" helpers): bounds are clamped, never trapped, so
+ * the Zell side checks lengths and these only move bytes. ---- */
+
+/* Clamps [off, off+n) to [0, len); returns the count that fits. */
+static int64_t zell__clamp_span(int64_t len, int64_t off, int64_t n) {
+    if (off < 0 || off >= len || n <= 0) return 0;
+    return n > len - off ? len - off : n;
+}
+
+void zell_strings_rt_copy(zell_slice *dst, int64_t dst_off, const zell_slice *src, int64_t src_off,
+                          int64_t n) {
+    n = zell__clamp_span(dst->len, dst_off, n);
+    n = zell__clamp_span(src->len, src_off, n);
+    if (n > 0) memmove((char *)dst->data + dst_off, (const char *)src->data + src_off, (size_t)n);
+}
+
+void zell_strings_rt_copy_string(zell_slice *dst, int64_t dst_off, const zell_string *s,
+                                 int64_t src_off, int64_t n) {
+    n = zell__clamp_span(dst->len, dst_off, n);
+    n = zell__clamp_span(s ? s->len : 0, src_off, n);
+    if (n > 0) memcpy((char *)dst->data + dst_off, s->data + src_off, (size_t)n);
+}
+
+int64_t zell_strings_rt_index_byte(const zell_slice *b, int64_t from, int64_t to, int64_t c) {
+    if (from < 0) from = 0;
+    if (to > b->len) to = b->len;
+    if (from >= to) return -1;
+    const char *p = memchr((const char *)b->data + from, (int)(c & 0xff), (size_t)(to - from));
+    return p ? (int64_t)(p - (const char *)b->data) : -1;
+}
+
+void zell_strings_rt_make_bytes(int64_t n, zell_slice *out) {
+    if (n < 0) n = 0;
+    zell_slice_new(out, 1, n, n);
+}
+
+/* Byte-wise order of two strings (NULL is ""). */
+static int zell__str_less(const zell_string *a, const zell_string *b) {
+    int64_t la = a ? a->len : 0, lb = b ? b->len : 0;
+    int64_t n = la < lb ? la : lb;
+    int c = n > 0 ? memcmp(a->data, b->data, (size_t)n) : 0;
+    return c != 0 ? c < 0 : la < lb;
+}
+
+static void zell__str_insertion(zell_string **a, int64_t lo, int64_t hi) {
+    for (int64_t i = lo + 1; i < hi; i++) {
+        zell_string *x = a[i];
+        int64_t j = i;
+        while (j > lo && zell__str_less(x, a[j - 1])) { a[j] = a[j - 1]; j--; }
+        a[j] = x;
+    }
+}
+
+static void zell__str_sift(zell_string **a, int64_t lo, int64_t root, int64_t n) {
+    for (;;) {
+        int64_t child = 2 * root + 1;
+        if (child >= n) return;
+        if (child + 1 < n && zell__str_less(a[lo + child], a[lo + child + 1])) child++;
+        if (!zell__str_less(a[lo + root], a[lo + child])) return;
+        zell_string *t = a[lo + root]; a[lo + root] = a[lo + child]; a[lo + child] = t;
+        root = child;
+    }
+}
+
+static void zell__str_heapsort(zell_string **a, int64_t lo, int64_t hi) {
+    int64_t n = hi - lo;
+    for (int64_t i = n / 2 - 1; i >= 0; i--) zell__str_sift(a, lo, i, n);
+    for (int64_t i = n - 1; i > 0; i--) {
+        zell_string *t = a[lo]; a[lo] = a[lo + i]; a[lo + i] = t;
+        zell__str_sift(a, lo, 0, i);
+    }
+}
+
+/* Introsort: median-of-three quicksort, insertion sort below 16 elements,
+ * heapsort when the recursion depth is exhausted. A partition compares
+ * every element with one cached pivot, so the cache misses on the
+ * scattered string objects overlap; a merge sort serialises them on the
+ * branch of every step (5x slower on 2M strings). */
+static void zell__str_introsort(zell_string **a, int64_t lo, int64_t hi, int depth) {
+    while (hi - lo > 16) {
+        if (depth-- == 0) { zell__str_heapsort(a, lo, hi); return; }
+        int64_t m = lo + (hi - lo) / 2;
+        zell_string *t;
+        if (zell__str_less(a[m], a[lo])) { t = a[m]; a[m] = a[lo]; a[lo] = t; }
+        if (zell__str_less(a[hi - 1], a[m])) {
+            t = a[hi - 1]; a[hi - 1] = a[m]; a[m] = t;
+            if (zell__str_less(a[m], a[lo])) { t = a[m]; a[m] = a[lo]; a[lo] = t; }
+        }
+        zell_string *pivot = a[m];
+        int64_t i = lo, j = hi - 1;
+        for (;;) {
+            while (zell__str_less(a[i], pivot)) i++;
+            while (zell__str_less(pivot, a[j])) j--;
+            if (i >= j) break;
+            t = a[i]; a[i] = a[j]; a[j] = t;
+            i++; j--;
+        }
+        /* recurse into the smaller half, loop on the larger */
+        if (j + 1 - lo < hi - (j + 1)) { zell__str_introsort(a, lo, j + 1, depth); lo = j + 1; }
+        else { zell__str_introsort(a, j + 1, hi, depth); hi = j + 1; }
+    }
+    zell__str_insertion(a, lo, hi);
+}
+
+/* slices.Sort<string>: sorts the string pointers in place, byte-wise, with
+ * an introsort; the backing array keeps its references, so nothing is
+ * retained or released. Equal strings are indistinguishable, so the
+ * missing stability is unobservable. */
+void zell_strings_rt_sort(zell_slice *xs) {
+    int64_t n = xs->len;
+    if (n < 2) return;
+    int depth = 0;
+    for (int64_t k = n; k > 0; k >>= 1) depth += 2;
+    zell__str_introsort((zell_string **)xs->data, 0, n, depth);
+}
