@@ -1,0 +1,51 @@
+// test: temporaries created inside struct, slice, tuple and enum literals (an owned argument of a nested call, the receiver of a negated call result) are released at the end of the statement
+// status: passing
+// run-flags: --leak-check
+namespace spec.memory.literal_temps
+
+import io
+
+struct Box {
+    Name string
+    func Neg() Box {
+        return Box{Name: "-" + this.Name}
+    }
+}
+
+struct Holder {
+    Tag  string
+    Item Box
+}
+
+enum Shape {
+    Dot
+    Named(b Box)
+}
+
+var made = 0
+
+func mk(prefix string, inner *Box) Box {
+    made += 1
+    return Box{Name: prefix + inner.Name}
+}
+
+func tmp(name string) *Box {
+    return new Box{Name: name}
+}
+
+func main() {
+    // The *Box returned by tmp() is an owned temporary passed as a borrowed
+    // argument of mk(); only mk's result belongs to the literal.
+    var h = Holder{Tag: "h", Item: mk("a", tmp("x"))}
+    var xs = [mk("b", tmp("y")), -mk("c", tmp("z"))]
+    var (tb, n) = (mk("d", tmp("w")), 1)
+    var s = Shape.Named(mk("e", tmp("v")))
+    println(h.Item.Name, xs[0].Name, xs[1].Name, tb.Name, n)
+    switch s {
+    case Shape.Named(b):
+        println(b.Name)
+    case Shape.Dot:
+        println("dot")
+    }
+    println(made)
+}
