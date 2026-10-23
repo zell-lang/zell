@@ -1,0 +1,6 @@
+5
+-1
+failed: y
+  created at   tests/spec/async2/sync_error_trace.zl:8   Fail
+  returned via tests/spec/async2/sync_error_trace.zl:12  Mid
+  returned via tests/spec/async2/sync_error_trace.zl:23  main

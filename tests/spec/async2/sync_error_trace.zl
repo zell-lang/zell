@@ -1,0 +1,27 @@
+// test: an error returned by an async func that never suspended propagates through `await f()?` with its trace
+// status: passing
+namespace spec.async2.sync_error_trace
+
+import io
+
+async func Fail(what string) int! {
+    return error("failed: " + what)
+}
+
+async func Mid(what string) int! {
+    var v = await Fail(what)?
+    return v + 1
+}
+
+async func Ok(i int) int! {
+    return i
+}
+
+async func main() {
+    println(try await Ok(5) else -1)
+    println(try await Mid("x") else -1)
+    try await Mid("y") catch err {
+        println(err)
+        println(errors.Trace(err))
+    }
+}

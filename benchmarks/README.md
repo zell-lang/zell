@@ -648,10 +648,10 @@ Open items (larger than a safe fix in this pass):
   worker, are the next scheduler steps; they would address `spawn_tasks`
   phase 1 (5x), `await_chain` resumption (780 ns per resumed frame) and
   `async_io` latency (two queue trips per round trip).
-- **Async call cost.** A call that never suspends still allocates a frame
-  and a task (160 ns vs a 9 ns Go call). Frame elision for immediately
-  awaited calls (LLVM's coro-elide needs the frame lifetime to be visible)
-  or a non-allocating fast path when the callee completes synchronously.
+- **Async call cost** (done, see "Synchronous async calls" below): a call
+  that never suspends used to allocate a frame and a task (160 ns vs a 9 ns
+  Go call); the task is now made only at the first suspension and the frame
+  only when the body has a suspend point.
 - **`task.Channel` is written in Zell over signals and spin locks**
   (std/task/task.zl), not over the C `zell_chan` in task.c: every wait
   allocates a signal task and a cancellation hook, `send`/`recv` are
@@ -764,11 +764,42 @@ What changed:
 
 What remains: the load generator still spends ~30% of its instructions in
 refcount operations on task, context and buffer objects and ~4% in the
-benchmark's own `ToLower`; an async call that completes without
-suspending still allocates a task (a synchronous fast path would need an
-ABI change). The TLS server copies the GCM context per record (could be
+benchmark's own `ToLower` (an async call that completed without suspending
+allocated a task at the time of this pass; "Synchronous async calls" below
+removed that). The TLS server copies the GCM context per record (could be
 used in place with an aligned copy kept per connection), and does one
 `zell__aead` call per response rather than batching streams into records.
+
+## Synchronous async calls (2026-10-23, 16-core x86-64 Fedora 42, clang/LLVM 18, go 1.24, `--release`)
+
+An async call that completes without suspending (a cached lookup, a
+buffered read, a free mutex: most awaits of an HTTP service) no longer
+makes a task. The ramp of `async func f(params) T` is now
+`void @f(params, ptr %res)` with `%res -> { ptr task; T value }`
+(runtime/ABI.md 10.3): the coroutine makes its `Task<T>` only at its first
+real suspension (`zell_task_lazy`) and hands it to the caller through
+`res.task`; a body that returns before that stores NULL there and moves its
+result into `res.value`, and `await f()` reads it straight from the slot. The
+frame allocation is guarded by `llvm.coro.alloc`, so a body without suspend
+points has no frame either: LLVM turns it into a plain function. Callers
+that keep the `Task<T>` (a variable, `task.All`, a `func() Task<T>` value)
+get an already completed task from `zell_task_completed`, so nothing
+observable changes; the slow path (a body that does suspend) does the same
+work as before, only later.
+
+Micro-benchmark: a loop of 10M `s += await f(i)`:
+
+| callee | before, ns/call | after, ns/call |
+|---|---:|---:|
+| `async func f(i int) int { return i + 1 }` (no suspend point) | 42 | 3 |
+| `async func f(t Task<int>, i int) int { return await t + i }`, `t` already done (a suspend point that never suspends: frame allocated and freed) | 42 | 15 |
+
+(Go: 8 ns for a plain call on the 4 vCPU VM of the "Async benchmarks"
+section, where the same loop took 136 ns per call before this change.) What
+remains on the fast path is `zell_task_get_ctx` + `zell_coro_leave` (the
+caller's context is saved and restored so that what the body sets never
+leaks out) and, with a suspend point, one frame allocation and free from the
+object heap's size classes plus `zell_task_is_done` / `zell_task_result`.
 
 Latency, cores scaling and language-mechanism benchmarks: see [RESULTS-latency.md](RESULTS-latency.md).
 Stdlib benchmarks (`json_codec`, `encodings`, `crypto`, `file_io`, `sort_collect`): see [RESULTS-stdlib.md](RESULTS-stdlib.md).

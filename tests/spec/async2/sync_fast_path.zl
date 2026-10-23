@@ -1,0 +1,71 @@
+// test: an async call that completes without suspending returns its value like a plain call; kept tasks, repeated awaits, Spawn/Go and nested awaits still work
+// status: passing
+namespace spec.async2.sync_fast_path
+
+import io
+
+// No suspend point at all: neither a task nor a frame is made.
+async func Leaf(i int) int {
+    return i + 1
+}
+
+// A suspend point that never suspends: the awaited task is already done.
+async func Twice(t Task<int>) int {
+    return await t * 2
+}
+
+// Suspends once, then returns.
+async func Slow(i int) int {
+    await task.Delay(1)
+    return i * 10
+}
+
+// Nested awaits: the inner call completes synchronously, the outer suspends.
+async func Outer(i int) int {
+    var a = await Leaf(i)
+    var b = await Slow(a)
+    return a + b
+}
+
+async func Greet(name string) string {
+    return "hello " + name
+}
+
+async func Nothing() {
+}
+
+async func main() {
+    // value straight from the call
+    println(await Leaf(1))
+    println(await Greet("zell"))
+    await Nothing()
+    // a kept task of a call that completed synchronously, awaited twice
+    var t = Leaf(41)
+    println(await t, await t)
+    // a done task awaited by a call that has a suspend point
+    println(await Twice(t))
+    // suspend once, nested awaits
+    println(await Slow(3))
+    println(await Outer(4))
+    // the kept task of a call that suspended, awaited twice
+    var s = Slow(5)
+    println(await s, await s)
+    // Spawn/Go of functions that complete synchronously
+    println(await task.Spawn(func() Task<int> {
+        return Leaf(99)
+    }))
+    await task.Go(func() Task<void> {
+        return Nothing()
+    })
+    println(await task.Spawn(async func() int {
+        return await Leaf(7) + await Leaf(8)
+    }))
+    // a sync-completing call as an argument, and in task.All
+    var (x, y) = await task.All(Leaf(10), Slow(2))
+    println(x, y)
+    var sum = 0
+    for i in 0..1000 {
+        sum += await Leaf(i)
+    }
+    println(sum)
+}

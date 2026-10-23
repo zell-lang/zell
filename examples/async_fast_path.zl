@@ -1,0 +1,63 @@
+namespace examples.async_fast_path
+
+import io
+
+// An async function starts on the caller's thread and runs until its first
+// real suspension. When it returns before that (a cache hit, a buffered
+// read, a free mutex), the call costs no task and no scheduler trip:
+// `await` takes the value straight from the call. Only a body that really
+// suspends gets a Task<T> of its own.
+
+struct Cache {
+    items map[string]int
+    hits  int
+    loads int
+
+    // Returns at once when the key is cached; suspends (a simulated load)
+    // only on a miss.
+    async func Get(key string) int {
+        if this.items[key] != 0 {
+            this.hits += 1
+            return this.items[key]
+        }
+        await task.Delay(1)
+        this.loads += 1
+        var v = len(key) * 100
+        this.items[key] = v
+        return v
+    }
+}
+
+async func Fail(what string) int! {
+    return error("cannot " + what)
+}
+
+async func Total(c *Cache, keys []string) int! {
+    var sum = 0
+    for k in keys {
+        if k == "" {
+            await Fail("use an empty key")?
+        }
+        sum += await c.Get(k)
+    }
+    return sum
+}
+
+async func main() {
+    var c = new Cache{items: map[string]int{}}
+    var keys = ["ab", "xyz", "ab", "ab", "xyz"]
+    println("total", try await Total(c, keys) else -1)
+    println("hits", c.hits, "loads", c.loads)
+    // A kept task of a call that completed synchronously is simply done.
+    var t = c.Get("ab")
+    println("cached", await t, await t)
+    try await Total(c, ["ab", ""]) catch err {
+        println("error:", err)
+    }
+    defer println("main done")
+    var sum = 0
+    for _ in 0..100000 {
+        sum += await c.Get("ab")
+    }
+    println("sum", sum, "hits", c.hits)
+}
