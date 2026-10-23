@@ -179,7 +179,20 @@ func main() {
 		must(err)
 		docSize = n
 	}
-	text := genDoc(docSize)
+	// JSON_DOC_FILE=path reads the document from that file instead of
+	// generating it (and writes it there first if it does not exist), so
+	// repeated runs and both implementations use one identical document.
+	var text string
+	if docFile := os.Getenv("JSON_DOC_FILE"); docFile != "" {
+		if b, err := os.ReadFile(docFile); err == nil {
+			text = string(b)
+		} else {
+			text = genDoc(docSize)
+			must(os.WriteFile(docFile, []byte(text), 0o644))
+		}
+	} else {
+		text = genDoc(docSize)
+	}
 
 	// 1. typed parse
 	t0 := time.Now()

@@ -192,7 +192,19 @@ func main() void! {
     if envSize != "" {
         docSize = strconv.Atoi(envSize)?
     }
-    var text = genDoc(docSize)
+    // JSON_DOC_FILE=path reads the document from that file instead of
+    // generating it (and writes it there first if it does not exist), so
+    // repeated runs and both implementations use one identical document.
+    var text = ""
+    var docFile = os.Getenv("JSON_DOC_FILE")
+    if docFile != "" && fs.Exists(docFile) {
+        text = io.ReadFile(docFile)?
+    } else {
+        text = genDoc(docSize)
+        if docFile != "" {
+            io.WriteFile(docFile, text)?
+        }
+    }
 
     // 1. typed parse
     var t0 = time.NowNanos()
