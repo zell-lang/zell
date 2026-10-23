@@ -432,6 +432,13 @@ int64_t zell_chan_len(const zell_chan *c) {
  * a free mutex is one compare-and-swap and returns the immortal done
  * task; Unlock hands the lock to the oldest waiter by completing its
  * task, which runs next on the unlocking worker.
+ *
+ * Invariant: the locked bit is set only from a state with the guard clear
+ * (a CAS from 0, the free unguarded state), or by the guard's holder. A
+ * slow Lock that takes the guard and finds the mutex freed meanwhile
+ * (state == guard) stores LOCKED with a plain store, so a fast Lock or
+ * TryLock that CASed the locked bit in under the guard would be lost: two
+ * owners, and the second Unlock panics "unlock of unlocked mutex".
  * ====================================================================== */
 
 enum { MU_LOCKED = 1, MU_GUARD = 2 };
@@ -449,8 +456,8 @@ static inline zell_task **mu_next(zell_task *t) { return zell__task_slot(t); }
 zell_task *zell_task_mutex_lock(int64_t *m) {
     if (!m) zell_panic_nil();
     int64_t s = __atomic_load_n(m, __ATOMIC_RELAXED);
-    if (!(s & MU_LOCKED) && __atomic_compare_exchange_n(m, &s, s | MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-        return zell_task_done();
+    if (s == 0 && __atomic_compare_exchange_n(m, &s, MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        return zell_task_done();   /* only from free and unguarded (the invariant above) */
     mu_guard(m);
     s = __atomic_load_n(m, __ATOMIC_RELAXED);
     if (!(s & MU_LOCKED)) {   /* freed while we waited for the guard */
@@ -469,11 +476,10 @@ zell_task *zell_task_mutex_lock(int64_t *m) {
 
 bool zell_task_mutex_try_lock(int64_t *m) {
     if (!m) zell_panic_nil();
-    for (;;) {
-        int64_t s = __atomic_load_n(m, __ATOMIC_RELAXED);
-        if (s & MU_LOCKED) return false;
-        if (__atomic_compare_exchange_n(m, &s, s | MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return true;
-    }
+    /* A guarded state is locked or about to be: the guard of a free mutex
+     * is held only by a slow Lock, which then takes it (the invariant). */
+    int64_t s = 0;
+    return __atomic_compare_exchange_n(m, &s, MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
 }
 
 void zell_task_mutex_unlock(int64_t *m) {

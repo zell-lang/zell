@@ -1394,6 +1394,10 @@ struct Mutex { state int; waitHead int; waitTail int }
   waitHead, waitTail: the FIFO of waiting tasks, linked through their slots
 ```
 
+The locked bit is set only by a CAS from `state == 0` (free, unguarded)
+or by the guard's holder: a guarded free mutex belongs to the slow `Lock`
+holding the guard.
+
 The compiled code passes `&m.state` (so the three words must stay in this
 order, 8 bytes each). It is **async-aware**: waiters are tasks, and
 unlocking hands ownership directly to the oldest waiter (FIFO, fair, no
