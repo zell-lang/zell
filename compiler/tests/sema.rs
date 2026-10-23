@@ -495,8 +495,14 @@ fn defer_spills_arguments() {
     let stmts = &func(&p, "main").body.stmts;
     assert!(matches!(stmts[1].kind, StmtKind::Let { .. }), "argument spilled");
     let StmtKind::Defer(e) = &stmts[2].kind else { panic!() };
-    let ExprKind::Closure { captures, .. } = &e.kind else { panic!() };
-    assert_eq!(captures.len(), 1);
+    // Open-coded defer (the default): the operand is the call itself over the
+    // spilled DeferArg local; with ZELL_NO_OPEN_DEFER=1 it is a closure that
+    // captures that local.
+    if let ExprKind::Closure { captures, .. } = &e.kind {
+        assert_eq!(captures.len(), 1);
+    } else {
+        assert!(matches!(e.kind, ExprKind::Print { .. } | ExprKind::Call { .. }), "deferred call: {:?}", e.kind);
+    }
 }
 
 #[test]
