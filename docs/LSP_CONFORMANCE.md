@@ -64,7 +64,7 @@ Summary: **54 ok, 7 partial, 12 missing, 8 n.a.** (81 rows).
 | `completionItem/resolve` | ok | `completion_resolve_adds_documentation` | — |
 | `textDocument/signatureHelp` | ok | `signature_help_shows_parameters_and_doc` | Parameter label offsets follow the negotiated encoding. |
 | `textDocument/inlayHint`, `inlayHint/resolve` | ok | `inlay_hints_types_and_parameter_names`, `inlay_hint_and_code_action_resolve` | — |
-| `textDocument/codeAction`, `codeAction/resolve` | ok | `code_actions_fix_structured_diagnostics`, `inlay_hint_and_code_action_resolve` | Quick fixes only (no refactorings). |
+| `textDocument/codeAction`, `codeAction/resolve` | ok | `code_actions_fix_structured_diagnostics`, `inlay_hint_and_code_action_resolve`, `inspect::*` | Quick fixes (errors and lints `L0001`–`L0009`), extract variable/function, inline variable, organize imports; refactorings resolve lazily with `resolveSupport`. Missing: inline function, implement interface, change signature. |
 | `textDocument/codeLens`, `codeLens/resolve` | ok | `code_lenses_for_tests_main_and_references` | — |
 | `textDocument/semanticTokens/full` | ok | `semantic_tokens_are_classified_and_stable` | — |
 | `semanticTokens/full/delta` | ok | `semantic_tokens_delta_and_range` (edits applied client-side equal a fresh `full`) | — |
@@ -144,7 +144,9 @@ Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
 7. **Rename scoping** (M): block scopes in the index to detect every
    shadowing case.
 8. **Refactoring code actions** (M each): extract variable/function,
-   inline, fill struct fields, generate interface stubs.
+   inline variable and organize imports are done (`lsp/src/refactor.rs`);
+   still missing: inline function, fill struct fields, implement
+   interface stubs, change signature, `if err` <-> `?` conversion.
 9. **`onTypeFormatting`, `documentLink`** (S each).
 10. **Diagnostics details** (S): `version` in `publishDiagnostics`,
     `data` for quick fixes, cross-file related information, partial

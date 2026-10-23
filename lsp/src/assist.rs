@@ -72,7 +72,7 @@ impl<'a> Walker<'a, '_> {
         }
     }
 
-    fn stmt(&mut self, s: &'a Stmt) {
+    pub fn stmt(&mut self, s: &'a Stmt) {
         (self.on_stmt)(s);
         match &s.kind {
             StmtKind::Var(v) => {

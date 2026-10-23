@@ -123,7 +123,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/completion`, `completionItem/resolve` | `completionProvider { triggerCharacters: ["."], resolveProvider }` | `features.rs` |
 | `textDocument/signatureHelp` | `signatureHelpProvider` (`(`, `,`) | `assist.rs` |
 | `textDocument/inlayHint`, `inlayHint/resolve` | `inlayHintProvider { resolveProvider }` | `assist.rs` |
-| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix], resolveProvider }` | `assist.rs` |
+| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix, refactor.extract, refactor.inline, source.organizeImports], resolveProvider }` | `assist.rs`, `refactor.rs` |
 | `textDocument/codeLens`, `codeLens/resolve` | `codeLensProvider { resolveProvider }` | `lens.rs` |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | `semanticTokensProvider { full: { delta: true }, range: true }` | `features.rs` |
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | `callHierarchyProvider` | `hierarchy.rs` |
@@ -186,7 +186,24 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
   версия анализа); `completionItem/resolve` добавляет `detail` и Markdown-
   документацию (тот же конвейер, что hover). Подсказки inlay — tooltip в
   `inlayHint/resolve`. Quick fix'ы дешёвые и сразу с правкой:
-  `codeAction/resolve` возвращает их как есть.
+  `codeAction/resolve` возвращает их как есть. Рефакторинги
+  (`lsp/src/refactor.rs`) при `codeAction.resolveSupport` с `edit` приходят
+  без правки, с `data` (вид, файл, выделение), и правка считается в
+  `codeAction/resolve`; иначе сразу с правкой.
+- **Рефакторинги** (code actions, фильтр `only` учитывается):
+  `refactor.extract` — «Extract variable» (выделенное выражение →
+  `var name = ...` перед оператором; имя из вызываемой функции/поля без
+  `Get`, уникальное в функции) и «Extract function» (выделенные целиком
+  операторы одного блока → новая функция после текущей; параметры —
+  внешние локальные переменные/параметры, которые читает диапазон;
+  результат — объявленные в диапазоне и используемые после него, один или
+  кортежем; `async` + `await` при `await`, `!` + `?` при `?`; диапазоны с
+  `return`/`break`/`continue` не предлагаются; в методе — метод и вызов
+  через `this.`); `refactor.inline` — «Inline variable» (локальная `var` с
+  инициализатором без присваиваний и `&x`: подстановка, в скобках если
+  нужно, и удаление объявления); `source.organizeImports` — сортировка
+  импортов и удаление неиспользуемых (`E0003`). Quick fix'ы инспекций — см.
+  «Инспекции».
 - **Code lens**: на `@test`/`@bench`-функциях «▶ Run test» (`zell.runTest`)
   и «Debug test» (`zell.debugTest`) с аргументами `[uri файла, имя]`, на
   `main` — «▶ Run» (`zell.run`, `[uri]`); на экспортируемых объявлениях
