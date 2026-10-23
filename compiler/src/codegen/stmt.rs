@@ -607,6 +607,31 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // return and errors
     // ------------------------------------------------------------------
 
+    /// The value of `return e` in a borrow-returning function
+    /// (`hir::borrow::borrow_returning`): a parameter path or a struct
+    /// literal of parameter paths, whose references are copied without a
+    /// retain (the caller holds the argument values they belong to).
+    fn borrowed_return(&mut self, e: &Expr) -> R<BasicValueEnum<'ctx>> {
+        if let ExprKind::StructLit { struct_id, fields } = &e.kind {
+            let st = self.struct_llty(*struct_id);
+            let mut agg: BasicValueEnum = st.const_zero().into();
+            for (idx, fe) in fields {
+                let v = self.borrowed_part(fe)?;
+                agg = self.b.build_insert_value(agg.into_struct_value(), v, *idx, "").unwrap().into_struct_value().into();
+            }
+            return Ok(agg);
+        }
+        self.borrowed_part(e)
+    }
+
+    fn borrowed_part(&mut self, e: &Expr) -> R<BasicValueEnum<'ctx>> {
+        let v = self.expr(e)?;
+        if v.owned && self.needs_rc(e.ty) {
+            return unsupported("internal: owned value in a borrowed return");
+        }
+        Ok(v.get())
+    }
+
     fn ret_info(&self) -> R<(PointerValue<'ctx>, TypeId)> {
         match self.fs().ret_slot {
             Some(r) => Ok(r),
@@ -653,6 +678,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         }
                         v
                     }
+                    None if self.fs().borrow_ret => self.borrowed_return(e)?,
                     None => self.expr_owned(e)?,
                 };
                 if let Type::Fallible(inner) = self.ty(t).clone() {

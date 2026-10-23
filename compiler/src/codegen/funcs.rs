@@ -17,8 +17,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             return Ok(());
         }
         let f: &'a hir::Function = &self.prog.funcs[fid.0 as usize];
-        let fv = self.funcs[fid.0 as usize];
+        let fv = self.funcs_borrow.get(&fid.0).copied().unwrap_or(self.funcs[fid.0 as usize]);
         let saved = self.begin_fn(fv, Some(f));
+        self.fs_mut().borrow_ret = self.funcs_borrow.contains_key(&fid.0);
         self.dbga_dispatch();
         let off = if matches!(f.kind, FuncKind::Lambda { .. }) { 1 } else { 0 };
         if off == 1 {
@@ -96,7 +97,23 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.emit_exit()?;
         self.end_fn(saved, None);
         self.dbga_end();
-        Ok(())
+        self.emit_rc_wrapper(fid)
+    }
+
+    /// For a borrow-returning function (`CodeGen::funcs_borrow`): defines
+    /// `funcs[fid]`, the `.rc` wrapper that calls the body and retains the
+    /// result, so that indirect callers get an owned value as usual.
+    fn emit_rc_wrapper(&mut self, fid: FuncId) -> R<()> {
+        let Some(body) = self.funcs_borrow.get(&fid.0).copied() else { return Ok(()) };
+        let w = self.funcs[fid.0 as usize];
+        let ret = self.prog.funcs[fid.0 as usize].ret;
+        self.with_helper(w, |cg| {
+            let args: Vec<BasicMetadataValueEnum> = w.get_params().iter().map(|p| BasicMetadataValueEnum::from(*p)).collect();
+            let r = cg.b.build_call(body, &args, "").unwrap().try_as_basic_value().left().unwrap();
+            cg.retain_val(ret, r);
+            cg.b.build_return(Some(&r)).unwrap();
+            Ok(())
+        })
     }
 
     /// The exit block: deferred calls, release of locals, return.

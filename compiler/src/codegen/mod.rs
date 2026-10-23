@@ -167,7 +167,14 @@
 //!   *Borrowed locals* ([`crate::hir::borrow`], DESIGN.md "Память") of
 //!   heap-pure functions (`CodeGen::pure_fns`) are stored without a retain
 //!   and never released (`FnState::borrow_local`, also marked in
-//!   `FnState::borrowed`).
+//!   `FnState::borrowed`). *Borrow-returning functions*
+//!   (`hir::borrow::borrow_returning`, `CodeGen::borrow_ret`) are emitted
+//!   twice: the body under their symbol returns its parameter paths
+//!   without a retain (`FnState::borrow_ret`, `borrowed_return`) and is
+//!   called directly when the arguments are stable for the statement
+//!   (`borrow_call`; the result is then a borrowed `Val`), and a `.rc`
+//!   wrapper (`funcs[fid]`, `emit_rc_wrapper`) retains the result for every
+//!   other use.
 //! * **Temporaries** held while later operands are evaluated live on the
 //!   cleanup stack ([`cleanup`]) and are released on early exits (`?`,
 //!   `try ... else return/break/continue`, `return`, `break`, `continue`
@@ -398,6 +405,9 @@ pub(crate) struct FnState<'a, 'ctx> {
     /// Per local: a borrowed local ([`hir::borrow`]): stored without a
     /// retain and never released.
     pub borrow_local: Vec<bool>,
+    /// The function returns a value borrowed from its parameters
+    /// (`CodeGen::borrow_ret`): `return e` does not retain.
+    pub borrow_ret: bool,
     /// Per local (string, `*T`, map, error ... slots that are not cells,
     /// interior or address-taken): every value stored so far was an LLVM
     /// constant pointer (NULL or the address of an immortal global: a
@@ -435,6 +445,15 @@ pub struct CodeGen<'a, 'ctx> {
     pub(crate) struct_tys: HashMap<u32, StructType<'ctx>>,
     pub(crate) enum_tys: HashMap<u32, StructType<'ctx>>,
     pub(crate) funcs: Vec<FunctionValue<'ctx>>,
+    /// Per function: its result is borrowed from its parameters
+    /// (`hir::borrow::borrow_returning`): per parameter, whether the
+    /// result reads through it.
+    pub(crate) borrow_ret: Vec<Option<Vec<bool>>>,
+    /// For a borrow-returning function: the body under the borrowed-result
+    /// convention, called directly (`funcs[fid]` is then the `.rc` wrapper
+    /// that retains the result, for every indirect use: vtables, function
+    /// values, reflection).
+    pub(crate) funcs_borrow: HashMap<u32, FunctionValue<'ctx>>,
     pub(crate) globals: Vec<GlobalValue<'ctx>>,
     pub(crate) strings: HashMap<String, PointerValue<'ctx>>,
     pub(crate) cstrings: HashMap<String, PointerValue<'ctx>>,
@@ -566,6 +585,8 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
         struct_tys: HashMap::new(),
         enum_tys: HashMap::new(),
         funcs: Vec::new(),
+        borrow_ret: Vec::new(),
+        funcs_borrow: HashMap::new(),
         globals: Vec::new(),
         strings: HashMap::new(),
         cstrings: HashMap::new(),
@@ -603,6 +624,8 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
     cg.init_debug();
     cg.init_agent();
     let mut errors = Vec::new();
+    let br = hir::borrow::borrow_returning(program, &|f, k| !cg.facts.owned(f, k) && !cg.facts.moved(f, k), &|t| cg.cycles.holds_cyclic(t));
+    cg.borrow_ret = br;
     if let Err(e) = cg.declare_all() {
         return Err(vec![e]);
     }
@@ -657,13 +680,20 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
 impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// Declares every function and global.
     fn declare_all(&mut self) -> R<()> {
-        for f in &self.prog.funcs {
+        for (i, f) in self.prog.funcs.iter().enumerate() {
             let fty = self.fn_llty(f)?;
             let fv = self.module.add_function(&f.symbol, fty, Some(Linkage::Internal));
             if f.is_async {
                 fv.add_attribute(inkwell::attributes::AttributeLoc::Function, self.attr("presplitcoroutine"));
             }
-            self.funcs.push(fv);
+            if self.borrow_ret.get(i).is_some_and(|b| b.is_some()) {
+                // The body returns borrowed; `.rc` retains for indirect uses.
+                self.funcs_borrow.insert(i as u32, fv);
+                let w = self.module.add_function(&format!("{}.rc", f.symbol), fty, Some(Linkage::Internal));
+                self.funcs.push(w);
+            } else {
+                self.funcs.push(fv);
+            }
         }
         for g in &self.prog.globals {
             let ty = self.llty(g.ty);
@@ -717,6 +747,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             pins: HashMap::new(),
             borrowed: Vec::new(),
             borrow_local: Vec::new(),
+            borrow_ret: false,
             const_only: Vec::new(),
             const_depth: Vec::new(),
             flags: Vec::new(),

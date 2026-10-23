@@ -336,3 +336,97 @@ pub fn borrowed_locals(p: &Program, fid: FuncId, f: &Function, pure: &[bool], st
     }
     out
 }
+
+/// Functions whose result is *borrowed from their parameters* (DESIGN.md
+/// "Память", "Заимствованные временные"): a non-`async`, non-lambda
+/// function without `defer` that assigns only to plain local variables,
+/// never assigns, captures or takes the address of a parameter, takes
+/// every parameter borrowed (`param_ok`), returns a `*T`, `string`, `[]T`
+/// or struct value of a non-cyclic type, and whose every `return e` has
+/// `e` a parameter, or an inline field path through struct values from a
+/// parameter or from the dereference of a pointer parameter (`this`,
+/// `this.d`, which is `(*this).d` for a receiver), or a struct literal
+/// whose every reference-holding field is such a path
+/// (`Value{d: this.d, n: ...}`).
+///
+/// The references in its result are then copies of references held by
+/// the caller's argument values (or stored in the places they point to),
+/// so direct calls get the result without a count of its own: the body
+/// does not retain what it returns; a caller whose arguments stay held to
+/// the end of the statement treats the result as borrowed; every other
+/// use (vtables, function values, reflection, a call whose argument for
+/// a dereferenced parameter is not the address of a stable place) goes
+/// through a retaining wrapper. For each eligible function the result
+/// lists, per parameter, whether a returned path reads *through* it (the
+/// caller must then pass the address of a place that no code run during
+/// the statement can overwrite). `ZELL_NO_BORROW=1` turns this off too.
+pub fn borrow_returning(p: &Program, param_ok: &dyn Fn(FuncId, usize) -> bool, cyclic: &dyn Fn(TypeId) -> bool) -> Vec<Option<Vec<bool>>> {
+    if std::env::var_os("ZELL_NO_BORROW").is_some() {
+        return vec![None; p.funcs.len()];
+    }
+    p.funcs.iter().enumerate().map(|(i, f)| returns_borrowed(p, FuncId(i as u32), f, param_ok, cyclic)).collect()
+}
+
+/// A value of type `t` may hold references (conservative).
+fn has_refs(p: &Program, t: TypeId) -> bool {
+    !matches!(p.types.get(t), Type::Bool | Type::Int(_) | Type::Float32 | Type::Float64 | Type::Char | Type::Void)
+}
+
+fn returns_borrowed(p: &Program, fid: FuncId, f: &Function, param_ok: &dyn Fn(FuncId, usize) -> bool, cyclic: &dyn Fn(TypeId) -> bool) -> Option<Vec<bool>> {
+    if f.is_async || matches!(f.kind, FuncKind::Lambda { .. }) || f.params.is_empty() {
+        return None;
+    }
+    if !matches!(p.types.get(f.ret), Type::Pointer(_) | Type::String | Type::Slice(_) | Type::Struct(_)) || cyclic(f.ret) {
+        return None;
+    }
+    for (k, l) in f.params.iter().enumerate() {
+        let loc = &f.locals[l.0 as usize];
+        if loc.captured || loc.address_taken || !param_ok(fid, k) {
+            return None;
+        }
+    }
+    let param_index = |l: LocalId| f.params.iter().position(|q| *q == l);
+    // A parameter, or inline struct fields of one or of the dereference
+    // of a pointer parameter: returns (parameter index, read through it).
+    fn inline_path(e: &Expr, p: &Program, param_index: &dyn Fn(LocalId) -> Option<usize>) -> Option<(usize, bool)> {
+        match &e.kind {
+            ExprKind::Local(l) => param_index(*l).map(|k| (k, false)),
+            ExprKind::Deref(x) => match &x.kind {
+                ExprKind::Local(l) => param_index(*l).map(|k| (k, true)),
+                _ => None,
+            },
+            ExprKind::Field { base, .. } if matches!(p.types.get(base.ty), Type::Struct(_)) => inline_path(base, p, param_index),
+            _ => None,
+        }
+    }
+    let mut deref = vec![false; f.params.len()];
+    let mut ok = true;
+    let mut returns = 0;
+    walk_function_stmts(p, f, &mut |st| match &st.kind {
+        StmtKind::Defer(_) => ok = false,
+        StmtKind::Assign { target, .. } | StmtKind::CompoundAssign { target, .. } => {
+            if !matches!(&target.kind, ExprKind::Local(l) if param_index(*l).is_none()) {
+                ok = false;
+            }
+        }
+        StmtKind::Return(ReturnValue::Value(e)) => {
+            returns += 1;
+            let mut note = |e: &Expr| match inline_path(e, p, &param_index) {
+                Some((k, through)) => deref[k] |= through,
+                None => ok = false,
+            };
+            match &e.kind {
+                ExprKind::StructLit { fields, .. } => {
+                    for (_, fe) in fields {
+                        if has_refs(p, fe.ty) {
+                            note(fe);
+                        }
+                    }
+                }
+                _ => note(e),
+            }
+        }
+        _ => {}
+    });
+    (ok && returns > 0).then_some(deref)
+}

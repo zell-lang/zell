@@ -107,10 +107,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 _ => unsupported("assignment to a string index"),
             },
             _ => {
-                // Not a place: materialise a temporary (only read through).
-                let v = self.expr_owned(e)?;
-                self.hold_raw(e.ty, v);
-                Ok(self.spill(v))
+                // Not a place: materialise a temporary (only read through);
+                // a stable borrowed value (a borrow-returning call) needs
+                // no count of its own.
+                let v = self.expr(e)?;
+                let v = if v.owned || !self.needs_rc(e.ty) || self.is_stable(e) { v } else { Val::owned(self.to_owned(e.ty, v)) };
+                self.hold(e.ty, v);
+                Ok(self.spill(v.get()))
             }
         }
     }
@@ -139,6 +142,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             // A field of a struct value held in a stable local: only this
             // function writes the local, and not during the statement.
             ExprKind::Field { base, .. } if matches!(self.ty(base.ty), Type::Struct(_)) && matches!(base.kind, ExprKind::Local(_) | ExprKind::Field { .. }) => self.is_stable(base),
+            // A result borrowed from the arguments of a direct call: they are
+            // held (or stable) until the end of the statement.
+            ExprKind::Call { callee: Callee::Func(fid), args } => self.borrow_call(*fid, args).is_some(),
             ExprKind::AddrOf(x) => match &x.kind {
                 ExprKind::Local(_) | ExprKind::Upvalue(_) => true,
                 ExprKind::Deref(y) => self.is_stable(y),
@@ -146,6 +152,26 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             },
             _ => false,
         }
+    }
+
+    /// The borrowed-result body of `fid` (`CodeGen::funcs_borrow`) if a
+    /// direct call with `args` may take its result borrowed: for every
+    /// parameter the result reads through, the argument is the address of
+    /// a place that stays stable for the statement (a non-cell local, an
+    /// inline struct field of one, or another such call's temporary).
+    pub(crate) fn borrow_call(&self, fid: FuncId, args: &[Expr]) -> Option<FunctionValue<'ctx>> {
+        let bf = *self.funcs_borrow.get(&fid.0)?;
+        let deref = self.borrow_ret.get(fid.0 as usize)?.as_ref()?;
+        for (k, a) in args.iter().enumerate() {
+            if !deref.get(k).copied().unwrap_or(true) {
+                continue;
+            }
+            let ExprKind::AddrOf(x) = &a.kind else { return None };
+            if !self.is_stable(x) {
+                return None;
+            }
+        }
+        Some(bf)
     }
 
     /// True if evaluating `e` may run user code (a call, `await`, a
@@ -657,6 +683,14 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     return Ok(Val::owned(t.into()));
                 }
                 let (ma, moved_holds, d) = self.direct_args(*fid, args)?;
+                if let Some(bf) = self.borrow_call(*fid, args) {
+                    // Borrow-returning (hir::borrow::borrow_returning): the
+                    // result's references belong to the argument values,
+                    // which stay held (or are stable) to the end of the
+                    // statement; the result is borrowed from them.
+                    let r = self.b.build_call(bf, &ma, "").unwrap().try_as_basic_value().left();
+                    return Ok(Val { v: r, owned: false });
+                }
                 let fv = self.funcs[fid.0 as usize];
                 let r = self.b.build_call(fv, &ma, "").unwrap().try_as_basic_value().left();
                 for h in moved_holds {

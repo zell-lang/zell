@@ -1,0 +1,71 @@
+// test: borrowed temporaries (DESIGN.md "Память"): a method that returns a struct whose references are copied from its receiver (`Value{d: this.d, n: ...}`) returns them borrowed; temporaries made from a live local are neither retained nor released, and values stored or returned from them are counted
+// status: passing
+// run-flags: --leak-check
+namespace spec.memory2.borrowed_temporaries
+
+import io
+
+var dropped []string = []
+
+struct Doc {
+    Name  string
+    Items []int
+
+    func Drop() { dropped = append(dropped, this.Name) }
+}
+
+// A view into a Doc: a borrowed-returning struct (reference + position).
+struct View {
+    d *Doc
+    n int
+
+    // Result borrowed from `this`: no retain in Index, no release in the caller.
+    func Index(i int) View {
+        return View{d: this.d, n: i}
+    }
+
+    func Get() int {
+        return this.d.Items[this.n]
+    }
+
+    // A path through inline struct fields of the receiver.
+    func Owner() *Doc {
+        return this.d
+    }
+
+    // Not borrowed: the result is a fresh object.
+    func Copy() View {
+        return View{d: new Doc{Name: this.d.Name + "-copy", Items: this.d.Items}, n: this.n}
+    }
+}
+
+func sum(v View) int {
+    var s = 0
+    for i in 0..len(v.d.Items) {
+        // Five temporaries per iteration, none of them counted.
+        s += v.Index(i).Get() + v.Index(i).Owner().Items[i]
+    }
+    return s
+}
+
+// A temporary stored in a variable or returned gets its own reference.
+func keep(v View, i int) View {
+    var w = v.Index(i)
+    return w
+}
+
+func main() {
+    var root = View{d: new Doc{Name: "doc", Items: [1, 2, 3, 4]}, n: 0}
+    println(sum(root))
+    var k = keep(root, 2)
+    println(k.Get(), k.Owner().Name)
+    var c = root.Copy()
+    println(c.Get(), c.Owner().Name)
+    c = View{}
+    println(dropped)
+    // A chain of temporaries on a function result (held to the end of the statement).
+    println(keep(root, 3).Index(1).Owner().Items[1])
+    root = View{}
+    k = View{}
+    println(dropped)
+}
