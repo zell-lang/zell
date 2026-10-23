@@ -330,19 +330,45 @@ static char *utoa_end(char *end, uint64_t v) {
     return p;
 }
 
+static const char zell__digits2[201] =
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+    "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+
+static int udigits(uint64_t v) {
+    int n = 1;
+    while (v >= 10000) { v /= 10000; n += 4; }
+    if (v >= 1000) return n + 3;
+    if (v >= 100) return n + 2;
+    if (v >= 10) return n + 1;
+    return n;
+}
+
+/* Writes the nd digits of v ending at out+nd (two digits at a time). */
+static void write_digits(char *out, int nd, uint64_t v) {
+    char *p = out + nd;
+    while (v >= 100) {
+        unsigned r = (unsigned)(v % 100); v /= 100;
+        p -= 2; memcpy(p, zell__digits2 + 2 * r, 2);
+    }
+    if (v >= 10) { p -= 2; memcpy(p, zell__digits2 + 2 * v, 2); }
+    else *--p = (char)('0' + v);
+}
+
 zell_string *zell_string_from_int(int64_t v) {
-    char buf[32];
-    char *end = buf + sizeof buf;
-    char *p = utoa_end(end, v < 0 ? 0 - (uint64_t)v : (uint64_t)v);
-    if (v < 0) *--p = '-';
-    return zell_string_new(p, end - p);
+    uint64_t u = v < 0 ? 0 - (uint64_t)v : (uint64_t)v;
+    int nd = udigits(u), neg = v < 0;
+    zell_string *s = zell__string_alloc_uninit(nd + neg);
+    if (neg) s->data[0] = '-';
+    write_digits(s->data + neg, nd, u);
+    return s;
 }
 
 zell_string *zell_string_from_uint(uint64_t v) {
-    char buf[32];
-    char *end = buf + sizeof buf;
-    char *p = utoa_end(end, v);
-    return zell_string_new(p, end - p);
+    int nd = udigits(v);
+    zell_string *s = zell__string_alloc_uninit(nd);
+    write_digits(s->data, nd, v);
+    return s;
 }
 
 /* Fast exact path of zell__format_float for values printed in fixed
