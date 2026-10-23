@@ -16,7 +16,7 @@ log: GET /hello/ann  route= id=id-2
 span HTTP GET trace=290a179fbd4559a04cc0e34c0e7bbb13 span=3084cf91aea1e8a5 parent=- kind=Server status=Error (Internal Server Error) { http.request.method="GET", url.path="/hello/ann", http.response.status_code=500 }
 log: GET /hello/ann 500 route= id=id-2
 first: after 500
--> 500 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"middleware failed","instance":"/hello/ann"}
+-> 500 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"internal error","instance":"/hello/ann"}
 first: before
 second: before
 second: after

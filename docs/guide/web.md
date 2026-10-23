@@ -117,7 +117,7 @@ async func main() void! {
 // 201 {"Id":2,"Title":"Emma"}
 ```
 
-Handlers may be `async`, may return `T!` (an error becomes a 500 Problem,
+Handlers may be `async`, may return `T!` (an error becomes a 500 Problem whose `detail` is a generic "internal error" outside development,
 or the status of a `web.Error(404, "...")`), and may take a `*Context`
 for the raw request and response.
 

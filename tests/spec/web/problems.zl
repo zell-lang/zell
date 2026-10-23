@@ -1,4 +1,4 @@
-// test: errors from handlers become RFC 9457 Problem Details: the message as detail, web.Error(status, ...) for other statuses, the errors.Trace only in development mode; web.Problem, BadRequest, Conflict, ValidationProblem results; 404/405 problems; Problem JSON member order
+// test: errors from handlers become RFC 9457 Problem Details: the message as detail only for web.Error and in development (else "internal error"), web.Error(status, ...) for other statuses, the errors.Trace only in development mode; web.Problem, BadRequest, Conflict, ValidationProblem results; 404/405 problems; Problem JSON member order
 // status: passing
 // run-flags: --leak-check
 namespace spec.web.problems

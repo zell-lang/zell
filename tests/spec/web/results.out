@@ -13,7 +13,7 @@ X: 4
 /void -> 200  yes 
 /nothing -> 204   
 /double/21 -> 200 application/json  42
-/double/-1 -> 500 application/problem+json  {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"negative","instance":"/double/-1"}
+/double/-1 -> 500 application/problem+json  {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"internal error","instance":"/double/-1"}
 /list -> 200 application/json  [{"X":1,"Y":0},{"X":2,"Y":0}]
 typed: 9 18
 typed error: GET /points/0: 404 Not Found
