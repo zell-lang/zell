@@ -604,6 +604,11 @@ impl<'a> Sema<'a> {
                     self.err("fmt.Format needs a template string", span);
                     return self.invalid(span);
                 }
+                // Fast path: Format("{0}", x) is just x converted to a string.
+                if args.len() == 2 && matches!(&args[0].kind, ast::ExprKind::Str(s) if s == "{0}") {
+                    let v = self.print_arg(&args[1]);
+                    return self.stringify(v);
+                }
                 let tmpl = self.expr_to(&args[0], self.tt.string, Ctx::Arg(0, "fmt.Format".into()));
                 let mut parts = Vec::new();
                 for a in &args[1..] {

@@ -200,6 +200,9 @@ func FormatBool(b bool) string {
 
 // n in base 2..36 (lower-case digits).
 func FormatUint(n uint, base int) string {
+    if base == 10 {
+        return rtUtoa(n)
+    }
     if base < 2 || base > 36 {
         panic("strconv: illegal base")
     }
@@ -220,6 +223,9 @@ func FormatUint(n uint, base int) string {
 
 // n in base 2..36 with a leading - when negative.
 func FormatInt(n int, base int) string {
+    if base == 10 {
+        return rtItoa(n)
+    }
     if n < 0 {
         return "-" + FormatUint(uint(0) - uint(n), base)
     }

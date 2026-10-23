@@ -3,6 +3,14 @@
 namespace strconv
 
 // Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_string_from_int (runtime/src/std_*.c).
+extern func rtItoa(a int) string
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_string_from_uint (runtime/src/std_*.c).
+extern func rtUtoa(a uint) string
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_strconv_rt_format_float (runtime/src/std_*.c).
 extern func rtFormatFloat(a float, b int, c int) string
 
