@@ -63,12 +63,11 @@ regression test `await_wakes_one_thread`. Left: one spare worker per
 blocking await (up to MAX_WORKERS=1024 threads) is what made the herd
 possible; cap spares or park blocked senders differently.
 
-### 3. Open-coded `defer` (45-60 min, compiler `hir/` + `codegen/`)
-`defer_call` 6.8x Go: every `defer c.Inc()` allocates a bound-method value
-and a closure env, 3 retain/release pairs, 2 frees. For defers not inside
-loops, keep the receiver and evaluated arguments in a frame slot and call
-directly at exit (Go's open-coded defers); loop defers keep the heap path.
-Spec test in `tests/spec/memory2`, DESIGN.md "Память" note. Target <= 2x.
+### 3. Open-coded `defer` — DONE 2026-10-23 (45-60 min, compiler `hir/` + `codegen/`)
+Go's rule (all defers outside loops, <= 8): receiver and arguments in frame
+slots, direct calls at every exit; `ZELL_NO_OPEN_DEFER=1`. defer_call 6.65x
+-> **0.34x Go**. Spec test memory2/open_defer. Left: functions with a
+loop defer keep the closure path entirely; panic still runs no defers.
 
 ### 4. Sentinel errors with traces (30-45 min, `runtime/src/error.c`, codegen `?`)
 `error_sentinel` 5.8x Go, 1.0x with `--no-error-trace`: `return ErrOdd`
@@ -76,21 +75,22 @@ copies the constant on the first `return` (copy-on-write of the shared
 trace). Keep the trace beside the value in the `T!` slot, or allocate once
 per propagation path with no copy on later `?`. Target <= 1.5x.
 
-### 5. LTO between program and runtime (45 min, `runtime/Makefile`, `compiler/src/build.rs`)
-`Value` lookups 3.3x Go are one runtime call per `Get`/`Index`/`Int`; the
-same applies to string/slice helpers everywhere. Build `libzell_rt.a` as
-LLVM bitcode (`-flto=thin`) behind a Makefile switch, pass the matching
-linker flag in `--release`, keep the plain archive as default until the
-cross builds (mingw, musl, arm64, darwin stub) are verified. Also: `rtGet`
-should compare key length and first byte before `memcmp`. Measure
-`json_codec` lookups and `strings`/`map` for regressions.
+### 5. LTO between program and runtime — DONE 2026-10-23 (45 min, `runtime/Makefile`, `compiler/src/build.rs`)
+The lookup cost was `rt_index` building a 1M-entry offset table lazily
+(~1M dependent cache misses); the parser now builds it when an array
+closes. Lookups 143 -> 65 ms (Go 43, 1.5x); with the new opt-in ThinLTO
+(`make LTO=1`, `ZELL_LTO=1 zell build --release`) 46 ms (~1.1x). Left: per-
+`Value` call overhead (`math.IsNaN`/`Round` as externs, retain/release of
+`d`) — compiler intrinsics / ownership elision.
 
-### 6. `log` allocations (45 min, `std/log/log.zl`)
-344 allocations per JSON record (zap 1, zerolog 0): `quote` takes a one-byte
-substring per input byte, `clef` re-quotes the constant template and
-re-converts the time layout per record, `emit` builds an `Event`, a map and
-a keys slice before any sink runs. Target <= 5 allocations per record,
-`logging/run.sh` enabled path >= 0.5x zap. `web`'s `UseLogging` benefits.
+### 6. `log` allocations — DONE 2026-10-23 (45 min, `std/log/log.zl`)
+344 -> 10 allocations per record, enabled path 3.9x faster: 344k rec/s
+(zap 912k, zerolog 1.41M, slog 749k) = 0.38x zap devnull / 0.44x file;
+disabled path still 0 allocations. 6 of the remaining 10 are in the
+compiler-lowered call (`sema/logtmpl.rs`: three constant `[]string` slice
+literals allocated per call, a box per string argument); 4 in log (Event,
+extra props, joined line, float text). Next: constant slices in the
+lowering (-3), string-inline `any` (-1/string), a C-side line builder.
 
 ### 7. `data` insert path (30-45 min, `std/data/data.zl`, `data_save.zl`)
 `entryOf` scans every tracked entry (quadratic `AddRange`); `batchSize()` is
