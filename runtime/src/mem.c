@@ -239,6 +239,57 @@ void zell__object_immortalize(zell_object *o) {
     if (g_track) track_remove(o);
 }
 
+/* ---- bounded release depth (rt_internal.h, ABI.md 3.2 "deferred drop") ---- */
+
+typedef struct { zell__dead_fn fn; zell_object *o; int64_t w; } dead_item;
+_Thread_local int64_t zell__dead_state;
+static _Thread_local dead_item *t_dead_v;
+static _Thread_local int64_t t_dead_n, t_dead_cap, t_dead_mark;
+
+int zell__dead_enter_slow(void) {
+    int64_t s = zell__dead_state;
+    if ((int32_t)s >= ZELL_DEAD_DEPTH) return 0;
+    t_dead_mark = t_dead_n;   /* entries above it are this frame's children */
+    zell__dead_state = s + 1;
+    return 1;
+}
+
+void zell__dead_push(zell__dead_fn fn, zell_object *o, int64_t w) {
+    zell__dead_state |= ZELL_DEAD_PENDING;
+    if (t_dead_n == t_dead_cap) {
+        int64_t cap = t_dead_cap ? t_dead_cap * 2 : 256;
+        dead_item *v = realloc(t_dead_v, (size_t)cap * sizeof *v);
+        if (!v) zell__panicf("out of memory (requested %lld bytes)", (long long)(cap * (int64_t)sizeof *v));
+        t_dead_v = v;
+        t_dead_cap = cap;
+    }
+    t_dead_v[t_dead_n++] = (dead_item){ fn, o, w };
+}
+
+void zell__dead_settle(int64_t depth) {
+    if (depth == ZELL_DEAD_DEPTH) {
+        /* The children this frame's drop queued, in release order: reverse
+         * them so the stack pops the first one first (recursive order). */
+        for (int64_t i = t_dead_mark, j = t_dead_n - 1; i < j; i++, j--) {
+            dead_item t = t_dead_v[i];
+            t_dead_v[i] = t_dead_v[j];
+            t_dead_v[j] = t;
+        }
+        return;
+    }
+    if (depth != 1) return;   /* an inner frame: the outermost one drains */
+    /* Each popped finalizer runs at depth 1 and may recurse to the bound
+     * again, queueing its own deep children on top: depth-first, iterative. */
+    while (t_dead_n) {
+        dead_item it = t_dead_v[--t_dead_n];
+        it.fn(it.o, it.w);
+    }
+    zell__dead_state &= ~ZELL_DEAD_PENDING;
+    free(t_dead_v);
+    t_dead_v = NULL;
+    t_dead_cap = 0;
+}
+
 /* The view block a view's refcount word forwards to (ABI.md 4.1). */
 static inline zell_object *view_block(int64_t rc) {
     return (zell_object *)(uintptr_t)(rc & ~ZELL_RC_VIEW);
@@ -265,6 +316,13 @@ void zell_retain(void *obj) {
         zell__cycles_dirty(o);   /* examined by the cycle collector (ABI.md 3.8) */
 }
 
+
+/* The deferred form of the plain release's finalization. */
+static void dead_plain(zell_object *o, int64_t w) {
+    (void)w;
+    o->type->drop(o);
+    object_free(o);
+}
 
 void zell_release(void *obj) {
     if (!obj) return;
@@ -312,7 +370,17 @@ void zell_release(void *obj) {
     } else {
         o->refcount = 0;
     }
-    if (o->type && o->type->drop) o->type->drop(o);
+    if (o->type && o->type->drop) {
+        /* Children may die in the drop: bound the recursion
+         * (rt_internal.h). An object without a drop frees nothing else,
+         * so it needs no depth accounting. */
+        if (!zell__dead_enter()) {
+            zell__dead_push(dead_plain, o, 0);
+            return;
+        }
+        o->type->drop(o);
+        zell__dead_leave();
+    }
     object_free(o);
 }
 

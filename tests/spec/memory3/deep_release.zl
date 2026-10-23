@@ -1,0 +1,135 @@
+// test: releasing the last reference to a long chain of objects (a 2M-node singly linked list, a 2M-deep tree, a collector-tracked doubly linked list) runs in bounded stack space and keeps Drop() in the recursive order: a parent before its children, siblings in field order
+// status: passing
+// run-flags: --leak-check
+// no-warning: W0001
+namespace spec.memory3.deep_release
+
+import collections
+import io
+
+var dropped = 0
+var inOrder = true
+var lastDropped = 0
+var leafSeq = 0
+var leafOrder = true
+
+@acyclic
+struct Leaf {
+    Id int
+
+    func Drop() {
+        leafSeq += 1
+        if this.Id != leafSeq {
+            leafOrder = false
+        }
+    }
+}
+
+// A pair's fields are released in declaration order: A, B, then the rest
+// of the chain, so the leaves must drop as 1, 2, 3, 4, ... even once the
+// chain is deeper than the runtime's recursion bound.
+@acyclic
+struct Pair {
+    A    *Leaf
+    B    *Leaf
+    Next *Pair
+}
+
+func buildPairs(n int) *Pair {
+    var head *Pair = nil
+    for i in 0..n {
+        var k = n - 1 - i
+        head = new Pair{A: new Leaf{Id: 2*k + 1}, B: new Leaf{Id: 2*k + 2}, Next: head}
+    }
+    return head
+}
+
+func pairCase(n int) {
+    var p = buildPairs(n)
+    var count = 0
+    var q = p
+    for q != nil {
+        count += 1
+        q = q.Next
+    }
+    println("pairs", count)
+}
+
+@acyclic
+struct Node {
+    V    int
+    Next *Node
+
+    func Drop() {
+        dropped += 1
+        // A node's Drop runs before its Next's Drop (the parent first).
+        if lastDropped != 0 && this.V != lastDropped + 1 {
+            inOrder = false
+        }
+        lastDropped = this.V
+    }
+}
+
+@acyclic
+struct Tree {
+    Left  *Tree
+    Right *Tree
+}
+
+func buildList(n int) *Node {
+    var head *Node = nil
+    for i in 0..n {
+        head = new Node{V: n - i, Next: head}
+    }
+    return head
+}
+
+func buildTree(depth int) *Tree {
+    var t *Tree = nil
+    for _ in 0..depth {
+        // Left-leaning: every level hangs off Left, with a leaf on the Right.
+        t = new Tree{Left: t, Right: new Tree{}}
+    }
+    return t
+}
+
+func listCase(n int) {
+    var list = buildList(n)
+    var count = 0
+    var p = list
+    for p != nil {
+        count += 1
+        p = p.Next
+    }
+    println("list", count)
+}
+
+func treeCase(n int) {
+    var t = buildTree(n)
+    var depth = 0
+    var p = t
+    for p != nil {
+        depth += 1
+        p = p.Left
+    }
+    println("tree", depth)
+}
+
+func linkedListCase(n int) {
+    var ll = LinkedList<int>{}
+    for i in 0..n {
+        ll.PushBack(i)
+    }
+    println("linked list", ll.Len())
+}
+
+func main() {
+    const N = 2000000
+    listCase(N)
+    println("dropped", dropped, "in order", inOrder)
+    treeCase(N)
+    linkedListCase(N)
+    pairCase(1000)
+    println("leaves", leafSeq, "in order", leafOrder)
+    println("done")
+}

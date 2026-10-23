@@ -563,9 +563,8 @@ void zell__cycles_retain(zell_object *o) {
 }
 
 /* The count of `o` reached zero (`w`: the word after the decrement). */
-__attribute__((noinline)) static void dead(zell_object *o, int64_t w) {
-    if (w & ZELL_RC_WEAK_FLAG) zell__weak_clear(o);
-    if (o->type && o->type->drop) o->type->drop(o);
+/* Frees a dropped object (`w`: the word after the decrement). */
+static void dead_free(zell_object *o, int64_t w) {
     if (w & ZELL_RC_BUFFERED) {
         /* Recorded by this thread: forget it and free it now. */
         if (unrecord(o)) {
@@ -582,6 +581,41 @@ __attribute__((noinline)) static void dead(zell_object *o, int64_t w) {
     free_counted(o);
 }
 
+/* The deferred form of dead(). */
+static void dead_fin(zell_object *o, int64_t w) {
+    o->type->drop(o);
+    dead_free(o, w);
+}
+
+__attribute__((noinline)) static void dead(zell_object *o, int64_t w) {
+    if (w & ZELL_RC_WEAK_FLAG) zell__weak_clear(o);
+    if (!(o->type && o->type->drop)) {
+        dead_free(o, w);
+        return;
+    }
+    /* The drop may kill a long chain of children: bounded depth
+     * (rt_internal.h). */
+    if (!zell__dead_enter()) {
+        zell__dead_push(dead_fin, o, w);
+        return;
+    }
+    o->type->drop(o);
+    zell__dead_leave();
+    dead_free(o, w);
+}
+
+/* The finalization of the single-threaded fast path of zell__cycles_release
+ * (not recorded, no weak box, no collection running when the count fell). */
+static void dead_plain(zell_object *o, int64_t w) {
+    (void)w;
+    o->type->drop(o);
+    if (!__atomic_load_n(&g_collecting, __ATOMIC_RELAXED)) {
+        zell__object_free(o);
+        return;
+    }
+    free_counted(o);
+}
+
 void zell__cycles_release(zell_object *o) {
     int64_t n = rc_load(o), nn;
     if (!threaded()) {
@@ -593,7 +627,16 @@ void zell__cycles_release(zell_object *o) {
             if (!(nn & (ZELL_RC_BUFFERED | ZELL_RC_WEAK_FLAG)) && !__atomic_load_n(&g_collecting, __ATOMIC_RELAXED)) {
                 /* Not recorded, no weak box, no collection: as without
                  * the collector. */
-                if (o->type && o->type->drop) o->type->drop(o);
+                if (!(o->type && o->type->drop)) {
+                    zell__object_free(o);
+                    return;
+                }
+                if (!zell__dead_enter()) {
+                    zell__dead_push(dead_plain, o, nn);
+                    return;
+                }
+                o->type->drop(o);
+                zell__dead_leave();
                 if (!__atomic_load_n(&g_collecting, __ATOMIC_RELAXED)) {
                     zell__object_free(o);
                     return;

@@ -121,9 +121,24 @@ static inline void store_b(zell_object *o, int64_t b) {
 static ZELL_NORETURN void overflow(void) { zell__panicf("reference count overflow (more than 2^30 references from other threads)"); }
 
 /* The object is dead (count zero, observed by the caller): drop and free. */
+static void dead_fin(zell_object *o, int64_t w) {
+    (void)w;
+    o->type->drop(o);
+    zell__object_free(o);
+}
+
 static void dead(zell_object *o, int64_t w) {
     if (w & ZELL_RC_WEAK_FLAG) zell__weak_clear(o);
-    if (o->type && o->type->drop) o->type->drop(o);
+    if (!(o->type && o->type->drop)) {
+        zell__object_free(o);
+        return;
+    }
+    if (!zell__dead_enter()) {
+        zell__dead_push(dead_fin, o, w);
+        return;
+    }
+    o->type->drop(o);
+    zell__dead_leave();
     zell__object_free(o);
 }
 

@@ -291,6 +291,30 @@ strings, pointers, slices (`zell_slice_release`) and so on. It must **not** free
 are no such fields, `type` may point to a type info whose `drop` is NULL, or
 `type` itself may be NULL.
 
+**Deferred drop (bounded release depth; `src/mem.c`, `src/rt_internal.h`).**
+A `drop` releases the object's children, and a child whose count reaches
+zero is dropped in turn, so releasing the head of a 2M-node linked list
+would recurse `zell_release -> drop -> zell_release ...` two million
+frames deep and overflow the stack. Every finalizer of a dead object (the
+plain release here, the biased and unowned ones in `rc.c`, the collector's
+`dead()` and the single-threaded fast path of `zell__cycles_release` in
+`cycles.c`) brackets its `drop` with `zell__dead_enter` / `zell__dead_leave`
+(inline, one thread-local word: the nesting depth and a "worklist not
+empty" bit). Fewer than 64 finalizations nested on the thread run on the
+stack as before; the one that would nest deeper is not run but *queued*:
+`(finalizer, object, refcount word)` goes onto a thread-local worklist
+(`malloc`ed, freed when drained), and the outermost finalization (depth 1)
+drains it after its own `drop` has returned, each popped entry recursing
+up to the bound again. The frame at the bound reverses the entries its
+children queued, so the stack pops them first-released first and the order
+of `Drop()` calls is exactly the recursive one: a parent before its
+children, siblings and their subtrees in field order (DESIGN.md "Память").
+The only visible difference is when memory is returned: an object queued
+this way is freed after its ancestors' memory, before the outermost release
+returns. Weak references are cleared, as before, at the moment the count
+reaches zero (before queueing). Objects whose type has no `drop` need no
+depth accounting: they free nothing else.
+
 **Allocation (implementation note, not ABI; `src/heap.c`, fast paths in
 `src/heap.h`).** Objects of at most 16 KB (header included) are *small*:
 rounded up to one of 36 size classes (16-byte steps to 128, then four per
