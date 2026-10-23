@@ -326,8 +326,8 @@ pub(crate) fn absolute_tokens(a: &Analysis, file: usize) -> Vec<AbsToken> {
         while start < end {
             let line_end = text[start..end].find('\n').map_or(end, |i| start + i);
             if line_end > start {
-                let (line, col) = f.utf16_position(start as u32);
-                let len: u32 = text[start..line_end].trim_end_matches('\r').encode_utf16().count() as u32;
+                let (line, col) = crate::encoding::line_col(f, start as u32);
+                let len: u32 = crate::encoding::len(text[start..line_end].trim_end_matches('\r'));
                 if len > 0 && out.last().is_none_or(|p: &AbsToken| (p.line, p.col) < (line, col)) {
                     out.push(AbsToken { line, col, len, ty, mods });
                 }
@@ -345,7 +345,7 @@ pub(crate) fn absolute_tokens(a: &Analysis, file: usize) -> Vec<AbsToken> {
 pub(crate) fn folding_ranges(f: &SourceFile) -> Vec<FoldingRange> {
     let mut diags = Diagnostics::new();
     let (tokens, comments) = lexer::lex_with_comments(&f.text, &mut diags);
-    let line = |o: u32| f.utf16_position(o).0;
+    let line = |o: u32| crate::encoding::line_col(f, o).0;
     let mut out = Vec::new();
     let mut stack: Vec<u32> = Vec::new();
     let mut import_run: Option<(u32, u32)> = None;

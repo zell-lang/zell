@@ -33,6 +33,7 @@
 //! (formatting, folding, selection ranges) are answered at once.
 
 mod assist;
+mod encoding;
 mod features;
 mod files;
 mod handlers;
@@ -97,6 +98,8 @@ struct ClientCaps {
     work_done_progress: bool,
     pull_diagnostics: bool,
     diagnostic_refresh: bool,
+    /// `workspace.workspaceEdit.documentChanges`: edits carry document versions.
+    document_changes: bool,
 }
 
 impl ClientCaps {
@@ -106,6 +109,7 @@ impl ClientCaps {
             work_done_progress: c.window.as_ref().and_then(|w| w.work_done_progress).unwrap_or(false),
             pull_diagnostics: c.text_document.as_ref().is_some_and(|t| t.diagnostic.is_some()),
             diagnostic_refresh: c.workspace.as_ref().and_then(|w| w.diagnostic.as_ref()).and_then(|d| d.refresh_support).unwrap_or(false),
+            document_changes: c.workspace.as_ref().and_then(|w| w.workspace_edit.as_ref()).and_then(|e| e.document_changes).unwrap_or(false),
         }
     }
 }
@@ -129,7 +133,10 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn std::error::Error + Sen
     let params: InitializeParams = serde_json::from_value(params)?;
     let caps = ClientCaps::of(&params);
     let (mode, advertise_pull) = diag_mode(params.initialization_options.as_ref(), caps);
+    let enc = encoding::Encoding::negotiate(&params);
+    encoding::set(enc);
     let mut server_caps = capabilities();
+    server_caps.position_encoding = Some(enc.kind());
     if !advertise_pull {
         server_caps.diagnostic_provider = None;
     }
@@ -151,9 +158,16 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn std::error::Error + Sen
     result
 }
 
+/// The main loop. Lifecycle per LSP 3.17: after `shutdown` every request
+/// is answered with `InvalidRequest` and notifications are dropped; `exit`
+/// ends the loop, with an error (process exit code 1) when no `shutdown`
+/// came first.
 fn event_loop(connection: &Connection, server: &mut Server, events: &Receiver<Event>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut shut_down = false;
     loop {
-        server.maybe_start_analysis();
+        if !shut_down {
+            server.maybe_start_analysis();
+        }
         let tick = match server.next_deadline() {
             Some(d) => crossbeam_channel::at(d),
             None => crossbeam_channel::never(),
@@ -162,28 +176,30 @@ fn event_loop(connection: &Connection, server: &mut Server, events: &Receiver<Ev
             recv(connection.receiver) -> msg => {
                 let Ok(msg) = msg else { return Ok(()) };
                 match msg {
-                    Message::Request(req) => {
-                        if req.method == request::Shutdown::METHOD {
-                            if let Some(f) = &server.inflight {
-                                f.cancel.store(true, Ordering::Relaxed);
-                            }
-                        }
-                        if connection.handle_shutdown(&req)? {
-                            return Ok(());
-                        }
-                        server.on_request(req);
+                    Message::Request(req) if shut_down => {
+                        server.reply_err(req.id, lsp_server::ErrorCode::InvalidRequest as i32, "the server is shutting down");
                     }
-                    Message::Notification(n) => {
-                        if n.method == notification::Exit::METHOD {
-                            return Ok(());
+                    Message::Request(req) if req.method == request::Shutdown::METHOD => {
+                        if let Some(f) = &server.inflight {
+                            f.cancel.store(true, Ordering::Relaxed);
                         }
-                        server.handle_notification(n);
+                        for r in std::mem::take(&mut server.pending) {
+                            server.reply_err(r.id, lsp_server::ErrorCode::RequestCanceled as i32, "the server is shutting down");
+                        }
+                        server.reply(req.id, ());
+                        shut_down = true;
                     }
+                    Message::Request(req) => server.on_request(req),
+                    Message::Notification(n) if n.method == notification::Exit::METHOD => {
+                        return if shut_down { Ok(()) } else { Err("exit without shutdown".into()) };
+                    }
+                    Message::Notification(_) if shut_down => {}
+                    Message::Notification(n) => server.handle_notification(n),
                     Message::Response(_) => {}
                 }
             }
             recv(events) -> ev => {
-                if let Ok(ev) = ev {
+                if let (Ok(ev), false) = (ev, shut_down) {
                     server.on_event(ev);
                 }
             }
@@ -312,6 +328,8 @@ struct Server {
     parked: Vec<(RequestId, WorkspaceDiagnosticParams)>,
     /// Texts of open documents (the editor's copy; parsed on flush).
     docs: HashMap<String, String>,
+    /// Versions of open documents (from `didOpen` / `didChange`).
+    doc_versions: HashMap<String, i32>,
     /// Open documents whose text the session has not parsed yet.
     unflushed: HashSet<String>,
     roots: Vec<PathBuf>,
@@ -379,6 +397,7 @@ impl Server {
             pending: VecDeque::new(),
             parked: Vec::new(),
             docs: HashMap::new(),
+            doc_versions: HashMap::new(),
             unflushed: HashSet::new(),
             roots: Vec::new(),
             uris: HashMap::new(),
@@ -816,6 +835,7 @@ impl Server {
                     self.discover_for(&path);
                 }
                 self.uris.insert(key.clone(), p.text_document.uri);
+                self.doc_versions.insert(key.clone(), p.text_document.version);
                 self.docs.insert(key.clone(), p.text_document.text);
                 self.unflushed.insert(key);
                 self.touch();
@@ -824,6 +844,7 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params) else { return };
                 let key = path_of(&p.text_document.uri);
                 let Some(text) = self.docs.get_mut(&key) else { return };
+                self.doc_versions.insert(key.clone(), p.text_document.version);
                 for change in p.content_changes {
                     sync::apply_change(text, change);
                 }
@@ -882,6 +903,7 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else { return };
                 let key = path_of(&p.text_document.uri);
                 self.tokens.remove(&key);
+                self.doc_versions.remove(&key);
                 if self.docs.remove(&key).is_none() {
                     return;
                 }
@@ -944,11 +966,9 @@ impl Server {
     }
 }
 
-/// LSP range of a byte span.
+/// LSP range of a byte span (in the negotiated position encoding).
 pub(crate) fn range(f: &zell::span::SourceFile, s: Span) -> Range {
-    let (l1, c1) = f.utf16_position(s.start);
-    let (l2, c2) = f.utf16_position(s.end.max(s.start));
-    Range { start: Position { line: l1, character: c1 }, end: Position { line: l2, character: c2 } }
+    Range { start: encoding::position(f, s.start), end: encoding::position(f, s.end.max(s.start)) }
 }
 
 /// Recursively collects `.zl` files, skipping hidden and build directories.

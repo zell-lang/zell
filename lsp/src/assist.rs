@@ -6,7 +6,7 @@
 use crate::range;
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, DocumentHighlight, DocumentHighlightKind, Documentation, InlayHint, InlayHintKind, InlayHintLabel, Location,
-    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range, SignatureHelp, SignatureInformation, SymbolInformation, TextEdit, Url,
+    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Range, SignatureHelp, SignatureInformation, SymbolInformation, TextEdit, Url,
     WorkspaceEdit,
 };
 use zell::ast::{self, Expr, ExprKind, Stmt, StmtKind};
@@ -228,8 +228,8 @@ fn param_names(sig: &str) -> Vec<String> {
     param_ranges(sig).into_iter().map(|(a, b)| sig[a..b].split_whitespace().next().unwrap_or("").to_string()).collect()
 }
 
-fn utf16_len(s: &str) -> u32 {
-    s.encode_utf16().count() as u32
+fn label_len(s: &str) -> u32 {
+    crate::encoding::len(s)
 }
 
 /// The innermost unclosed `(` before `off` and the number of top-level
@@ -348,7 +348,7 @@ pub(crate) fn signature_help(a: &Analysis, file: usize, off: u32) -> Option<Sign
     let ranges = param_ranges(&label);
     let parameters: Vec<ParameterInformation> = ranges
         .iter()
-        .map(|&(s, e)| ParameterInformation { label: ParameterLabel::LabelOffsets([utf16_len(&label[..s]), utf16_len(&label[..e])]), documentation: None })
+        .map(|&(s, e)| ParameterInformation { label: ParameterLabel::LabelOffsets([label_len(&label[..s]), label_len(&label[..e])]), documentation: None })
         .collect();
     let variadic = ranges.last().is_some_and(|&(s, e)| label[s..e].contains("..."));
     let mut active = commas;
@@ -452,10 +452,7 @@ pub(crate) fn inlay_hints(a: &Analysis, file: usize, within: Span, settings: Hin
         }
     }
     let inside = |s: Span| s.start >= within.start && s.end <= within.end;
-    let pos = |o: u32| {
-        let (l, c) = f.utf16_position(o);
-        Position { line: l, character: c }
-    };
+    let pos = |o: u32| crate::encoding::position(f, o);
     let mut out = Vec::new();
     if settings.types {
         for id in type_spots {
@@ -660,8 +657,8 @@ pub(crate) fn highlights(a: &Analysis, file: usize, off: u32) -> Option<Vec<Docu
 
 /// Byte span of an LSP range.
 pub(crate) fn span_of(f: &SourceFile, r: &Range) -> Span {
-    let s = f.utf16_offset(r.start.line, r.start.character);
-    let e = f.utf16_offset(r.end.line, r.end.character);
+    let s = crate::encoding::offset(f, r.start);
+    let e = crate::encoding::offset(f, r.end);
     Span::new(s.min(e), e.max(s))
 }
 
