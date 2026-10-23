@@ -42,7 +42,11 @@ ifneq ($(CROSS),)
 # same TLS model (native, not emutls) as the code LLVM generates for Zell.
 ifeq ($(HAVE_CLANG),yes)
 CC      := $(CLANG) -target $(CROSS)
-AR      := $(shell command -v llvm-ar-18 >/dev/null 2>&1 && echo llvm-ar-18 || (command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo $(CROSS)-ar))
+# The archiver next to the clang in use first (Homebrew's llvm@18 is keg-only:
+# its llvm-ar is not on PATH), then llvm-ar-18 / llvm-ar on PATH, then the
+# host's own ar on macOS (Apple ar handles Mach-O), else a binutils cross ar.
+AR      := $(shell for a in "$(dir $(CLANG))llvm-ar" llvm-ar-18 llvm-ar; do command -v "$$a" >/dev/null 2>&1 && { echo "$$a"; exit 0; }; done; \
+             if [ "$$(uname -s)" = Darwin ] && [ -n "$(findstring apple-darwin,$(CROSS))" ]; then echo ar; else echo $(CROSS)-ar; fi)
 else
 CC      := $(CROSS)-gcc
 AR      := $(CROSS)-ar
