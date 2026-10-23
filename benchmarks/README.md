@@ -882,3 +882,27 @@ compare in `rtGet`, is the next step), `fanout_fanin`'s pool phase and
 ## json_codec on .NET
 
 `benchmarks/json_codec/dotnet/` is the same program on System.Text.Json (typed path through a `[JsonSerializable]` source-generated context, schema-less path through `JsonDocument`/`JsonElement`, net10.0, workstation GC, invariant globalization). `dotnet/run.sh` publishes once (`dotnet publish -c Release -r linux-x64 --self-contained false -o bin`) and runs it with the same `SCALE`, `JSON_DOC_BYTES` and `JSON_DOC_FILE` variables as the others. `benchmarks/json_codec/compare.sh` (`ZELL=... JSON_DOC_FILE=... ./compare.sh`) builds and runs Zell, Go and .NET once each on one document and prints the checksum and phase lines side by side, then states whether the checksum lines are identical. The .NET value-format phase writes sorted keys and shortest-round-trip numbers to match Go's `json.Marshal(any)` byte for byte.
+
+## Soak and fuzz
+
+Long-running stability checks (not part of `cargo test`):
+
+- `scripts/soak-http.sh` builds `benchmarks/web_api/server.zl` (the `web`
+  framework, JSON bodies) with `--release`, starts it in the main shell
+  (killed by PID on exit), and loops the Go load generator `web_api/go/load`
+  (`CONNS` connections, `BATCH` requests per run) for `DURATION` seconds
+  (default 3600), sampling the server's VmRSS every `SAMPLE` seconds
+  (default 10) into a CSV (`CSV`, default `soak-http.csv`: timestamp,
+  rss_kb, requests, errors). The server exposes no `diag` metrics, so only
+  RSS is tracked. Exit 1 when the server died, any request failed (a status
+  or body the load tool does not accept, or a failed load run), or the
+  maximum RSS of the last quarter of the samples exceeds the maximum of the
+  first quarter by more than `MAX_GROWTH_PCT` (default 20). Smoke test:
+  `DURATION=30 SAMPLE=2 scripts/soak-http.sh`.
+- `make -C runtime fuzz-json` builds the runtime and the libFuzzer target
+  `runtime/tests/fuzz/fuzz_json.c` (JSON parse, node walk, writer round
+  trip) with `-fsanitize=fuzzer,address,undefined` in `runtime/build/fuzz`,
+  seeds it from `runtime/tests/fuzz/corpus/json/` and runs `FUZZ_SECONDS`
+  (default 300) with `-max_len=65536`. A crash input lands in
+  `runtime/build/fuzz/`; keep reproducers in `runtime/tests/fuzz/crashes/`.
+  `FUZZ_STANDALONE=1` replays the corpus without libFuzzer.

@@ -513,3 +513,5 @@ TestX(t *testing.T)` (и `@test func X()`), бенчмарки `@bench func Benc
 5. Semantic tokens, inlay hints, completion, signature help, code actions. — сделано.
 6. DWARF в кодогенерации, DAP-адаптер.
 7. IDEA-плагин: Grammar-Kit PSI + LSP-клиент.
+
+Fuzzing и soak-тесты рантайма: `make -C runtime fuzz-json` (libFuzzer + ASan/UBSan для `encoding.json`) и `scripts/soak-http.sh` (RSS и ошибки HTTP-сервера под нагрузкой); см. раздел "Soak and fuzz" в `benchmarks/README.md`.

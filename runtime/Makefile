@@ -139,7 +139,7 @@ TESTS   := $(patsubst tests/%.c,$(BUILD)/tests/%,$(wildcard tests/test_*.c))
 # sanitizer allocator lock inherited from a worker thread (intermittent hang).
 TASK_TEST_ENV ?=
 
-.PHONY: all test clean asan tsan test-wine test-cross
+.PHONY: all test clean asan tsan test-wine test-cross fuzz-json
 
 ifeq ($(CROSS)$(LTO),1)
 all: $(LIB)
@@ -263,3 +263,22 @@ tsan:
 	  TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(CURDIR)/tests/tsan.supp" \
 	    ZELL_NO_BACKTRACE=1 ./build/tsan/tests/$$t; \
 	done; echo "TSAN TESTS PASSED"
+
+# libFuzzer target for encoding.json (tests/fuzz/fuzz_json.c) under ASan+UBSan,
+# the runtime rebuilt with the same sanitizers in build/fuzz. The corpus
+# (tests/fuzz/corpus/json) is read; new inputs go to build/fuzz/corpus-new,
+# crashes to build/fuzz/ (move reproducers to tests/fuzz/crashes/).
+# FUZZ_SECONDS (default 300). Needs clang with -fsanitize=fuzzer; otherwise
+# FUZZ_STANDALONE=1 builds a driver that only replays the corpus files.
+FUZZ_SECONDS ?= 300
+FUZZ_SAN := -fsanitize=address,undefined -fno-sanitize-recover=undefined
+fuzz-json:
+	$(MAKE) BUILD=build/fuzz CC=clang CFLAGS_EXTRA="$(FUZZ_SAN) -fno-omit-frame-pointer" build/fuzz/libzell_rt.a
+	mkdir -p build/fuzz/corpus-new
+ifeq ($(FUZZ_STANDALONE),1)
+	clang $(FUZZ_SAN) -g -O1 -D_GNU_SOURCE -DFUZZ_STANDALONE -Iinclude tests/fuzz/fuzz_json.c build/fuzz/libzell_rt.a -lpthread -lm -rdynamic -o build/fuzz/fuzz_json
+	ASAN_OPTIONS=detect_leaks=0 ./build/fuzz/fuzz_json tests/fuzz/corpus/json/*
+else
+	clang -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 -D_GNU_SOURCE -Iinclude tests/fuzz/fuzz_json.c build/fuzz/libzell_rt.a -lpthread -lm -rdynamic -o build/fuzz/fuzz_json
+	ASAN_OPTIONS=detect_leaks=0 ZELL_NO_BACKTRACE=1 ./build/fuzz/fuzz_json -max_len=65536 -max_total_time=$(FUZZ_SECONDS) -artifact_prefix=build/fuzz/ build/fuzz/corpus-new tests/fuzz/corpus/json
+endif
