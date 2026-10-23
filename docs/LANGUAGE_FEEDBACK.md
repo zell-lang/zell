@@ -77,3 +77,18 @@ request id / tracing / metrics middleware all worked as documented.
     exists. Editing a document means converting to one's own tree.
 24. **The default logger prints error traces with absolute paths over several
     lines** — noisy in service logs; relative paths (or one line) by default.
+
+## Decisions (2026-10-23, maintainer)
+
+The spec-level items are decided as follows; they go into DESIGN.md, the
+EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
+(the IDEA plugin's lexer mirrors the automatic `;` rule and must follow #2):
+
+| # | decision |
+|---|---|
+| 1 | **Comma-ok map lookup**, Go semantics: `var v, ok = m[k]` / `v, ok := m[k]`; `ok` is `bool`, `v` the zero value when absent. No `in` operator. |
+| 2 | **A line starting with `.` continues the previous line**: the lexer inserts no automatic `;` before a leading `.` (method chains may break before the dot). |
+| 3 | **Keywords are allowed as attribute argument names** (`@Conf(enum: "a,b")`). |
+| 4 | **Attribute visibility stays as is**: a public attribute type is capitalised (`@zconf.Conf`); documented, not changed. |
+| 20 | **Type aliases**: `type Name = Type` is a transparent alias (no new nominal type), usable in the stdlib too. |
+| 21 | **`in` becomes a contextual keyword**: a keyword only in `for … in …`; an ordinary identifier elsewhere. |
