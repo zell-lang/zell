@@ -323,21 +323,30 @@ static void gcm_batch_lengths(void) {
 
 TEST(aes_gcm) {
     for (int x = 0; x < 256; x++) assert(zell__aes_sbox_ct((uint8_t)x) == sbox_ref((uint8_t)x));
-    uint8_t d1[32], d2[32];
-    int have_ni = zell__cpu_has_aesni();
+    uint8_t d1[32], d2[32], d3[32];
+    int have_ni = zell__cpu_has_aesni(), have_vaes = zell__cpu_has_vaes();
     aes_vectors();
     gcm_vectors();
     gcm_batch_lengths();
     gcm_digest(d1);
+    /* 128-bit AES-NI GCM (same as the run above when there is no VAES) */
+    zell__vaes_force_off(1);
+    assert(!zell__cpu_has_vaes());
+    gcm_vectors();
+    gcm_batch_lengths();
+    gcm_digest(d3);
+    zell__vaes_force_off(0);
     zell__aes_force_portable(1);
-    assert(!zell__cpu_has_aesni());
+    assert(!zell__cpu_has_aesni() && !zell__cpu_has_vaes());
     aes_vectors();
     gcm_vectors();
     gcm_batch_lengths();
     gcm_digest(d2);
     zell__aes_force_portable(0);
     assert(memcmp(d1, d2, 32) == 0);
-    printf("       (AES-NI %s)\n", have_ni ? "available: both paths tested" : "not available: portable path only");
+    assert(memcmp(d1, d3, 32) == 0);
+    printf("       (AES-NI %s; VAES %s)\n", have_ni ? "available: both paths tested" : "not available: portable path only",
+           have_vaes ? "available: tested" : "not available");
 }
 
 static double gcm_mbps(int portable) {

@@ -10,6 +10,11 @@
  *    "holes" (no secret-indexed tables), after BearSSL's ghash_ctmul64.
  *  - x86-64 AES-NI + PCLMULQDQ through intrinsics, chosen at run time by
  *    cpuid (zell__cpu_has_aesni; ZELL_NO_AESNI=1 forces the portable path).
+ *    GCM runs 8 CTR blocks per batch with an aggregated 8-block GHASH; with
+ *    VAES + VPCLMULQDQ (zell__cpu_has_vaes; ZELL_NO_VAES=1 disables) the
+ *    batch uses 256-bit registers, two blocks per instruction. These
+ *    functions carry __attribute__((target)); the file itself is compiled
+ *    for baseline x86-64.
  *
  * The key schedule is always computed by the portable code (constant time)
  * and its byte round keys are what AESENC consumes. Only encryption is
@@ -478,6 +483,88 @@ NI_TARGET static void ni_ctr(const __m128i *rk, unsigned nr, uint8_t ctr[16], co
     zell__st32be(ctr + 12, c);
 }
 
+#if !(defined(_WIN32) && !defined(__clang__))
+/* VAES + VPCLMULQDQ: the same 8-block batches with two blocks per 256-bit
+ * register, so AESENC and PCLMULQDQ (which share execution ports on some
+ * CPUs) take half the instructions. Chosen when zell__cpu_has_vaes(). Not
+ * built by GCC for Windows: it does not align the stack for 32-byte AVX
+ * spills there (GCC bug 54412). */
+#define ZELL_HAVE_VAES 1
+#include <immintrin.h>
+
+#define VAES_TARGET __attribute__((target("aes,pclmul,sse4.1,ssse3,avx,avx2,vaes,vpclmulqdq")))
+
+VAES_TARGET static inline __m256i vaes_pair(__m128i lo, __m128i hi) {
+    return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
+}
+
+/* CTR over the whole 128-byte chunks [0, bulk) with counters c, c+1, ...,
+ * and their aggregated GHASH folded into y exactly as the 128-bit loop in
+ * ni_gcm does (ciphertext: out when enc, in otherwise). Returns y. */
+VAES_TARGET static __m128i vaes_gcm_bulk(const __m128i *rk, unsigned nr, __m128i base, uint32_t c,
+                                         const uint8_t *in, uint8_t *out, size_t bulk, __m128i y,
+                                         const ni_hkeys *hk, bool enc) {
+    __m256i kr[15], hp[4], hm[4];
+    for (unsigned r = 0; r <= nr; r++) kr[r] = _mm256_broadcastsi128_si256(rk[r]);
+    /* pair p holds blocks 2p (low lane, key H^(8-2p)) and 2p+1 (H^(7-2p)) */
+    for (int p = 0; p < 4; p++) {
+        hp[p] = vaes_pair(hk->hp[7 - 2 * p], hk->hp[6 - 2 * p]);
+        hm[p] = vaes_pair(hk->hk[7 - 2 * p], hk->hk[6 - 2 * p]);
+    }
+    const __m256i bswap =
+        _mm256_broadcastsi128_si256(_mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+    /* encryption hashes the previous chunk's ciphertext, kept in registers */
+    __m256i prev[4] = { _mm256_setzero_si256(), _mm256_setzero_si256(), _mm256_setzero_si256(),
+                        _mm256_setzero_si256() };
+    for (size_t i = 0; i < bulk; i += 128, c += 8) {
+        __m256i b[4];
+#pragma GCC unroll 4
+        for (int p = 0; p < 4; p++)
+            b[p] = _mm256_xor_si256(
+                vaes_pair(_mm_insert_epi32(base, (int)__builtin_bswap32(c + 2 * (uint32_t)p), 3),
+                          _mm_insert_epi32(base, (int)__builtin_bswap32(c + 2 * (uint32_t)p + 1), 3)),
+                kr[0]);
+        unsigned r = 1;
+        if (!enc || i) {
+            __m256i lo = _mm256_setzero_si256(), hi = lo, mid = lo;
+#pragma GCC unroll 4
+            for (; r <= 4; r++) {
+#pragma GCC unroll 4
+                for (int p = 0; p < 4; p++) b[p] = _mm256_aesenc_epi128(b[p], kr[r]);
+                int p = (int)(r & 3);   /* pairs 1, 2, 3, then 0, which needs y */
+                __m256i x = _mm256_shuffle_epi8(
+                    enc ? prev[p] : _mm256_loadu_si256((const __m256i *)(in + i + 32 * p)), bswap);
+                if (p == 0) x = _mm256_xor_si256(x, vaes_pair(y, _mm_setzero_si128()));
+                lo = _mm256_xor_si256(lo, _mm256_clmulepi64_epi128(x, hp[p], 0x00));
+                hi = _mm256_xor_si256(hi, _mm256_clmulepi64_epi128(x, hp[p], 0x11));
+                mid = _mm256_xor_si256(
+                    mid, _mm256_clmulepi64_epi128(_mm256_xor_si256(x, _mm256_shuffle_epi32(x, 0x4E)), hm[p], 0x00));
+            }
+            __m128i l = _mm_xor_si128(_mm256_castsi256_si128(lo), _mm256_extracti128_si256(lo, 1));
+            __m128i h = _mm_xor_si128(_mm256_castsi256_si128(hi), _mm256_extracti128_si256(hi, 1));
+            __m128i m = _mm_xor_si128(_mm256_castsi256_si128(mid), _mm256_extracti128_si256(mid, 1));
+            m = _mm_xor_si128(m, _mm_xor_si128(l, h));
+            l = _mm_xor_si128(l, _mm_slli_si128(m, 8));
+            h = _mm_xor_si128(h, _mm_srli_si128(m, 8));
+            y = ni_reduce(l, h);
+        }
+        for (; r < nr; r++) {
+#pragma GCC unroll 4
+            for (int p = 0; p < 4; p++) b[p] = _mm256_aesenc_epi128(b[p], kr[r]);
+        }
+#pragma GCC unroll 4
+        for (int p = 0; p < 4; p++) {
+            b[p] = _mm256_xor_si256(_mm256_aesenclast_epi128(b[p], kr[nr]),
+                                    _mm256_loadu_si256((const __m256i *)(in + i + 32 * p)));
+            _mm256_storeu_si256((__m256i *)(out + i + 32 * p), b[p]);
+            prev[p] = b[p];
+        }
+    }
+    if (enc && bulk) y = ni_ghash8(y, hk, out + bulk - 128);
+    return y;
+}
+#endif
+
 /* Full GCM in the AES-NI path; returns the tag in tag[16]. Whole 128-byte
  * chunks go through 8 interleaved AES pipelines and an 8-block aggregated
  * GHASH (encryption hashes the previous chunk's ciphertext while the next
@@ -496,6 +583,12 @@ NI_TARGET static void ni_gcm(const zell_gcm_ctx *c, const uint8_t nonce[12], con
     __m128i base = _mm_loadu_si128((const __m128i *)ctr);
     uint32_t cnt = 2;
     size_t bulk = n & ~(size_t)127;
+#ifdef ZELL_HAVE_VAES
+    if (bulk && zell__cpu_has_vaes()) {
+        y = vaes_gcm_bulk(rk, nr, base, cnt, in, out, bulk, y, &hk, enc);
+        cnt += (uint32_t)(bulk / 16);
+    } else
+#endif
     if (enc) {
         for (size_t i = 0; i < bulk; i += 128, cnt += 8)
             y = ni_ctr8_ghash8(rk, nr, base, cnt, in + i, out + i, y, &hk, i ? out + i - 128 : NULL);

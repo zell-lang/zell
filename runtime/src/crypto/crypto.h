@@ -38,6 +38,12 @@ ZELL_CRYPTO_HIDDEN void zell__aes_force_portable(int on);
 ZELL_CRYPTO_HIDDEN bool zell__cpu_has_shani(void);
 /* Forces the portable SHA-256 path on (1) or back to auto-detection (0). */
 ZELL_CRYPTO_HIDDEN void zell__sha_force_portable(int on);
+/* VAES + VPCLMULQDQ + AVX2 with OS support for YMM state, on top of
+ * zell__cpu_has_aesni (AES-GCM processes two blocks per instruction);
+ * ZELL_NO_VAES=1 (or ZELL_NO_AESNI=1) disables it. */
+ZELL_CRYPTO_HIDDEN bool zell__cpu_has_vaes(void);
+/* Forces the 128-bit AES-NI GCM path (1) or back to auto-detection (0). */
+ZELL_CRYPTO_HIDDEN void zell__vaes_force_off(int on);
 
 static inline uint32_t zell__ld32be(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
