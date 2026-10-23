@@ -1,5 +1,7 @@
 find 3 error: not found: x
 busy 75 error: busy
+wrapped 3 error: wrapped: not found: y
+wrap2 75 error: outer: inner: busy
 fail 1 error: boom
 ran
 ok 0 

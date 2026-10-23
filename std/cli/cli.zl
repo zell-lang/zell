@@ -22,12 +22,13 @@
 // default is the struct field's default value, or @flag(default: "text");
 // unset flags fall back to their env variable, then to that default. -h/--help on any command and `help [command]`
 // print help; --version prints the version. Exit codes of App.Run: 0 ok,
-// 1 the command failed (or the error's ExitCode() when it implements
-// ExitCoder), 2 usage error.
+// 1 the command failed (or the ExitCode() of the first error in its chain
+// of wrappers that implements ExitCoder), 2 usage error.
 namespace cli
 
 // An error returned by a command's Run that chooses the process exit code
-// of App.Run (its message is still printed): `func ExitCode() int`.
+// of App.Run (its message is still printed): `func ExitCode() int`. Also
+// found through wrappers (`return find(x)?("find")` keeps the code).
 interface ExitCoder {
     func ExitCode() int
 }
@@ -289,8 +290,14 @@ struct App {
         var run = cmd.Run
         try run(ctx) catch err {
             eprintln(this.Errors, "error: " + err.Message())
-            switch err {
-                case ExitCoder e: return e.ExitCode()
+            // The first ExitCoder in the chain of wrappers (`?("ctx")`,
+            // errors.Wrap, Unwrap() methods) chooses the code.
+            var cause = err
+            for cause != nil {
+                switch cause {
+                    case ExitCoder e: return e.ExitCode()
+                }
+                cause = errors.Unwrap(cause)
             }
             return 1
         }

@@ -63,10 +63,9 @@ request id / tracing / metrics middleware all worked as documented.
 18. **`zell test` leaks an internal symbol**: in a package with `src/main.zl` it
     prints `warning[L0007]: function zellUserMain__ is never used` — the lint
     must skip compiler-generated names.
-19. **`cli.App` cannot be redirected or given exit codes**: `Run` returns only
-    0/1/2, help and group text go to stdout via `io.print`
-    (`std/cli/cli.zl:199,274,315`), a command error is always status 1 plus a
-    printed `error: …`. Wanted: `App.Out/Errors` writers and typed exit codes.
+19. **Fixed:** `cli.App.Out/Errors` writers and `cli.ExitCoder` (2026-10-23);
+    since 2026-10-24 `Run` finds the `ExitCoder` through wrappers too
+    (`lookup(x)?("ctx")`, `errors.Wrap`, `Unwrap()` methods).
 20. **No type aliases** (`type Op = func(*Node) string!`): long function types
     are repeated at every use. Spec decision.
 21. **`in` is a reserved word** — `var in = …` fails; common flag name. Spec
