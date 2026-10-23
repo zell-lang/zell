@@ -140,6 +140,8 @@ struct App {
     Action func(*Context) void!
     // Where error messages go (nil: stderr).
     Errors io.Writer
+    // Where help and version text go (nil: stdout).
+    Out io.Writer
 
     // Parses args (os.Args() form: args[0] is the program) and runs the
     // selected command. Returns the process exit code.
@@ -196,11 +198,11 @@ struct App {
                 continue
             }
             if a == "-h" || a == "--help" {
-                io.print(helpText(*this, cmd, path, flags))
+                outPrint(this.Out, helpText(*this, cmd, path, flags))
                 return 0
             }
             if a == "--version" && this.Version != "" {
-                io.println(this.Name + " " + this.Version)
+                outPrint(this.Out, this.Name + " " + this.Version + "\n")
                 return 0
             }
             var name = a
@@ -271,7 +273,7 @@ struct App {
         }
         if cmd.Run == nil {
             if len(cmd.Commands) > 0 {
-                io.print(helpText(*this, cmd, path, flags))
+                outPrint(this.Out, helpText(*this, cmd, path, flags))
                 return 2
             }
             return 0
@@ -312,7 +314,7 @@ struct App {
                 flags = append(flags, f)
             }
         }
-        io.print(helpText(*this, cmd, path, flags))
+        outPrint(this.Out, helpText(*this, cmd, path, flags))
     }
 
     // The help text of the command at path (names after the app name).
@@ -388,6 +390,16 @@ func checkValue(f Flag, value string) string {
         _ = ok
     }
     return ""
+}
+
+func outPrint(w io.Writer, s string) {
+    if w == nil {
+        io.print(s)
+        return
+    }
+    try {
+        _ = io.WriteString(w, s)?
+    } catch err {}
 }
 
 func eprintln(w io.Writer, msg string) {

@@ -1,0 +1,17 @@
+--help -> 0
+out: true a tool
+errors: 
+--version -> 0
+out: false tool 1.2.3
+errors: 
+found
+find -> 0
+out: false 
+errors: 
+nope -> 2
+out: false 
+errors: error: unknown command "nope"
+Run 'tool --help' for usage.
+fail -> 1
+out: false 
+errors: error: boom
