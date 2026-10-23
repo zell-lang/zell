@@ -110,3 +110,16 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     (or struct fields of forced templates) lazily, on first use of the
     interface. `zell check hello.zl` still takes 0.05 s, so this is about
     pruning/intent, not speed.
+
+27. **Asynchronous destructors (`await using` analogue).** Synchronous
+    `using` is already covered by `Drop` (DESIGN.md "Деструкторы"): no
+    `defer f.Close()` is needed, and the examples should stop writing it.
+    Proposed design when a `Close() Task<…>` first appears in the stdlib:
+    `async func Drop()` allowed on a type; the compiler inserts `await
+    this.Drop()` at the release point when the value dies inside an async
+    function (block end, `?`, `return`, `break`); dying in a synchronous
+    context (sync function, field of a non-async-owned object, slice) is a
+    compile error, like copying a `Drop` value today; `Drop` still returns
+    no error — callers who want the close error call `await x.Close()?`
+    first and `Drop` is then a no-op. Not needed yet: every stdlib `Close()`
+    is synchronous.
