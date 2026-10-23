@@ -1,0 +1,68 @@
+// test: `switch err { case SomeInterface x: }` matches when the error's dynamic type implements the interface (like a switch over `any`); struct cases still match exactly, the first matching case wins
+// status: passing
+// run-flags: --leak-check
+namespace spec.errors2.switch_interface_case
+
+import io
+
+interface ExitCoder {
+    func ExitCode() int
+}
+
+interface Temporary {
+    func Temporary() bool
+}
+
+struct UsageError {
+    Msg string
+    func Message() string { return "usage: " + this.Msg }
+    func ExitCode() int { return 2 }
+}
+
+struct NetError {
+    Op string
+    func Message() string { return "net: " + this.Op }
+    func Temporary() bool { return true }
+}
+
+struct PlainError {
+    func Message() string { return "plain" }
+}
+
+func describe(err error) {
+    switch err {
+        case ExitCoder e: println("exit", e.ExitCode())
+        case Temporary t: println("temporary", t.Temporary())
+        default: println("other", err.Message())
+    }
+}
+
+func fail(kind int) int! {
+    switch kind {
+        case 0: return UsageError{Msg: "bad flag"}
+        case 1: return NetError{Op: "dial"}
+        case 2: return PlainError{}
+        case 3: return error("boxed string")
+    }
+    return 7
+}
+
+func main() {
+    for k in 0..5 {
+        var v = try fail(k) catch err {
+            print(k, " ")
+            describe(err)
+            continue
+        }
+        println(k, "value", v)
+    }
+    // A pointer to a struct boxed into error matches too.
+    var p error = &UsageError{Msg: "ptr"}
+    describe(p)
+    // Struct cases before interface cases: the first matching case wins.
+    var u error = UsageError{Msg: "x"}
+    switch u {
+        case UsageError e: println("struct case", e.Msg)
+        case ExitCoder c: println("interface case", c.ExitCode())
+    }
+}

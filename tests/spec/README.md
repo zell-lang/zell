@@ -705,6 +705,12 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     nor are aliases in the Zell-source stdlib (lazily instantiated
     templates). `type` stays an ordinary name elsewhere.
     — `structs/type_alias`, `structs/type_alias_cycle_error`, `structs/type_alias_attr_error`
+84. **Interface cases on an `error` subject** (`DESIGN.md` "switch"):
+    `switch err { case I x: }` tests the error's own dynamic type (the
+    boxed struct; not the wrap chain) for implementing `I`, exactly like a
+    switch over `any`; message-only errors never match. Previously such a
+    case compiled but compared type ids and never matched.
+    — `errors2/switch_interface_case`
 
 ## Ambiguities found in DESIGN.md
 
