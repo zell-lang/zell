@@ -262,6 +262,10 @@ struct ctxState {
     tx       database.sql.Tx
     entries  []*entry
     ids      map[string]*entry
+    // the tracked entries by the address of their entity (entryOf)
+    byPtr    map[int]*entry
+    // columnList(m, "t0") per table (the text is constant)
+    colsOf   map[string]string
     tables   []*EntityMeta
     // unlinkers of entities no longer tracked (run by Drop as well)
     orphans  []func()
@@ -351,6 +355,7 @@ struct ctxState {
         if e.key != "" && this.ids[e.key] == e {
             delete(this.ids, e.key)
         }
+        this.untrack(e)
         var keep []*entry = []
         for x in this.entries {
             if x != e {
@@ -360,6 +365,24 @@ struct ctxState {
         this.entries = keep
         e.state = 4
         this.orphans = append(this.orphans, e.unlink)
+    }
+
+    // Removes e from the address index (not from entries).
+    func untrack(e *entry) {
+        var a = ptrKey(e.obj)
+        if this.byPtr[a] == e {
+            delete(this.byPtr, a)
+        }
+    }
+
+    // The t0-qualified column list of m, built once per context.
+    func cols(m *EntityMeta) string {
+        var s = this.colsOf[m.Table]
+        if s == "" {
+            s = columnList(m, "t0")
+            this.colsOf[m.Table] = s
+        }
+        return s
     }
 }
 
@@ -498,21 +521,32 @@ func attachEntity<T>(st *ctxState, ent *Entity<T>, p *T, state int) *entry {
         }
     }
     st.entries = append(st.entries, e)
+    st.byPtr[ptrKey(e.obj)] = e
     return e
 }
 
-// The entry tracking p, if any.
+// The address of the entity pointer boxed in a: an `any` holding a
+// pointer is a heap box whose payload is the pointer (ABI.md 3.7), so the
+// first word at the box's data address is the entity's address.
+func ptrKey(a any) int {
+    return unsafe.ReadInt(unsafe.AddrOf(a), 8)
+}
+
+// The entry tracking p, if any (by the address of p: a tracked entity is
+// kept alive by its entry, so the address identifies it).
 func entryOf<T>(st *ctxState, p *T) *entry {
-    var found *entry = nil
-    for e in st.entries {
-        switch e.obj {
-            case *T q:
-                if q == p {
-                    found = e
-                }
-        }
+    var a any = p
+    var e = st.byPtr[ptrKey(a)]
+    if e == nil {
+        return nil
     }
-    return found
+    switch e.obj {
+        case *T q:
+            if q == p {
+                return e
+            }
+    }
+    return nil
 }
 
 // Maps the row at vals[off..] to an entity: the tracked instance if its
@@ -615,6 +649,7 @@ struct Context {
         }
         this.st.entries = []
         this.st.ids = map[string]*entry{}
+        this.st.byPtr = map[int]*entry{}
     }
 
     // Number of tracked entities.
@@ -710,7 +745,7 @@ func migrationsOf() []MigrationEntry {
 
 // Creates the context state over db.
 func newState(p Provider, db *database.sql.DB) *ctxState {
-    return new ctxState{db: db, provider: p, ids: map[string]*entry{}, entries: []}
+    return new ctxState{db: db, provider: p, ids: map[string]*entry{}, byPtr: map[int]*entry{}, colsOf: map[string]string{}, entries: []}
 }
 
 // Opens the pool of provider p (SQLite ":memory:" databases get one
