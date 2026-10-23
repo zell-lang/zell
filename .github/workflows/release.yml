@@ -165,7 +165,12 @@ jobs:
           shim=$RUNNER_TEMP/llvm-static
           mkdir -p "$shim/bin" "$shim/lib"
           ln -s "$llvm/include" "$shim/include"
-          for a in "$llvm"/lib/libLLVM*.a; do ln -s "$a" "$shim/lib/"; done
+          # every static archive llvm-config may name (LLVM, Polly, ...), but no
+          # libc++/libunwind: those must come from the OS
+          for a in "$llvm"/lib/lib*.a; do
+            case "$a" in *libunwind*|*libc++*) continue ;; esac
+            ln -s "$a" "$shim/lib/"
+          done
           # Homebrew's zstd (named by llvm-config --system-libs) statically too
           cp "$(brew --prefix zstd)/lib/libzstd.a" "$shim/lib/"
           cat > "$shim/bin/llvm-config" <<EOF
