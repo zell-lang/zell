@@ -164,30 +164,20 @@ and uses 5.4x the memory (`strings.Builder` keeps every piece, open item
 These come from reading the code and from the small smoke runs, not from
 timings.
 
-1. **JSON tokenizer is quadratic. This blocks the full-size `json_codec`
-   run.** `scan_string` in `runtime/src/std_json.c` (line 92) allocates
-   `zell_alloc(n - *pos + 1)` for every string token: a buffer the size of
-   the rest of the document. `zell_alloc` is `calloc`, so every string
-   zeroes that buffer. Callgrind on a 0.5 MB array: 99.4% of the
-   instructions are `memset` under `calloc` under
-   `zell_encoding_json_scan`. Measured with `json.scan`: 4x the input takes
-   about 16x the time (20k tokens 1 ms, 80k 17 ms, 320k 283 ms). The 1 MB
-   smoke document takes about 1.2 s to parse. At this rate one 100 MB parse
-   would take hours, and `json_codec` parses 100 MB three times. All of
-   `json.Parse<T>`, `ParseValue` and the small-message loop go through it
-   (small messages suffer less: each buffer is at most 200 bytes). Fix: find
-   the closing quote first and size the buffer from the string, or unescape
-   straight into a `zell__string_alloc` of an upper bound taken from that
-   span. Either way, do not zero the buffer.
-2. **`json.Format` writes `null` for an empty slice that came from `[]`.**
-   `decodeSlice` builds `var res []E = []`, which compares equal to `nil`.
-   `write` then emits `null`, so `{"tags":[]}` comes back as
-   `{"tags":null}`. Go keeps `[]` (it tells a nil slice from an empty one).
-   Because of this, `json_codec` does not print the size of the typed
-   output: it differs from Go's by 2 bytes per item without tags. Either
-   `Format` should write `[]` for a non-nil empty slice (if the language
-   tells them apart), or `DESIGN.md` should say that empty and nil slices
-   both format as `null`.
+1. **Fixed: the JSON tokenizer was quadratic** (`scan_string` allocated
+   and zeroed a buffer the size of the rest of the document for every
+   string token, so 4x the input took 16x the time). `encoding.json` now
+   parses in C in one pass into an arena document of 16-byte nodes
+   (`runtime/src/std_json.c`, ABI.md 17.4); `json.Value` is a node of that
+   document, `Parse<T>` walks the nodes directly (no token slice, no
+   `Value` tree, error paths built only on an error) and `Format<T>`
+   appends to a C writer. The full-size run is in the table above.
+2. **Fixed: `json.Format` wrote `null` for an empty slice that came from
+   `[]`.** The decoder now produces an empty non-nil slice for `[]` (a
+   slice with a backing array but no elements; `[z][0..0]` in Zell), so a
+   round trip keeps `[]`; nil slices still format as `null`
+   (examples/README.md decision 22). The typed output of `json_codec` is
+   byte-identical to Go's.
 3. **`xml.Format` ignores `@serde(name:)` on attribute fields.**
    `encodeElem` (`std/encoding/xml/xml.zl`, around line 806) names an
    `@xml(attr: true)` attribute from `tag.name`, else the field name.
