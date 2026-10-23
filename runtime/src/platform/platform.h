@@ -152,6 +152,15 @@ static inline void zell__plat_tls_set(zell__plat_tls_key k, void *v) { pthread_s
 #define ZELL_PLAT_HAS_PANIC_CAPTURE 1
 #endif
 
+/* Whether functions using 256-bit AVX registers may be built (crypto's
+ * VAES path). GCC targeting Windows: no, it does not align the stack for
+ * 32-byte AVX spills there (GCC bug 54412); clang/mingw is fine. */
+#if defined(_WIN32) && !defined(__clang__)
+#define ZELL_PLAT_HAS_AVX_CODEGEN 0
+#else
+#define ZELL_PLAT_HAS_AVX_CODEGEN 1
+#endif
+
 /* ---- memory ------------------------------------------------------------- */
 
 /* Aligned allocation (align a power of two, size a multiple of it); must

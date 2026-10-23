@@ -20,6 +20,7 @@
  * and its byte round keys are what AESENC consumes. Only encryption is
  * implemented: GCM (and CTR) never needs the inverse cipher. */
 #include "crypto.h"
+#include "../platform/platform.h"
 
 #include <string.h>
 
@@ -483,12 +484,12 @@ NI_TARGET static void ni_ctr(const __m128i *rk, unsigned nr, uint8_t ctr[16], co
     zell__st32be(ctr + 12, c);
 }
 
-#if !(defined(_WIN32) && !defined(__clang__))
+#if ZELL_PLAT_HAS_AVX_CODEGEN
 /* VAES + VPCLMULQDQ: the same 8-block batches with two blocks per 256-bit
  * register, so AESENC and PCLMULQDQ (which share execution ports on some
  * CPUs) take half the instructions. Chosen when zell__cpu_has_vaes(). Not
- * built by GCC for Windows: it does not align the stack for 32-byte AVX
- * spills there (GCC bug 54412). */
+ * built where the compiler cannot spill AVX registers safely
+ * (ZELL_PLAT_HAS_AVX_CODEGEN, platform.h). */
 #define ZELL_HAVE_VAES 1
 #include <immintrin.h>
 
