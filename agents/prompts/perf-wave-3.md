@@ -40,11 +40,26 @@ peak was 20-27k objects against 49k with the collector off. The request
 to collect (`g_pub_req` in `record_count`) seems to be honoured late;
 check where `maybe_collect` is actually reached on a worker thread.
 
-### 2. `timers` lateness regression (30 min, `runtime/src/task.c`)
-Mean lateness 19 ms vs 0.1 ms in Go after the scheduler rewrite: the timer
-thread posts every expiry to the global queue and wakes one worker per
-50 us spin window. Post expired timers to the ring of an idle worker (or run
-the timer heap on a worker), batch wake-ups. Measure `timers` only.
+### 2. `timers` lateness regression — DONE 2026-10-23
+The timer thread already took the due timers from the heap in one batch,
+but posted each continuation to the global queue separately (one malloc,
+one `q_mu` round trip and one wake per timer, contended by the workers
+pulling from the same queue). Posts from a batching thread are now
+collected (`t_post_batch`) and pushed in one lock round trip
+(`post_batch_flush`). 100k timers of 1-10 ms: mean lateness 15 699 us ->
+38 us (Go 102), max 36.8 ms -> 0.63 ms (Go 1.9), wake-ups over 1 ms late
+88 682 -> 0 (Go 1 237); wall 1.53x -> 1.04x Go. Left: the one-wake-then-hand-on
+protocol means a big batch ramps the idle workers up one by one; waking
+`min(n, idle)` at once would need the single-spinner token reworked.
+
+**Open bug found on the way (scheduler, first thing to do in item 9):**
+`make tsan TSAN_TESTS=test_task` hangs on master — twice in different
+channel tests (`channel_unbuffered`, then `channel_fan_in_10k`, 17 tests
+in), the main thread blocked in `zell_chan_recv`, all workers parked. No
+timers are involved, so it is a lost wake-up in `task_sync.c`/`task.c`
+that TSan's slowdown exposes; the plain `test_task` passes 15/15. The
+scheduler agent reported tsan clean on its branch before the merge with
+the async fast path, so bisect between `4447c41`/`e29b20a` and `0c69ae4`.
 
 ### 3. Open-coded `defer` (45-60 min, compiler `hir/` + `codegen/`)
 `defer_call` 6.8x Go: every `defer c.Inc()` allocates a bound-method value

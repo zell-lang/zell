@@ -100,6 +100,15 @@ static int64_t st_wake, st_spin, st_spin_found, st_steal, st_linger, st_park, st
 #endif
 
 static _Thread_local int t_is_worker;
+/* Posts from a non-worker thread that batches them (timer_main): the jobs
+ * are collected here and pushed to the global queue in one lock round
+ * trip by post_batch_flush. NULL on every other thread. */
+typedef struct post_batch {
+    job *head, *tail;
+    int64_t n;
+} post_batch;
+static _Thread_local post_batch *t_post_batch;
+static void post_batch_flush(post_batch *b);
 static _Thread_local worker *t_w;   /* this thread's worker, NULL on other threads */
 
 /* The context of the code running on this thread (owned reference, NULL =
@@ -627,10 +636,25 @@ static void sched_post_ctx(zell_resume_fn fn, void *arg, zell_object *ctx, zell_
         return;
     }
     job *j = job_node(&r);
+    if (t_post_batch) {
+        if (t_post_batch->tail) t_post_batch->tail->next = j; else t_post_batch->head = j;
+        t_post_batch->tail = j;
+        t_post_batch->n++;
+        return;
+    }
+    post_batch one = { j, j, 1 };
+    post_batch_flush(&one);
+}
+
+/* Pushes a batch of jobs from a non-worker thread to the global queue in
+ * one lock round trip. A polling worker takes them without a wake-up;
+ * otherwise one parked worker is woken (none parked: every worker is busy
+ * and will look), and it hands the spinning token on while work remains,
+ * so the other idle workers follow. */
+static void post_batch_flush(post_batch *b) {
+    if (b->n == 0) return;
     zell__plat_mutex_lock(&q_mu);
-    global_push_locked(j, j, 1);
-    /* A polling worker takes the job without a wake-up; otherwise wake a
-     * parked one (none parked: every worker is busy and will look). */
+    global_push_locked(b->head, b->tail, b->n);
     if (__atomic_load_n(&q_spinning, __ATOMIC_RELAXED) == 0 && __atomic_load_n(&q_idle, __ATOMIC_RELAXED) - q_wake_pending > 0) {
         __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
         q_wake_pending++;
@@ -638,6 +662,8 @@ static void sched_post_ctx(zell_resume_fn fn, void *arg, zell_object *ctx, zell_
         zell__plat_cond_signal(&q_cv);
     }
     zell__plat_mutex_unlock(&q_mu);
+    b->head = b->tail = NULL;
+    b->n = 0;
 }
 
 void zell_sched_post(zell_resume_fn fn, void *arg) {
@@ -1165,6 +1191,10 @@ static void *timer_main(void *unused) {
             tail = &t->next;
         }
         zell__plat_mutex_unlock(&tm_mu);
+        /* The continuations of the due timers are posted as one batch: one
+         * global-queue lock round trip per batch instead of one per timer. */
+        post_batch batch = { NULL, NULL, 0 };
+        t_post_batch = &batch;
         while (due) {
             timer *t = due;
             due = t->next;
@@ -1174,6 +1204,8 @@ static void *timer_main(void *unused) {
             zell_release(t->cancel);
             free(t);
         }
+        t_post_batch = NULL;
+        post_batch_flush(&batch);
         zell__plat_mutex_lock(&tm_mu);
     }
     /* Pending timers at shutdown are dropped without completing. */
