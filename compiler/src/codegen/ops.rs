@@ -357,8 +357,24 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let ty = e.ty;
         match op {
             Builtin::LenString => {
+                // Inline `s ? s->len : 0` (ABI.md 4.1: len at +16 of every
+                // string, views included); folds for literals.
                 let s = self.expr(&args[0])?;
-                let r = self.call_rt_v("zell_string_len", &[s.get().into()]);
+                let p = s.get().into_pointer_value();
+                let from = self.b.get_insert_block().unwrap();
+                let load = self.block("len.load");
+                let done = self.block("len.done");
+                let nn = self.b.build_is_not_null(p, "").unwrap();
+                self.b.build_conditional_branch(nn, load, done).unwrap();
+                self.b.position_at_end(load);
+                let lp = self.byte_gep(p, 16);
+                let n = self.b.build_load(self.i64_ty(), lp, "len").unwrap();
+                self.b.build_unconditional_branch(done).unwrap();
+                self.b.position_at_end(done);
+                let zero = self.i64_ty().const_zero();
+                let phi = self.b.build_phi(self.i64_ty(), "len").unwrap();
+                phi.add_incoming(&[(&zero, from), (&n, load)]);
+                let r = phi.as_basic_value();
                 self.drop_val(args[0].ty, s);
                 Ok(Val::borrowed(r))
             }
@@ -451,6 +467,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let size = self.i64_ty().const_int(self.size_of(et), false);
                 let ops = self.value_ops(et);
                 self.call_rt("zell_arena_slice", &[out.into(), h.into(), size.into(), n.into(), ops.into()]);
+                Ok(Val::owned(self.b.build_load(self.slice_ty(), out, "").unwrap()))
+            }
+            Builtin::SliceMake => {
+                let et = self.elem_of(ty).unwrap();
+                let n = self.expr(&args[0])?.get();
+                let out = self.entry_alloca(self.slice_ty().into(), "mslice", false);
+                let size = self.i64_ty().const_int(self.size_of(et), false);
+                let ops = self.value_ops(et);
+                self.call_rt("zell_slice_new_ops", &[out.into(), size.into(), n.into(), n.into(), ops.into()]);
                 Ok(Val::owned(self.b.build_load(self.slice_ty(), out, "").unwrap()))
             }
         }

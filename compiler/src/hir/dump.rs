@@ -349,6 +349,7 @@ impl<'a> Dumper<'a> {
             ExprKind::Const(v) => const_str(v),
             ExprKind::Nil => "nil".into(),
             ExprKind::Zero => "zero".into(),
+            ExprKind::AttrConst { attr, .. } => format!("attr {:?}", attr.kind),
             ExprKind::Local(l) => self.local(*l),
             ExprKind::Upvalue(i) => {
                 let name = self.func.and_then(|f| f.captures.get(*i as usize)).map(|c| c.name.clone()).unwrap_or_default();

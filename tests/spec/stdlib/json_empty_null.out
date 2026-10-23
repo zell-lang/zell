@@ -1,0 +1,12 @@
+false 0 false 0 true
+{"Tags":[],"Props":{},"Next":null}
+true {"Tags":null,"Props":null,"Next":null}
+{"Tags":null,"Props":null,"Next":null}
+{"Tags":["x"],"Props":null,"Next":{"Tags":[]}}
+3 [a a b] array 2 true true
+3 number array string
+[p q]
+value [1,2]
+{"n":2.5,"s":"q\"x","arr":[true,null],"nul":null,"f":1e+100,"t":false}
+true q"x 1e+100
+true null 0 true null

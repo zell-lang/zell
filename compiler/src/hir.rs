@@ -638,6 +638,11 @@ pub enum ExprKind {
     Nil,
     /// Zero value of `ty`.
     Zero,
+    /// `f.Attribute<A>()` resolved at compile time in an unrolled
+    /// `reflect.Fields<T>()` loop: a pointer (`ty` = `*A`) to the immortal
+    /// constant value of the attribute (its struct is `structs[sid]`);
+    /// code generation emits the object like the reflection tables do.
+    AttrConst { attr: Box<Attr>, sid: u32 },
     Local(LocalId),
     /// Captured variable `i` of the current lambda (by reference).
     Upvalue(u32),
@@ -821,6 +826,9 @@ pub enum Builtin {
     /// `args = [arena handle, n]`: `n` zeroed `T` in the arena; the type is
     /// `[]T` (runtime `zell_arena_slice`).
     ArenaSlice,
+    /// `encoding.json.rtMake<T>(n int) []T` (internal): `n` zeroed elements
+    /// with `len == cap == n` (`zell_slice_new_ops`); the nil slice for 0.
+    SliceMake,
 }
 
 /// One primitive print operation of a lowered `println`.

@@ -94,7 +94,7 @@ The `.out` files depend on these rules; the runtime must follow them.
 | `stdlib_crypto.zl` | nested stdlib namespaces (`import crypto` -> `hash.X`, no import -> `crypto.hash.X`, `import encoding` -> `base64.X`), SHA-256/512/1, MD5, CRC-32 test vectors, `[]byte` results, HMAC-SHA256 and `hmac.Equal`, base64 std/URL and hex round trips and decode errors, `crypto.rand`/`uuid` (only lengths/validity printed), seeded `random` (`IntN`, `Shuffle`, `Float`, `Bytes`) |
 | `stdlib_strings2.zl` | `strings.Fields/Count/LastIndex/TrimPrefix/TrimSuffix/TrimLeft/TrimRight/SplitN/EqualFold/Reverse/PadLeft/PadRight/Compare/Title`, `Runes`/`FromRunes` (`[]char`), `Bytes`/`FromBytes` (`[]byte`), `math.Round/Trunc/Mod/Hypot/Log2/Log10/Atan2/IsNaN/IsInf/Inf/NaN` and the int helpers `IMin/IMax/IAbs` |
 | `reflection.zl` | `reflect`: `reflect.TypeOf<T>()` (`Name`, `FullName`, `Kind`, `Size`, `Fields` with `Type.Name`/`Offset`, `Methods` with signature names), a custom `@attribute` struct read with `f.Attribute<column>()` (positional and named arguments, field default), `@reflect`, `t.Method(name).Call(&p, args...)` with a boxed result and a failing `void!` method, typed `Call<func(*Product, int) void!>()`, `reflect.ValueOf(&p).Field(..).Set/Get<T>`, `t.New()` as `any` holding `*T`, enum `Variants`, `typeof` of `any` values and of an interface, compile-time `for f in reflect.Fields<T>()` with `f.Get(v)` in a generic, a static `if reflect.TypeOf<T>().Kind == ...` |
-| `json.zl` | `encoding.json`: `json.Parse<T>` into nested structs, slices of structs, `*T`, `map[string]int`, plain enums by name, floats and `\u` escapes; `json.Format` with `@json(name:)`, `@json(omitEmpty:)`, `@json(skip:)`, sorted map keys, `null` for nil slices/maps/pointers; errors with the path of the bad value (`Users[1].id: expected int, found string`), syntax errors with offsets; the dynamic `json.ParseValue` tree (`Type`, `Len`, `Keys`, `Get`, `Index`, `Has`, `Float`, `Int`, `IsNull`, `Format`) |
+| `json.zl` | `encoding.json`: `json.Parse<T>` into nested structs, slices of structs, `*T`, `map[string]int`, plain enums by name, floats and `\u` escapes; `json.Format` with `@json(name:)`, `@json(omitEmpty:)`, `@json(skip:)`, sorted map keys, `null` for nil slices/maps/pointers and `[]` for an empty slice (decision 22); errors with the path of the bad value (`Users[1].id: expected int, found string`), syntax errors with offsets; the dynamic `json.ParseValue` tree (`Type`, `Len`, `Keys`, `Get`, `Index`, `Has`, `Float`, `Int`, `IsNull`, `Format`) |
 | `channels.zl` | `task.Channel<int>(0)` (unbuffered) and `(4)` pipelines with `Close` and `try await ch.Recv() else break`, `task.Mutex` as a struct field, `task.WaitGroup`, fire-and-forget `_ = Work(...)`, `task.Yield`, `task.Spawn` of an async lambda, `task.Timeout` (false, then true), a context value with `task.Key`/`task.With`/`task.Get` |
 | `task_context.zl` | `var K = task.Key<Span>()`, `task.With(K, v, f)` seen in the started task, a nested call, a `task.Go` child and a nested `With`, and gone after `With` returns (`task.Get` is nil) |
 | `cancel.zl` | `task.NewCancel()` + `task.SpawnWith` stopping a consumer blocked in `Recv` (`errors.Is(err, task.ErrCancelled)`), `task.WithTimeout` waking a long `Delay` (`task.CheckCancelled()?`), `task.Any` cancelling the loser, cancellation reaching a child task, `task.IsCancelled()` outside the scope (only "fast" timing facts are printed) |
@@ -355,3 +355,13 @@ consistent with Go unless stated. Please fold them into the design.
     parameters, functions and results of non-fallible calls (`counter()`)
     are not. Every import in the examples is used, so either policy on
     unused imports works.
+22. **`encoding.json` and empty slices.** A nil slice, map or pointer
+    formats as `null` (Go). A slice value whose `data` pointer is set is
+    not nil even when it is empty (`[z][0..0]`, a decoded `[]`), so
+    `json.Parse` decodes `[]` into an empty non-nil slice and `json.Format`
+    writes it back as `[]`, and `{}` into an empty non-nil map written
+    back as `{}`; `null` decodes to nil. The parser rejects nesting deeper
+    than 512 containers (`json: nesting too deep`), numbers whose value is
+    infinite (`1e400`: `json: number out of range at offset N`) and keeps
+    `-0` a float; integers that fit `int` stay exact (no float rounding);
+    lone surrogates in `\u` escapes decode to U+FFFD.

@@ -134,8 +134,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// is pinned).
     pub(crate) fn is_stable(&self, e: &Expr) -> bool {
         match &e.kind {
-            ExprKind::Const(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::FuncRef(_) => true,
+            ExprKind::Const(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::FuncRef(_) | ExprKind::AttrConst { .. } => true,
             ExprKind::Local(l) => self.fs().locals.get(l.0 as usize).copied().flatten().is_some_and(|s| !s.cell),
+            // A field of a struct value held in a stable local: only this
+            // function writes the local, and not during the statement.
+            ExprKind::Field { base, .. } if matches!(self.ty(base.ty), Type::Struct(_)) && matches!(base.kind, ExprKind::Local(_) | ExprKind::Field { .. }) => self.is_stable(base),
             ExprKind::AddrOf(x) => match &x.kind {
                 ExprKind::Local(_) | ExprKind::Upvalue(_) => true,
                 ExprKind::Deref(y) => self.is_stable(y),
@@ -255,6 +258,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
                 Ok(Val::borrowed(self.zero(e.ty)))
             }
+            // An immortal constant object: never retained or released.
+            ExprKind::AttrConst { attr, sid } => Ok(Val::borrowed(self.attr_object(attr, *sid).into())),
             ExprKind::Local(_) | ExprKind::Upvalue(_) | ExprKind::Global(_) => self.load_place(e),
             ExprKind::FuncRef(f) => self.func_ref(*f, e.ty),
             ExprKind::Field { base, index } => {

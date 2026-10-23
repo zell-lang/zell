@@ -67,6 +67,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         // object is the function's stack object.
                         let v = self.expr_owned(inner)?;
                         self.dbg_declare(*local);
+                        self.clear_const_only(*local);
                         self.release_local(*local, false);
                         let slot = self.fs().locals[local.0 as usize].unwrap();
                         let obj = slot.stack_obj.unwrap();
@@ -110,6 +111,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     // The map stays alive (held) until the end of the statement.
                     self.map_slot(kt, mv.get(), kv.get(), true)
                 } else {
+                    if let ExprKind::Local(l) = &target.kind {
+                        self.clear_const_only(*l);
+                    }
                     self.place(target)?
                 };
                 self.unhold(h);
@@ -260,10 +264,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 match &value.kind {
                     ExprKind::Binary { op: crate::hir::BinOp::StrConcat, lhs, rhs } if same(lhs) => {
                         let rv = self.expr(rhs)?;
+                        self.clear_const_only(*l);
                         let p = self.local_addr(*l);
                         return self.compound_at(p, target.ty, crate::hir::BinOp::StrConcat, rv, rhs.ty);
                     }
                     ExprKind::Builtin { op: crate::hir::Builtin::Append, args } if same(&args[0]) => {
+                        self.clear_const_only(*l);
                         let p = self.local_addr(*l);
                         return self.append_in_place(p, target.ty, &args[1..]);
                     }

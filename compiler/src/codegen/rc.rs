@@ -292,6 +292,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     fn rc_val(&mut self, t: TypeId, v: BasicValueEnum<'ctx>, retain: bool) {
         match self.rc_kind(t) {
             RcKind::None => {}
+            // A constant pointer is NULL or an immortal global: nothing to do.
+            RcKind::Ref | RcKind::Ptr if v.is_pointer_value() && v.into_pointer_value().is_const() => {}
             RcKind::Ref => {
                 self.call_rt(Self::rc_name(retain), &[v.into()]);
             }

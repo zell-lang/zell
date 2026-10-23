@@ -78,7 +78,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 Cleanup::Temp(t, x) => self.release_val(t, x),
                 Cleanup::Scope(ls) => {
                     for l in ls.into_iter().rev() {
-                        self.release_local(l, true);
+                        self.release_local_final(l, true);
                     }
                 }
                 Cleanup::Done => {}

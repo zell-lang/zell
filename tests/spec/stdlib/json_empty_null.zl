@@ -1,0 +1,55 @@
+// test: json keeps an empty array apart from null (an empty slice formats back as [], a nil slice as null), Values share one document, Decode and the constructors work
+// status: passing
+namespace spec.stdlib.json_empty_null
+
+import encoding
+import io
+
+struct Sub {
+    Tags []string
+}
+
+struct Item {
+    Tags  []string
+    Props map[string]int
+    Next  *Sub
+}
+
+func main() void! {
+    var a = json.Parse<Item>("{\"Tags\": [], \"Props\": {}, \"Next\": null}")?
+    println(a.Tags == nil, len(a.Tags), a.Props == nil, len(a.Props), a.Next == nil)
+    println(json.Format(a))
+    var b = json.Parse<Item>("{\"Tags\": null}")?
+    println(b.Tags == nil, json.Format(b))
+    var c = json.Parse<Item>("{}")?
+    println(json.Format(c))
+    var d = json.Parse<Item>("{\"Tags\": [\"x\"], \"Next\": {\"Tags\": []}}")?
+    println(json.Format(d))
+
+    // Values are nodes of one parsed document; duplicate keys: the last wins.
+    var v = json.ParseValue("{\"a\": 1, \"a\": [true, null], \"b\": \"s\"}")?
+    println(v.Len(), v.Keys(), v.Get("a").Type(), v.Get("a").Len(), v.Get("a").Index(1).IsNull(), v.Get("a").Index(5).IsNull())
+    var items = v.Items()
+    println(len(items), items[0].Type(), items[1].Type(), items[2].Type())
+    var it = json.Decode<Item>(json.ParseValue("{\"Tags\": [\"p\", \"q\"]}")?)?
+    println(it.Tags)
+    var anyv = json.Parse<any>("[1, 2]")?
+    switch anyv {
+        case json.Value jv:
+            println("value", jv.Format())
+        default:
+            println("other")
+    }
+
+    // Constructors build a document of their own.
+    var o = json.NewObject(
+        ["n", "s", "arr", "nul", "f", "t"],
+        [json.NewNumber(2.5), json.NewString("q\"x"), json.NewArray([json.NewBool(true), json.NewNull()]), json.NewNull(), json.NewNumber(1e100), json.NewBool(false)],
+    )?
+    println(o.Format())
+    println(o.Get("arr").Index(0).Bool()?, o.Get("s").String()?, o.Get("f").Float()?)
+
+    // The zero Value is null.
+    var z json.Value
+    println(z.IsNull(), z.Type(), z.Len(), z.Get("x").IsNull(), z.Format())
+}

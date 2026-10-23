@@ -1,0 +1,25 @@
+json: unexpected end of input
+json: unexpected end of input
+json: unexpected end of input
+json: unexpected end of input
+json: unexpected end of input
+json: expected , or ] in an array, found number 2
+json: expected , or ] in an array, found number 1
+json: expected a string key in an object, found number 1
+json: expected : after an object key, found number 1
+json: expected a string key in an object, found '}'
+json: unexpected ']'
+json: unexpected '}'
+json: unexpected number 5 after the top-level value
+json: invalid character 'x' at offset 10
+json: unterminated string at offset 4
+json: control character in string at offset 2
+json: invalid escape in string at offset 1
+json: invalid \u escape at offset 3
+json: invalid character 'n' at offset 0
+json: number out of range at offset 0
+json: invalid number at offset 0
+json: invalid number at offset 0
+ok
+json: nesting too deep
+3 [a b a] 2 0 object {"a":[],"b":{},"a":2}

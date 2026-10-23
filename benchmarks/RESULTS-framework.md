@@ -308,25 +308,22 @@ stdlib fixes belong with their owners. Each item says where the code is.
    disabled scenario made 0 allocations (zap makes 1 per call for its
    field slice). When the quiet run measures this, check that the loop was
    not folded away entirely.
-7. **`web` / `encoding.json`: an empty list result is written as `null`.**
-   `[]` is the nil slice and there is no way to make a non-nil empty
-   slice (no `make`), and `json` writes nil slices as `null`
-   (`std/encoding/json/json.zl:593`, Go semantics). So `GET
-   /api/items?category=none` answers `null`, where Gin, net/http and
-   ASP.NET answer `[]`. The load generator normalises this (`go/load`,
-   `check`). A fix belongs in the language (a non-nil empty slice) or in
-   `web`'s result writer (always write slices as arrays).
-8. **`encoding.json`: `Parse<T>` makes three passes and builds error
-   paths eagerly.** `Parse<T>` (`json.zl:347`) runs `scan` (C) into a
-   `[]string` with one string per token, then builds a `Value` tree
-   (`ParseValue`), then decodes by reflection. `decode` computes
-   `join(path, name)` for every field and `decodeSlice` computes `path +
-   "[" + fmt.Format("{0}", i) + "]"` for every element (`json.zl:507`), so
-   the error-path strings are allocated even when nothing fails. On the
-   1 MB config the CLI was more than an order of magnitude slower than Go's
-   `encoding/json` at smoke scale; the startup table above will quantify
-   it. A streaming decoder that builds the path only on error would fix
-   most of it.
+7. **Partly fixed: `web` / `encoding.json`: an empty list result is
+   written as `null`.** `json.Parse` now decodes `[]` into an empty non-nil
+   slice (`[z][0..0]`: a backing array with no elements) and `json.Format`
+   writes such a slice as `[]`; only a nil slice is `null` (examples/README.md
+   decision 22). A handler that builds its result with `var out []T = []`
+   and never appends still returns the nil slice, i.e. `null`; it can
+   return `items[0..0]` or a decoded value, or `web`'s result writer could
+   write slices as arrays regardless.
+8. **Fixed: `encoding.json` made three passes and built error paths
+   eagerly.** The text is parsed once in C into an arena document
+   (`runtime/src/std_json.c`); `Parse<T>` walks its nodes directly and the
+   `Users[2].id` paths are assembled only when a value is wrong (a
+   `pathError` extended on the way out). Compile-time reflection also
+   folds `f.Attribute<json>()`, `f.Name` and the `@json` name tests to
+   constants in the unrolled field loops. See RESULTS-stdlib.md,
+   `json_codec`.
 9. **Release builds target the build machine's CPU.** For the host target
    `codegen::target_machine` (`compiler/src/codegen/mod.rs:458`) passes
    `get_host_cpu_name()` and `get_host_cpu_features()`, like `-march=native`.

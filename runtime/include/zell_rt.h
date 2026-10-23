@@ -955,9 +955,38 @@ const zell_reflect_method *zell_reflect_method_by_name(const zell_reflect_type *
 /* The canonical table (follows `canon`); NULL for NULL. */
 const zell_reflect_type *zell_reflect_canon(const zell_reflect_type *t);
 
-/* encoding.json (std_json.c): tokens of a JSON text (see there) and
- * a quoted JSON string literal. */
-void          zell_encoding_json_scan(const zell_string *text, zell_slice *out, zell_error **err);
+/* encoding.json (std_json.c, ABI.md 17.4): a JSON text parsed into an
+ * arena document of nodes (handles are addresses passed as int64_t; node
+ * 0 is null), a growing text writer, and a quoted JSON string literal. */
+int64_t       zell_encoding_json_rt_parse(const zell_string *text, zell_error **err); /* document, or 0 + error */
+void          zell_encoding_json_rt_free(int64_t doc);
+int64_t       zell_encoding_json_rt_root(int64_t doc);                 /* root node */
+int64_t       zell_encoding_json_rt_kind(int64_t node);                /* 0 null 1 bool 2 number 3 string 4 array 5 object */
+bool          zell_encoding_json_rt_is_int(int64_t node);              /* number written as an int64 */
+bool          zell_encoding_json_rt_bool(int64_t node);
+int64_t       zell_encoding_json_rt_int(int64_t node);
+double        zell_encoding_json_rt_float(int64_t node);
+zell_string *zell_encoding_json_rt_str(int64_t node);                 /* +1 copy (NULL for "") */
+int64_t       zell_encoding_json_rt_len(int64_t node);                 /* elements / pairs; 0 for scalars */
+int64_t       zell_encoding_json_rt_first(int64_t node);               /* first element / first key, 0 if none */
+int64_t       zell_encoding_json_rt_next(int64_t node);                /* next sibling (after a key: its value) */
+int64_t       zell_encoding_json_rt_get(int64_t obj, const zell_string *key); /* member value, 0 if absent */
+int64_t       zell_encoding_json_rt_index(int64_t doc, int64_t arr, int64_t i); /* element i, 0 if out of range */
+int64_t       zell_encoding_json_rt_w_new(void);                        /* writer */
+zell_string *zell_encoding_json_rt_w_finish(int64_t w);               /* +1 the text; frees the writer */
+void          zell_encoding_json_rt_w_raw(int64_t w, const zell_string *s);
+void          zell_encoding_json_rt_w_key(int64_t w, const zell_string *name, bool first);
+void          zell_encoding_json_rt_w_str(int64_t w, const zell_string *s);
+void          zell_encoding_json_rt_w_int(int64_t w, int64_t v);
+void          zell_encoding_json_rt_w_uint(int64_t w, uint64_t v);
+void          zell_encoding_json_rt_w_float(int64_t w, double f);
+void          zell_encoding_json_rt_w_bool(int64_t w, bool b);
+void          zell_encoding_json_rt_w_node(int64_t w, int64_t node);
+void          zell_encoding_json_rt_w_key_int(int64_t w, const zell_string *name, bool first, int64_t v);   /* key + value */
+void          zell_encoding_json_rt_w_key_str(int64_t w, const zell_string *name, bool first, const zell_string *s);
+void          zell_encoding_json_rt_w_key_float(int64_t w, const zell_string *name, bool first, double f);
+void          zell_encoding_json_rt_w_key_bool(int64_t w, const zell_string *name, bool first, bool b);
+void          zell_encoding_json_rt_w_strs(int64_t w, const zell_slice *strs);  /* ["a","b"] of a []string */
 zell_string *zell_encoding_json_quote(const zell_string *s);
 
 /* diag / log runtime halves (diag.c, profile.c; ABI.md section 18). */
