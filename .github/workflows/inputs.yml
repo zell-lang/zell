@@ -1,0 +1,207 @@
+# Toolchain inputs: builds the slow, rarely changing inputs of the
+# self-contained toolchain once and publishes them as assets of the GitHub
+# Release `toolchain-inputs` (tag `toolchain-inputs`, created if missing), so
+# that release.yml / bundle.yml fetch them with `--prebuilt` (about 10 minutes
+# per release dry run instead of 30, and no dependence on archive.ubuntu.com,
+# the GitHub release downloads of the pinned packages, or an LLVM build).
+#
+#   targets-inputs-<key>.tar.xz          build/targets/ of the Linux and Windows
+#                                        triples + SOURCES.sha256
+#                                        (scripts/bundle-targets.sh)
+#   targets-inputs-macos-<key>.tar.xz    the two apple-darwin triples, built on a Mac
+#                                        against the real SDK, libSystem.tbd checked
+#   lld-18-<host>-<lldkey>.tar.xz        bin/lld of each host (scripts/build-lld.sh)
+#   *.sha256                             next to every archive (verified by --prebuilt)
+#
+# Keys (16 hex digits of a sha256; print them with --print-key):
+#   <key>     scripts/bundle-targets.sh --print-key: scripts/bundle-targets.sh,
+#             scripts/lld/darwin-symbols.txt, runtime/Makefile and all of
+#             runtime/{include,src,stub-sdk} concatenated (the archives hold the
+#             runtimes and the symbol-derived libSystem.tbd)
+#   <lldkey>  scripts/build-lld.sh --print-key: scripts/build-lld.sh followed
+#             by scripts/lld/lld-main.cpp
+# (not the value of hashFiles(...) that the actions/cache keys use: a plain
+# sha256 of the concatenated files, computable by the scripts themselves.)
+#
+# Re-run this workflow by hand (Actions tab or `gh workflow run inputs.yml`)
+# whenever those files change; the old assets are kept, a new key adds new
+# ones. Until then release.yml / bundle.yml still work: --prebuilt finds no
+# asset for the new key, says so, and builds everything on the runner.
+name: toolchain inputs
+
+# Manual only: start from the Actions tab or `gh workflow run inputs.yml`.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  targets-linux:
+    name: targets (Linux, Windows link inputs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM 18
+        run: sudo ./scripts/setup.sh
+      - name: Cache of the pinned downloads
+        uses: actions/cache@v4
+        with:
+          path: build/bundle-cache
+          key: bundle-cache-${{ hashFiles('scripts/bundle-targets.sh') }}
+          restore-keys: bundle-cache-
+      - name: Link inputs
+        run: |
+          ./scripts/bundle-targets.sh x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
+          du -sh build/targets/*
+      - name: Pack
+        run: |
+          key=$(./scripts/bundle-targets.sh --print-key)
+          mkdir -p out
+          tar cJf "out/targets-inputs-$key.tar.xz" -C build/targets $(ls build/targets)
+          (cd out && sha256sum "targets-inputs-$key.tar.xz" > "targets-inputs-$key.tar.xz.sha256")
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs-targets-linux
+          path: out/
+          if-no-files-found: error
+
+  targets-macos:
+    name: targets (macOS, real SDK)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM 18
+        run: brew install llvm@18
+      - name: Link inputs (runtimes built against the SDK)
+        run: |
+          export CLANG="$(brew --prefix llvm@18)/bin/clang"
+          ./scripts/bundle-targets.sh aarch64-apple-darwin x86_64-apple-darwin
+          ./scripts/bundle-targets.sh --check-darwin-tbd
+          cat build/targets/*/BUNDLE
+      - name: Pack
+        run: |
+          key=$(./scripts/bundle-targets.sh --print-key)
+          mkdir -p out
+          tar cJf "out/targets-inputs-macos-$key.tar.xz" -C build/targets $(ls build/targets)
+          (cd out && shasum -a 256 "targets-inputs-macos-$key.tar.xz" > "targets-inputs-macos-$key.tar.xz.sha256")
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs-targets-macos
+          path: out/
+          if-no-files-found: error
+
+  lld:
+    name: lld ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-amd64
+            os: ubuntu-24.04
+          - host: linux-arm64
+            os: ubuntu-24.04-arm
+          - host: macos-arm64
+            os: macos-14
+          - host: macos-amd64
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM 18, static lld libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo ./scripts/setup.sh
+          sudo apt-get install -y liblld-18-dev libzstd-dev zlib1g-dev libncurses-dev xz-utils
+      - name: LLVM 18, static lld libraries (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm@18 ninja zstd
+      - name: bin/lld
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then export LLVM_CONFIG="$(brew --prefix llvm@18)/bin/llvm-config"; fi
+          ./scripts/build-lld.sh
+      - name: Pack
+        run: |
+          key=$(./scripts/build-lld.sh --print-key)
+          name="lld-18-${{ matrix.host }}-$key.tar.xz"
+          mkdir -p out
+          tar cJf "out/$name" -C build/lld lld
+          (cd out && if command -v sha256sum >/dev/null; then sha256sum "$name"; else shasum -a 256 "$name"; fi > "$name.sha256")
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs-lld-${{ matrix.host }}
+          path: out/
+          if-no-files-found: error
+
+  lld-windows:
+    name: lld windows-amd64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: xz
+      # the official LLVM 18.1.8 lld.exe, as in release.yml (bin/lld.exe of
+      # the Windows host archive)
+      - name: lld.exe of the official LLVM 18.1.8 build
+        shell: pwsh
+        run: |
+          $name = "clang+llvm-18.1.8-x86_64-pc-windows-msvc"
+          Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/$name.tar.xz" -OutFile "$env:RUNNER_TEMP\llvm.tar.xz"
+          tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C "$env:RUNNER_TEMP" "$name/bin/lld.exe"
+          if ($LASTEXITCODE -ne 0) { throw "extracting lld.exe failed" }
+          "LLD_BINARY=$env:RUNNER_TEMP\$name\bin\lld.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: bin/lld.exe
+        run: LLD_BINARY="$(cygpath -u "$LLD_BINARY")" ./scripts/build-lld.sh
+      - name: Pack
+        run: |
+          key=$(./scripts/build-lld.sh --print-key)
+          name="lld-18-windows-amd64-$key.tar.xz"
+          mkdir -p out
+          tar cJf "out/$name" -C build/lld lld.exe
+          (cd out && sha256sum "$name" > "$name.sha256")
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs-lld-windows-amd64
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    name: publish to the toolchain-inputs release
+    needs: [targets-linux, targets-macos, lld, lld-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: inputs-*
+          path: out
+          merge-multiple: true
+      - name: Verify
+        run: |
+          cd out && ls -l && sha256sum -c ./*.sha256
+      - name: Create the release if missing, upload the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view toolchain-inputs >/dev/null 2>&1; then
+            gh release create toolchain-inputs --target "$GITHUB_SHA" --title "Toolchain inputs" \
+              --notes "Prebuilt inputs of the self-contained toolchain (scripts/bundle-targets.sh --prebuilt, scripts/build-lld.sh --prebuilt), built by the manual workflow inputs.yml. Asset names carry the input keys; see docs/PLATFORMS.md, Distribution. The same components under the same licences as THIRD_PARTY.md." \
+              --prerelease
+          fi
+          gh release upload toolchain-inputs out/* --clobber

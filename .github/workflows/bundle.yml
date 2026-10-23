@@ -14,6 +14,14 @@
 #                    (arm64) and macos-15-intel (amd64); libSystem.tbd checked
 #                    against the SDK; bin/lld for macOS built (cached for releases)
 #   bundle-windows   the Linux-cross-built Windows executables run on windows-latest
+# Prebuilt inputs: bundle-targets.sh and build-lld.sh are called with
+# --prebuilt, which first downloads the matching archive from the release
+# `toolchain-inputs` (built by inputs.yml, keyed by `scripts/bundle-targets.sh
+# --print-key` and `scripts/build-lld.sh --print-key`); the actions/cache steps
+# stay as a second layer. inputs.yml must be re-run by hand after
+# scripts/bundle-targets.sh, scripts/build-lld.sh, scripts/lld/*, or runtime/
+# change (the key changes). Without a matching asset a run still works, it
+# just builds everything here (about 30 minutes instead of 10).
 name: bundle
 
 # Manual only: start from the Actions tab or `gh workflow run bundle.yml`.
@@ -43,6 +51,8 @@ jobs:
           sudo apt-get install -y liblld-18-dev libzstd-dev zlib1g-dev libncurses-dev xz-utils
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-linux-${{ matrix.arch }}
       - name: Cache of the pinned downloads
         uses: actions/cache@v4
         with:
@@ -50,9 +60,9 @@ jobs:
           key: bundle-cache-${{ hashFiles('scripts/bundle-targets.sh') }}
           restore-keys: bundle-cache-
       - name: Link inputs of every target
-        run: ./scripts/bundle-targets.sh && du -sh build/targets/*
+        run: ./scripts/bundle-targets.sh --prebuilt && du -sh build/targets/*
       - name: bin/lld
-        run: ./scripts/build-lld.sh
+        run: ./scripts/build-lld.sh --prebuilt
       - name: Compiler (release) and archive
         run: |
           cargo build --release --bin zell --bin zell-lsp --bin zell-mcp
@@ -160,7 +170,7 @@ jobs:
       - name: bin/lld (Homebrew's static LLVM, or from source)
         run: |
           brew install ninja zstd
-          [ -x build/lld/lld ] || LLVM_CONFIG="$(brew --prefix llvm@18)/bin/llvm-config" ./scripts/build-lld.sh
+          [ -x build/lld/lld ] || LLVM_CONFIG="$(brew --prefix llvm@18)/bin/llvm-config" ./scripts/build-lld.sh --prebuilt
           otool -L build/lld/lld
           build/lld/lld -flavor darwin --version || build/lld/lld -flavor gnu --version
 

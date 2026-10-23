@@ -19,6 +19,14 @@
 #                                                  (windows-amd64 also .tar.gz)
 #   zell-runtime-<version>-<triple>.tar.gz(.sha256) one per runtime that built
 #   SHA256SUMS, VERSION
+# Prebuilt inputs: bundle-targets.sh and build-lld.sh are called with
+# --prebuilt, which first downloads the matching archive from the release
+# `toolchain-inputs` (built by inputs.yml, keyed by `scripts/bundle-targets.sh
+# --print-key` and `scripts/build-lld.sh --print-key`); the actions/cache steps
+# stay as a second layer. inputs.yml must be re-run by hand after
+# scripts/bundle-targets.sh, scripts/build-lld.sh, scripts/lld/*, or runtime/
+# change (the key changes). Without a matching asset a run still works, it
+# just builds everything here (about 30 minutes instead of 10).
 name: release
 
 # Manual only (workflow_dispatch; a tag push no longer releases by itself).
@@ -95,7 +103,7 @@ jobs:
           restore-keys: bundle-cache-
       - name: Link inputs
         run: |
-          ./scripts/bundle-targets.sh x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+          ./scripts/bundle-targets.sh --prebuilt x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
             x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
           du -sh build/targets/*
       - uses: actions/upload-artifact@v4
@@ -117,7 +125,7 @@ jobs:
       - name: Link inputs (runtimes built against the SDK)
         run: |
           export CLANG="$(brew --prefix llvm@18)/bin/clang"
-          ./scripts/bundle-targets.sh aarch64-apple-darwin x86_64-apple-darwin
+          ./scripts/bundle-targets.sh --prebuilt aarch64-apple-darwin x86_64-apple-darwin
           ./scripts/bundle-targets.sh --check-darwin-tbd
           cat build/targets/*/BUNDLE
       - uses: actions/upload-artifact@v4
@@ -164,6 +172,9 @@ jobs:
             echo "rustup failed (attempt $i), retrying"; sleep 20
           done
           rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.host }}
       - name: Runtime
         run: |
           if [ "$RUNNER_OS" = macOS ]; then make -C runtime CC=clang -j"$(sysctl -n hw.ncpu)"; else make -C runtime -j"$(nproc)"; fi
@@ -185,10 +196,10 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get install -y liblld-18-dev libzstd-dev zlib1g-dev libncurses-dev
-            ./scripts/build-lld.sh
+            ./scripts/build-lld.sh --prebuilt
           else
             brew install ninja
-            [ -x build/lld/lld ] || LLVM_CONFIG="$(brew --prefix llvm@18)/bin/llvm-config" ./scripts/build-lld.sh
+            [ -x build/lld/lld ] || LLVM_CONFIG="$(brew --prefix llvm@18)/bin/llvm-config" ./scripts/build-lld.sh --prebuilt
           fi
       - name: Compiler (release)
         run: |
@@ -268,6 +279,9 @@ jobs:
           }
           rustc --version
           if ($LASTEXITCODE -ne 0) { throw "no Rust toolchain" }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-amd64
       - name: Compiler (release)
         shell: pwsh
         run: |
@@ -287,7 +301,7 @@ jobs:
       # bin/lld.exe: the official LLVM 18.1.8 lld (same /MD runtime as zell.exe;
       # package-toolchain.sh copies the Visual C++ DLLs next to both)
       - name: bin/lld
-        run: LLD_BINARY="$(cygpath -u "$RUNNER_TEMP")/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin/lld.exe" ./scripts/build-lld.sh
+        run: LLD_BINARY="$(cygpath -u "$RUNNER_TEMP")/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin/lld.exe" ./scripts/build-lld.sh --prebuilt
       - name: Package
         run: ./scripts/package-toolchain.sh --no-build --out dist && ls -l dist
       - uses: actions/upload-artifact@v4
