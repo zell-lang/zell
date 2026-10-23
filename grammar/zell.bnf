@@ -83,8 +83,9 @@ extern_func_decl ::= IDENTIFIER func_signature
 // an attribute on its own line is followed by an automatic SEMI.
 attribute ::= AT qualified_name attribute_args? eos?
 attribute_args ::= LPAREN (attribute_arg (COMMA attribute_arg)*)? RPAREN
-// `default` may name an argument (and a field): `@cli.flag(default: "8080")`.
-attribute_arg ::= ((IDENTIFIER | DEFAULT) COLON)? expr
+// Keywords may name an argument (and a field): `@cli.flag(default: "8080")`,
+// `@Conf(enum: "a,b")`.
+attribute_arg ::= (field_name COLON)? expr
 
 // ---------------------------------------------------------------------------
 // Declarations
@@ -96,7 +97,10 @@ struct_decl ::= STRUCT (IDENTIFIER | DEFAULT) generic_params? implements_clause?
 implements_clause ::= IDENTIFIER type (COMMA type)*
 struct_member ::= attribute* (method_decl | field_decl | embed_decl) eos?
 // `Port int = 8080`: a default value (attribute structs, options).
-field_decl ::= (IDENTIFIER | DEFAULT) type (ASSIGN expr)?
+// A field may be named by a keyword (`enum string`, `default string`),
+// except FUNC, STATIC and ASYNC, which start a method.
+field_decl ::= field_name type (ASSIGN expr)?
+field_name ::= IDENTIFIER | NAMESPACE | IMPORT | AS | STRUCT | INTERFACE | ENUM | AWAIT | VAR | CONST | IF | ELSE | FOR | SWITCH | CASE | DEFAULT | RETURN | BREAK | CONTINUE | DEFER | TRY | CATCH | NEW | NIL | TRUE | FALSE | MAP | THIS
 embed_decl ::= type
 method_decl ::= STATIC? func_decl
 
@@ -218,7 +222,7 @@ postfix ::= DOT name_segment
           | generic_args
 // `name: value` arguments only inside attribute arguments (`@cfg(not(os: "windows"))`).
 arg_list ::= call_arg (COMMA call_arg)* COMMA?
-call_arg ::= (IDENTIFIER COLON)? expr
+call_arg ::= (field_name COLON)? expr
 
 // `_` is the discard target (`_ = f()`) and a wildcard in patterns (`Shape.Rect(w, _)`)
 primary_expr ::= lambda_expr | literal | THIS | NIL | UNDERSCORE
@@ -230,7 +234,7 @@ literal ::= INT_LITERAL | FLOAT_LITERAL | STRING_LITERAL | RAW_STRING_LITERAL | 
 
 // `Point{X: 1}`; not allowed directly in if/for/switch headers (Go rule)
 struct_literal ::= qualified_name generic_args? LBRACE (field_init (COMMA field_init)* COMMA?)? RBRACE
-field_init ::= IDENTIFIER COLON expr
+field_init ::= field_name COLON expr
 slice_literal ::= LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET
 map_literal ::= map_type LBRACE (map_entry (COMMA map_entry)* COMMA?)? RBRACE
 map_entry ::= expr COLON expr

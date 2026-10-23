@@ -678,6 +678,16 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     the lexer emits it as an identifier; only `for a[, b] in` treats it as
     the keyword, so variables, parameters and fields may be named `in`
     (`for x in in` loops over a variable `in`). — `control/in_contextual`
+81. **Keywords as field and attribute argument names** (`DESIGN.md`
+    "Атрибуты"): any keyword except `func`, `static`, `async` (they start
+    a method) and `_` may name a struct field; the same names are accepted
+    as attribute arguments (`@Conf(enum: "a,b")` sets the field `enum`),
+    in struct literals (`Conf{enum: "x"}`) and after `.` (statement
+    keywords such as `c.for` only directly after the dot, so that `c.` at
+    a line end before `for ...` still recovers in the editor). A
+    declaration keyword followed by `Name {`, `Name<` or `Name implements`
+    inside a struct body is a nested declaration (missing `}`), not a field.
+    — `attributes2/keyword_arg_names`
 
 ## Ambiguities found in DESIGN.md
 

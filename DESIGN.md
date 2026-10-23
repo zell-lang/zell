@@ -263,9 +263,13 @@ struct User {
   `dir/имя`. У `var` с `@embed` нет инициализатора.
 - Атрибут-структуры могут объявляться и в stdlib на Zell
   (`@binary(endian: "big")` из `encoding.binary`, `@cli.flag(...)` из
-  `cli`): они пишутся через пространство имён, как обычные. Ключевое
-  слово `default` допустимо как имя поля и аргумента
-  (`@cli.flag(default: "8080")`).
+  `cli`): они пишутся через пространство имён, как обычные.
+- Ключевые слова допустимы как имена аргументов атрибута и полей
+  структур (`@cli.flag(default: "8080")`, `@Conf(enum: "a,b")`): аргумент
+  `enum:` задаёт поле `enum`. Исключения — `func`, `static`, `async`
+  (начинают метод) и `_`. Такое поле читается как обычно (`c.enum`;
+  ключевые слова инструкций — `c.for`, `c.var` — только вплотную к точке)
+  и инициализируется литералом `Conf{enum: "x"}`.
 - Каждый применённый атрибут — константное значение своей структуры
   (аргументы и значения полей по умолчанию), вшитое в таблицы рефлексии;
   у встроенных это структуры `reflect` (`json`, `deprecated`, ...).
@@ -2451,7 +2455,8 @@ file        = { attribute } "namespace" path { import } { decl } ;   (* @cfg(...
 import      = "import" path [ "as" ident ] ;
 decl        = { attribute } ( struct | interface | enum | func | externfunc | var | const ) ;
 attribute   = "@" path [ "(" [ attrarg { "," attrarg } ] ")" ] ;
-attrarg     = [ ident ":" ] expr ;           (* in attribute arguments a call takes attrargs: @cfg(not(os: "windows")) *)
+attrarg     = [ name ":" ] expr ;            (* in attribute arguments a call takes attrargs: @cfg(not(os: "windows")) *)
+name        = ident | keyword ;              (* field and attribute argument names: @Conf(enum: "a") *)
 cfg         = "@cfg" "(" cond { "," cond } ")" ;
 cond        = ( "os" | "arch" | "feature" ) ":" string | ( "not" | "any" | "all" ) "(" cond { "," cond } ")" ;
 struct      = "struct" ident [ generics ] [ "implements" type { "," type } ] "{" { field | method } "}" ;
@@ -2461,7 +2466,7 @@ interface   = [ "sealed" ] "interface" ident "{" { type | ifacemethod } "}" ;   
 ifacemethod = { attribute } [ "async" ] "func" ident "(" [ params ] ")" [ type ] [ block ] ;  (* block: default method *)
 enum        = "enum" ident [ generics ] [ "implements" type { "," type } ] "{" variant { ( "," | newline ) variant } { method } "}" ;
 variant     = { attribute } ident [ "(" params ")" ] ;
-field       = { attribute } ident type [ "=" expr ] ;
+field       = { attribute } name type [ "=" expr ] ;   (* name: not "func", "static", "async" *)
 method      = [ "static" ] func ;
 func        = [ "async" ] "func" ident [ generics ] "(" [ params ] ")" [ type ] block ;
 externfunc  = "extern" "func" ident "(" [ params ] ")" [ type ] ;   (* только в std/**/*_extern.zl *)

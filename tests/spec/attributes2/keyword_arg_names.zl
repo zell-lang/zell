@@ -1,0 +1,29 @@
+// test: keywords name attribute parameters and struct fields (`enum`, `default`, `for`, `map`), read back through reflection, `.` access and struct literals
+// status: passing
+namespace spec.attributes2.keyword_arg_names
+
+import io
+
+@attribute(targets: [reflect.Target.Field])
+struct Conf {
+    enum    string
+    default string = "-"
+    for     int = 1
+    map     bool = false
+}
+
+struct Options {
+    @Conf(enum: "a,b", default: "a") Mode  string
+    @Conf("x", for: 3)               Level string
+    @Conf(map: true, enum: "")       Plain string
+}
+
+func main() {
+    for f in reflect.TypeOf<Options>().Fields {
+        var c = f.Attribute<Conf>()
+        println(f.Name, c.enum, c.default, c.for, c.map)
+    }
+    var c = Conf{enum: "e", for: 1, map: false, default: "d"}
+    c.enum += "!"
+    println(c.enum, c.for, c.map, c.default)
+}
