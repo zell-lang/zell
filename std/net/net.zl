@@ -413,6 +413,10 @@ struct sock {
     poff    int
     lbuf    []byte
     peerOK  bool
+    // the last stream read returned fewer bytes than asked: the socket is
+    // drained, so the next read waits for readiness before calling recv
+    // (instead of a recv that would fail with EAGAIN)
+    drained bool
 
     func Drop() {
         if this.h != 0 {
@@ -519,11 +523,16 @@ struct sock {
             return this.takePending(n)
         }
         this.checkDeadline(this.rdl, "read")?
+        if this.drained {
+            this.drained = false
+            await this.waitRead("read")?
+        }
         for {
             var b = try rtRead(this.h, n) catch err {
                 return this.fail("read", err)
             }
             if len(b) > 0 || !rtAgain() {
+                this.drained = len(b) > 0 && len(b) < n && this.nw != "udp"
                 return b
             }
             await this.waitRead("read")?
@@ -550,11 +559,16 @@ struct sock {
             return k
         }
         this.checkDeadline(this.rdl, "read")?
+        if this.drained {
+            this.drained = false
+            await this.waitRead("read")?
+        }
         for {
             var k = try rtReadInto(this.h, buf, off) catch err {
                 return this.fail("read", err)
             }
             if k >= 0 {
+                this.drained = k > 0 && k < len(buf) - off && this.nw != "udp"
                 return k
             }
             await this.waitRead("read")?
