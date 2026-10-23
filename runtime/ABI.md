@@ -1113,8 +1113,11 @@ built as `*_async` variants that return a `zell_task *`.
     other worker sleeps.
   - A worker that blocks inside `zell_task_await` first moves its run-next
     job to its ring and wakes a worker to steal from it; a spare worker is
-    started if nobody is idle (10.5). At most 1024 worker threads (core
-    workers plus spares) exist at once.
+    started if nobody is idle (10.5), up to the spare limit: 4 per core
+    worker, at least 16 (`ZELL_SPARE_WORKERS` overrides), so a pool of N
+    workers never has more than N + max(16, 4N) threads (and never more
+    than 1024). Blocking is a C-API affair: compiled code awaits through
+    continuations and never blocks a worker.
   Compile the runtime with `-DZELL_SCHED_STATS` to print wake-up, spin,
   steal and queue counters at shutdown. The scheduler starts in
   `zell_runtime_init`, or lazily on the first `zell_sched_post`.
@@ -1313,10 +1316,29 @@ synchronous results. Start from that file.
   (section 11) and how `await` works in non-async code, if the language allows it.
 - **Worker thread**: it also blocks, but before blocking, if no worker is idle, the
   scheduler starts a **spare worker thread** so N runnable workers remain. Spares
-  retire once the blocked worker is running again and they find no work. Blocking
-  on a worker is therefore safe from deadlock, but expensive (one OS thread per
-  blocked call). **Compiler-generated `async` code must never call
-  `zell_task_await`.** It uses the continuation protocol in 10.3.
+  retire once the blocked worker is running again and they find no work.
+  **Spare limit**: at most max(16, 4N) spares exist at once (the
+  `ZELL_SPARE_WORKERS` environment variable overrides the number); a worker
+  that blocks when the spares are all in use blocks without a replacement,
+  so blocked callers queue up on the existing threads instead of each
+  getting one (10k producers blocked in `zell_chan_send` on a full channel
+  stay within N + max(16, 4N) threads; `channel_fan_in_10k` in
+  `tests/test_task.c` checks this). Past the limit the pool grows only on
+  a **stall**: a worker blocked over the limit re-checks every 10 ms, and
+  if every worker thread is blocked, none left `zell_task_await` meanwhile
+  and work is queued (nothing can run it: jobs blocked on jobs behind
+  them in the queue, as in `nested_await_on_worker`), it starts one more
+  spare, so such programs still finish, one thread per 10 ms of stall
+  instead of one per blocked call, never beyond 1024. Blocked threads that
+  another thread keeps releasing (a consumer on the main thread) are
+  progress, not a stall. Blocking on a worker remains expensive (one OS
+  thread per blocked call). **Compiler-generated `async` code must never
+  call `zell_task_await`.** It uses the continuation protocol in 10.3
+  (`await` outside an `async func` is a compile error, and the `task`
+  stdlib's `Channel`/`Mutex` are lowered to `zell_task_chan_send`,
+  `zell_task_chan_recv`, `zell_task_mutex_lock`, which return tasks). The
+  compiler emits `zell_task_await` only on the main thread (a synchronous
+  `main` waiting for an async one, section 11), which is no worker.
   `zell_mutex_lock` and `zell_chan_send`/`zell_chan_recv` are blocking
   conveniences built on `zell_task_await`, so the same rule applies to them.
 

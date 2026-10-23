@@ -521,6 +521,8 @@ static void fan_producer(zell_task *t, void *ctx) {
 
 TEST(channel_fan_in_10k) {
     enum { P = 10000, EACH = 10 };
+    zell__sched_threads_peak();   /* restart the count for this test */
+    int64_t t0 = now_ms();
     zell_chan *ch = zell_chan_new(8, NULL, 64);
     static fan_ctx fcs[P];
     static zell_task *ps[P];
@@ -534,6 +536,14 @@ TEST(channel_fan_in_10k) {
     for (int64_t i = 0; i < P; i++) { zell_task_await(ps[i]); assert(zell_task_is_done(ps[i])); zell_release(ps[i]); }
     assert(zell_chan_len(ch) == 0);
     zell_release(ch);
+    /* Blocked producers do not turn into threads beyond the spare limit
+     * (ABI.md 10.5): the pool stays at N core workers plus the spares,
+     * plus at most one thread per 10 ms of complete stall (a starved main
+     * thread on a loaded machine; here normally none). */
+    int64_t peak = zell__sched_threads_peak(), max = zell__sched_max_threads();
+    int64_t allowed = max + (now_ms() - t0) / 10 + 1;
+    if (peak > allowed) { fprintf(stderr, "  %lld worker threads alive at once, limit %lld\n", (long long)peak, (long long)allowed); assert(0); }
+    assert(max == zell_sched_workers() + (zell_sched_workers() * 4 > 16 ? zell_sched_workers() * 4 : 16));
 }
 
 /* Regression: 1000 producers block in zell_chan_send on a full channel,

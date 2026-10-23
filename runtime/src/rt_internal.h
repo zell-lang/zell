@@ -203,6 +203,8 @@ ZELL_HIDDEN bool zell__heap_each(void (*cb)(const char *type, int64_t bytes, voi
 /* diag (task.c): live task objects and jobs waiting in the run queue. */
 ZELL_HIDDEN int64_t zell__live_tasks(void);
 ZELL_HIDDEN int64_t zell__sched_queue_len(void);
+ZELL_HIDDEN int64_t zell__sched_threads_peak(void);   /* diag: most worker threads alive at once since the previous call */
+ZELL_HIDDEN int64_t zell__sched_max_threads(void);    /* core workers + the spare limit (ABI.md 10.5) */
 ZELL_HIDDEN int64_t zell__await_spurious_wakeups(void);  /* diag: zell_task_await wake-ups that found the task pending */
 /* diag (diag.c): releases the process-wide slots before the leak report. */
 ZELL_HIDDEN void zell__diag_shutdown(void);

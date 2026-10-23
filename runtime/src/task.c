@@ -83,6 +83,10 @@ static int64_t q_nworkers;    /* target parallelism N */
 static int64_t q_alive;       /* worker threads alive (N core + spares), under q_mu */
 static int64_t q_idle;        /* atomic: workers parked on q_cv */
 static int64_t q_blocked;     /* workers blocked inside zell_task_await, under q_mu */
+static int64_t q_max_spares;  /* spare workers allowed at once (ABI.md 10.1, 10.5) */
+static int64_t q_alive_peak;  /* most worker threads ever alive at once, under q_mu (diag) */
+static int64_t q_unblocks;    /* under q_mu: workers that left zell_task_await, ever (stall detection) */
+#define STALL_NS 10000000     /* a blocked pool with queued work and no progress for this long gets one more thread */
 static int64_t q_spinning;    /* atomic: 1 while a worker polls for work before parking */
 static int64_t q_wake_pending; /* under q_mu: wake-ups sent whose spinning token is not yet taken */
 
@@ -93,10 +97,22 @@ static int64_t q_wake_pending; /* under q_mu: wake-ups sent whose spinning token
 #define SPIN_NS 50000
 
 #ifdef ZELL_SCHED_STATS
-static int64_t st_wake, st_spin, st_spin_found, st_steal, st_linger, st_park, st_recheck, st_jobs_rn, st_jobs_ring, st_jobs_glob, st_rn_kick;
+static int64_t st_wake, st_spin, st_spin_found, st_steal, st_linger, st_park, st_recheck, st_jobs_rn, st_jobs_ring, st_jobs_glob, st_rn_kick, st_stall;
 #define STAT(x) __atomic_add_fetch(&st_##x, 1, __ATOMIC_RELAXED)
+/* Cycle profile of the resume path (x86 only): PROF_T(name) accumulates
+ * the cycles from the matching PROF_START() in a section. */
+static int64_t pr_lazy, pr_addcont, pr_complete, pr_drop, pr_findwork, pr_jobtail;
+#if defined(__x86_64__)
+#define PROF_START() uint64_t pr_t0_ = __builtin_ia32_rdtsc()
+#define PROF_T(x) __atomic_add_fetch(&pr_##x, (int64_t)(__builtin_ia32_rdtsc() - pr_t0_), __ATOMIC_RELAXED)
+#else
+#define PROF_START() ((void)0)
+#define PROF_T(x) ((void)0)
+#endif
 #else
 #define STAT(x) ((void)0)
+#define PROF_START() ((void)0)
+#define PROF_T(x) ((void)0)
 #endif
 
 static _Thread_local int t_is_worker;
@@ -421,6 +437,7 @@ static void run_job(const jobrec *j) {
     t_ctx = j->ctx;   /* the job's references move to the thread */
     t_cur = j->cur;
     j->fn(j->arg);
+    PROF_START();
     /* Restore the thread-locals before dropping the job's references:
      * the release may free the task (or context) and run destructors
      * (a task result's Drop) that start tasks, which must not see a
@@ -432,6 +449,7 @@ static void run_job(const jobrec *j) {
     t_cur = saved_cur;
     zell_release(done_ctx);
     zell_release(done_cur);
+    PROF_T(jobtail);
 }
 
 static void *worker_main(void *arg) {
@@ -442,8 +460,10 @@ static void *worker_main(void *arg) {
     zell__plat_thread_stack_init(); /* frame walks of the CPU profiler */
     for (;;) {
         jobrec j;
+        PROF_START();
         if (find_work(w, &j)) {
             stop_spinning(w);
+            PROF_T(findwork);
             run_job(&j);
             continue;
         }
@@ -535,7 +555,39 @@ static bool spawn_worker_locked(int spare) {
     w->tick = w->rn_streak = 0;
     if (!zell__plat_thread_start_detached(worker_main, w)) zell_panic("cannot create worker thread");
     q_alive++;
+    if (q_alive > q_alive_peak) q_alive_peak = q_alive;
     return true;
+}
+
+/* How many spare workers may exist at once: 4 per core worker, at least
+ * 16 (`ZELL_SPARE_WORKERS` overrides), never beyond the slots. A worker
+ * that blocks in zell_task_await while the spares are all in use blocks
+ * without a replacement: blocked callers of the C API queue up on fewer
+ * threads instead of turning into one OS thread each (10k producers
+ * blocked in zell_chan_send used to mean ~1000 threads). Compiled Zell
+ * code never blocks a worker (await is a continuation), so this only
+ * bounds C callers: tests and embedders. */
+static int64_t spare_limit(int64_t n) {
+    const char *env = getenv("ZELL_SPARE_WORKERS");
+    long v = env ? strtol(env, NULL, 10) : 0;
+    int64_t lim = v > 0 ? v : (n * 4 > 16 ? n * 4 : 16);
+    if (lim > MAX_WORKERS - n) lim = MAX_WORKERS - n;
+    return lim;
+}
+
+/* The most worker threads alive at once since the previous call (the
+ * count restarts from the threads alive now). */
+int64_t zell__sched_threads_peak(void) {
+    zell__plat_mutex_lock(&q_mu);
+    int64_t n = q_alive_peak;
+    q_alive_peak = q_alive;
+    zell__plat_mutex_unlock(&q_mu);
+    return n;
+}
+
+int64_t zell__sched_max_threads(void) {
+    if (!__atomic_load_n(&q_started, __ATOMIC_ACQUIRE)) zell__sched_start();
+    return q_nworkers + q_max_spares;
 }
 
 static int64_t worker_count(void) {
@@ -580,6 +632,7 @@ void zell__sched_start(void) {
     if (q_started) { zell__plat_mutex_unlock(&q_mu); return; }
     q_stopping = 0;
     q_nworkers = worker_count();
+    q_max_spares = spare_limit(q_nworkers);
     for (int64_t i = 0; i < q_nworkers; i++) spawn_worker_locked(0);
     __atomic_store_n(&q_started, 1, __ATOMIC_RELEASE);
     zell__plat_mutex_unlock(&q_mu);
@@ -605,9 +658,11 @@ static void sched_stop_started(void) {
     while (q_alive > 0) zell__plat_cond_wait(&idle_cv, &q_mu);
     zell__plat_mutex_unlock(&q_mu);
 #ifdef ZELL_SCHED_STATS
-    fprintf(stderr, "sched: wake %lld spin %lld spin_found %lld steal %lld linger %lld park %lld recheck %lld jobs rn %lld ring %lld glob %lld rn_kick %lld\n",
+    fprintf(stderr, "sched: wake %lld spin %lld spin_found %lld steal %lld linger %lld park %lld recheck %lld jobs rn %lld ring %lld glob %lld rn_kick %lld stall %lld\n",
             (long long)st_wake, (long long)st_spin, (long long)st_spin_found, (long long)st_steal, (long long)st_linger, (long long)st_park, (long long)st_recheck,
-            (long long)st_jobs_rn, (long long)st_jobs_ring, (long long)st_jobs_glob, (long long)st_rn_kick);
+            (long long)st_jobs_rn, (long long)st_jobs_ring, (long long)st_jobs_glob, (long long)st_rn_kick, (long long)st_stall);
+    fprintf(stderr, "sched: Mcycles lazy %lld addcont %lld complete %lld drop %lld findwork %lld jobtail %lld\n",
+            (long long)(pr_lazy >> 20), (long long)(pr_addcont >> 20), (long long)(pr_complete >> 20), (long long)(pr_drop >> 20), (long long)(pr_findwork >> 20), (long long)(pr_jobtail >> 20));
 #endif
     timers_stop();
     stop_io();
@@ -804,6 +859,7 @@ int64_t zell__sched_queue_len(void) {
 
 static void task_drop(void *obj) {
     zell_task *t = obj;
+    PROF_START();
     __atomic_sub_fetch(&g_live_tasks, 1, __ATOMIC_RELAXED);
     if (t->state == TASK_DONE && t->ops && t->ops->release)
         t->ops->release(t->slot + t->ops_offset);
@@ -822,6 +878,7 @@ static void task_drop(void *obj) {
         task_unlock(p);
         zell_release(p);
     }
+    PROF_T(drop);
 }
 
 static const zell_type_info task_type = { "Task", 0, task_drop };
@@ -980,7 +1037,9 @@ static bool task_complete(zell_task *t, const void *result) {
 }
 
 void zell_task_complete(zell_task *t, const void *result) {
+    PROF_START();
     if (!task_complete(t, result)) zell_panic("task completed twice");
+    PROF_T(complete);
 }
 
 bool zell_task_try_complete(zell_task *t, const void *result) {
@@ -1038,8 +1097,10 @@ static bool add_cont(zell_task *t, zell_resume_fn fn, void *frame, bool suspend)
 /* Public: the registering code (a coroutine) suspends when this returns
  * true, so the current task becomes its parent again. */
 bool zell_task_add_continuation(zell_task *t, zell_resume_fn fn, void *frame) {
+    PROF_START();
     if (!add_cont(t, fn, frame, true)) return false;
     if (t_cur) restore_parent(t_cur);
+    PROF_T(addcont);
     return true;
 }
 
@@ -1048,22 +1109,47 @@ void *zell_task_result(const zell_task *t) {
     return (void *)t->slot;
 }
 
+/* A worker blocked over the spare limit, STALL_NS after it blocked (or
+ * after its last check): if every worker thread is blocked, none left
+ * zell_task_await meanwhile and work is queued, nothing can run that work
+ * (progress depends on a thread that does not exist, as in a job that
+ * blocks on jobs behind it in the queue), so one more spare is started,
+ * past the limit. Blocked threads released by another thread (a consumer
+ * on the main thread draining a channel) count as progress: the pool then
+ * stays within the limit. One thread per STALL_NS of complete stall. */
+static void stall_check(worker *w, int64_t *unblocks0) {
+    zell__plat_mutex_lock(&q_mu);
+    if (!q_stopping && q_alive == q_blocked && q_unblocks == *unblocks0 &&
+        __atomic_load_n(&q_idle, __ATOMIC_RELAXED) == 0 && (queued_work() || any_runnext_full(w))) {
+        STAT(stall);
+        spawn_worker_locked(1);
+    }
+    *unblocks0 = q_unblocks;
+    zell__plat_mutex_unlock(&q_mu);
+}
+
 void *zell_task_await(zell_task *t) {
     if (!t) zell_panic_nil();
     if (zell_task_is_done(t)) return t->slot;
+    int over = 0;            /* blocked past the spare limit: watch for a stall */
+    int64_t unblocks0 = 0;
     if (t_is_worker) {
         /* Blocking a worker: its queued work must not wait with it. The
          * run-next slot goes to the ring, where thieves find it, and a
          * parked worker is woken to steal (the ring may hold the very job
          * that completes t). Then keep N runnable threads by starting a
-         * spare worker if nobody is idle (it retires later). */
+         * spare worker if nobody is idle (it retires later), up to
+         * q_max_spares of them (spare_limit). */
         worker *w = t_w;
         jobrec rn;
         if (runnext_take(w, &rn)) ring_push_slow(w, &rn);
         if (ring_len(w) != 0) wake_one();
         zell__plat_mutex_lock(&q_mu);
         q_blocked++;
-        if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == 0 && !q_stopping) spawn_worker_locked(1);
+        if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == 0 && !q_stopping) {
+            if (q_alive - q_nworkers < q_max_spares) spawn_worker_locked(1);
+            else { over = 1; unblocks0 = q_unblocks; }
+        }
         zell__plat_mutex_unlock(&q_mu);
     }
     int parked = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != TASK_DONE;
@@ -1078,8 +1164,17 @@ void *zell_task_await(zell_task *t) {
         task_unlock(t);
         zell__plat_mutex_lock(&t_park_mu);
         while (!a.done) {
-            zell__plat_cond_wait(&t_park_cv, &t_park_mu);
-            if (!a.done) __atomic_add_fetch(&g_await_spurious, 1, __ATOMIC_RELAXED);
+            if (!over) {
+                zell__plat_cond_wait(&t_park_cv, &t_park_mu);
+                if (!a.done) __atomic_add_fetch(&g_await_spurious, 1, __ATOMIC_RELAXED);
+            } else if (!zell__plat_cond_wait_ns(&t_park_cv, &t_park_mu, STALL_NS) && !a.done) {
+                /* q_mu is taken while t_park_mu is held: the completer
+                 * takes t_park_mu without q_mu, and no q_mu holder waits
+                 * for a park lock, so the order cannot invert. */
+                stall_check(t_w, &unblocks0);
+            } else if (!a.done) {
+                __atomic_add_fetch(&g_await_spurious, 1, __ATOMIC_RELAXED);
+            }
         }
         zell__plat_mutex_unlock(&t_park_mu);
     } else {
@@ -1089,6 +1184,7 @@ void *zell_task_await(zell_task *t) {
     if (t_is_worker) {
         zell__plat_mutex_lock(&q_mu);
         q_blocked--;
+        q_unblocks++;
         zell__plat_mutex_unlock(&q_mu);
     }
     return t->slot;
@@ -1676,6 +1772,7 @@ const int64_t zell_debug_task_layout[4] = {
  * dropped by restore_parent). */
 zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *result_ops, zell_object *ctx0) {
     if (t) return t;
+    PROF_START();
     t = task_new_ex(result_size, result_ops, 0);
     task_attach(t, t_cur);
     t->caller_ctx = ctx0;   /* moved */
@@ -1685,6 +1782,7 @@ zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_op
     zell_task *old = t_cur;
     t_cur = t;
     zell_release(old);  /* t->parent holds its own reference */
+    PROF_T(lazy);
     return t;
 }
 
