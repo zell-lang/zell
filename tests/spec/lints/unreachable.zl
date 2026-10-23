@@ -1,0 +1,12 @@
+// status: passing
+// warning: warning[L0001]: unreachable code
+
+namespace main
+
+import io
+
+func main() {
+    println("a")
+    return
+    println("dead")
+}

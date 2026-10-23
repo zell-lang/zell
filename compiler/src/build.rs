@@ -159,6 +159,13 @@ pub fn parse_args(args: &[String]) -> Result<(BuildOptions, Vec<String>), String
             "--no-debug-agent" => o.debug_agent = Some(false),
             "--leak-check" => o.leak_check = true,
             "--deny-warnings" => crate::sema::cycles::set_deny_warnings(true),
+            "--fix" => crate::sema::lint::update_config(|c| c.fix = true),
+            _ if a.starts_with("--lint=") => {
+                let v = &a["--lint=".len()..];
+                let level = crate::sema::lint::Level::parse(v).filter(|l| matches!(l, crate::sema::lint::Level::Off | crate::sema::lint::Level::Is(crate::diagnostics::Severity::Warning | crate::diagnostics::Severity::Error)));
+                let level = level.ok_or_else(|| format!("--lint takes off, warn or error, not `{v}`"))?;
+                crate::sema::lint::update_config(|c| c.global = Some(level));
+            }
             "--no-error-trace" => o.no_error_trace = true,
             "--static" => o.static_link = true,
             "--verbose" | "-v" => o.verbose = true,
@@ -520,6 +527,7 @@ fn front_end_plain(input: &Path) -> Result<(Vec<crate::span::SourceFile>, Progra
     if !diags.is_empty() {
         eprint!("{}", diags.render_all_files(&files));
     }
+    crate::sema::lint::apply_fixes_if_asked(&diags, &files);
     match program {
         Some(p) if !diags.has_errors() => Ok((files, p)),
         _ => Err("compilation failed".into()),
@@ -533,6 +541,7 @@ fn front_end_package(project: &Project, target: PkgId, dev: bool) -> Result<(pac
     if !diags.is_empty() {
         eprint!("{}", diags.render_all_files(&checked.files));
     }
+    crate::sema::lint::apply_fixes_if_asked(&diags, &checked.files);
     match checked.program.take() {
         Some(p) if !diags.has_errors() => Ok((checked, p)),
         _ => Err(format!("could not compile `{}`", project.packages[target].name)),

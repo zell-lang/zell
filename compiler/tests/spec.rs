@@ -42,6 +42,7 @@ const AREAS: &[&str] = &[
     "web",
     "data",
     "memory3",
+    "lints",
 ];
 
 /// Per-process timeout for a built program (a pending feature may hang).
@@ -442,6 +443,7 @@ areas!(
     spec_web = "web",
     spec_data = "data",
     spec_memory3 = "memory3",
+    spec_lints = "lints",
 );
 
 #[test]

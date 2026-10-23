@@ -752,13 +752,16 @@ impl Server {
             severity: Some(match d.severity {
                 zell::diagnostics::Severity::Error => DiagnosticSeverity::ERROR,
                 zell::diagnostics::Severity::Warning => DiagnosticSeverity::WARNING,
+                zell::diagnostics::Severity::Info => DiagnosticSeverity::INFORMATION,
+                zell::diagnostics::Severity::Hint => DiagnosticSeverity::HINT,
             }),
             source: Some("zell".into()),
             code: d.code.map(|c| NumberOrString::String(c.into())),
             message,
             related_information: (!related.is_empty()).then_some(related),
             // Unused code is faded out by editors.
-            tags: matches!(d.code, Some(zell::diagnostics::codes::UNUSED_VARIABLE | zell::diagnostics::codes::UNUSED_IMPORT)).then(|| vec![DiagnosticTag::UNNECESSARY]),
+            tags: (matches!(d.code, Some(zell::diagnostics::codes::UNUSED_VARIABLE | zell::diagnostics::codes::UNUSED_IMPORT)) || d.code.and_then(zell::sema::lint::lint).is_some_and(|l| l.unnecessary))
+                .then(|| vec![DiagnosticTag::UNNECESSARY]),
             ..Default::default()
         }
     }

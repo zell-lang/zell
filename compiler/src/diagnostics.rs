@@ -7,6 +7,21 @@ use std::fmt;
 pub enum Severity {
     Error,
     Warning,
+    /// Lints only: shown, never fails a build.
+    Info,
+    /// Lints only: a hint editors show unobtrusively.
+    Hint,
+}
+
+impl Severity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+            Severity::Hint => "hint",
+        }
+    }
 }
 
 /// Stable diagnostic codes for the cases tools offer quick fixes for
@@ -121,9 +136,9 @@ impl Diagnostic {
     /// ```
     pub fn render(&self, file: &SourceFile) -> String {
         let (line, col) = file.line_col(self.span.start);
-        let sev = match self.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
+        let sev = match self.code.filter(|c| c.starts_with('L')) {
+            Some(code) => format!("{}[{code}]", self.severity.label()),
+            None => self.severity.label().to_string(),
         };
         let mut out = format!("{sev}: {}\n  --> {}:{line}:{col}\n", self.message, file.path);
         let src = file.line_text(line);
@@ -151,7 +166,7 @@ impl Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {} at {}", match self.severity { Severity::Error => "error", Severity::Warning => "warning" }, self.message, self.span)
+        write!(f, "{}: {} at {}", self.severity.label(), self.message, self.span)
     }
 }
 

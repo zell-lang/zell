@@ -1,0 +1,14 @@
+// status: passing
+// no-warning: L0004
+
+namespace main
+
+import io
+
+func main() {
+    var x = 1
+    // zell:allow L0004
+    x = x
+    x = x // zell:allow self-assign
+    println(x)
+}

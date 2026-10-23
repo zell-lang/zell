@@ -197,7 +197,7 @@ fn complete_fixes<'f>(diags: &mut [Diagnostic], text_of: &dyn Fn(usize) -> Optio
 
 /// `span` widened to whole lines (with the newline) when the rest of
 /// its first and last line is blank.
-fn whole_lines(text: &str, span: Span) -> Span {
+pub(crate) fn whole_lines(text: &str, span: Span) -> Span {
     let (s, e) = (span.start as usize, (span.end as usize).min(text.len()));
     let ls = text[..s].rfind('\n').map_or(0, |i| i + 1);
     let le = text[e..].find('\n').map_or(text.len(), |i| e + i + 1);

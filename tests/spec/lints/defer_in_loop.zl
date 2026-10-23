@@ -1,0 +1,13 @@
+// status: passing
+// warning: info[L0008]: defer in a loop runs at function exit
+
+namespace main
+
+import io
+
+func main() {
+    for i in 0..2 {
+        defer println(i)
+    }
+    println("loop done")
+}

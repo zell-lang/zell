@@ -1,0 +1,19 @@
+// status: passing
+// warning: warning[L0004]: self-assignment of x
+// warning: warning[L0005]: condition 1 == 2 is always false
+// warning: warning[L0005]: comparison of x with itself is always true
+
+namespace main
+
+import io
+
+func main() {
+    var x = 1
+    x = x
+    if 1 == 2 {
+        println("never")
+    }
+    if x == x {
+        println(x)
+    }
+}

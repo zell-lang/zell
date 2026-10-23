@@ -259,10 +259,11 @@ fn call_hierarchy_incoming_and_outgoing() {
 fn robustness_large_files_edit_storms_and_broken_syntax() {
     // 20k lines: parse, analysis and full semantic tokens in reasonable time.
     let mut big = String::from("namespace app\n\nimport io\n\n");
+    // Exported: unused private functions would be linted (L0007).
     for i in 0..2500 {
-        big.push_str(&format!("func f{i}(a int) int {{\n    var b = a + {i}\n    if b > 3 {{\n        return b\n    }}\n    return a\n}}\n\n"));
+        big.push_str(&format!("func F{i}(a int) int {{\n    var b = a + {i}\n    if b > 3 {{\n        return b\n    }}\n    return a\n}}\n\n"));
     }
-    big.push_str("func main() {\n    println(f1(2))\n}\n");
+    big.push_str("func main() {\n    println(F1(2))\n}\n");
     assert!(big.lines().count() >= 20_000);
     let (dir, uri) = project_with("main.zl", &big);
     let mut c = Client::start(&dir);
@@ -279,7 +280,7 @@ fn robustness_large_files_edit_storms_and_broken_syntax() {
     for v in 0..200 {
         c.change(&uri, v + 2, &big.replacen("var b = a + 0", &format!("var b = a + {v}"), 1));
     }
-    let _ = definition(&mut c, &uri, pos_of(&big, "f1(2)", 0, 0));
+    let _ = definition(&mut c, &uri, pos_of(&big, "F1(2)", 0, 0));
     let st = c.request_raw(zell_lsp::ANALYZER_STATUS, serde_json::Value::Null);
     assert_eq!(st["queued"], 0, "{st}");
     assert!(st["stats"]["started"].as_u64().unwrap() < 20, "{st}");
