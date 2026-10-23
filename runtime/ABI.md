@@ -2410,7 +2410,7 @@ const int64_t zell_debug_task_layout[4] = {
 
 It is read-only data and never used by compiled code; a `--release` link
 (`--gc-sections`) may drop it, and the formatters then fall back to the
-x86-64 glibc offsets (104, 208, 1).
+x86-64 glibc offsets (104, 216, 1).
 
 ## 21. Tier-2 stdlib helpers (regex, compress, xml, html, mime)
 

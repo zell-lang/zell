@@ -307,7 +307,7 @@ def _task_layout():
             return int(tbl[1]), int(tbl[2]), int(tbl[3])
     except gdb.error:
         pass
-    return 104, 208, 1
+    return 104, 216, 1
 
 
 class TaskPrinter:

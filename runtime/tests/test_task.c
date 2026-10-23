@@ -1,4 +1,5 @@
 #include "test.h"
+#include "../src/rt_internal.h"   /* zell__await_spurious_wakeups (diag) */
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>
@@ -535,6 +536,35 @@ TEST(channel_fan_in_10k) {
     zell_release(ch);
 }
 
+/* Regression: 1000 producers block in zell_chan_send on a full channel,
+ * each on its own (spare) worker thread, all inside zell_task_await. Every
+ * receive completes one sender and must wake only that thread. The old
+ * process-wide condition variable woke all of them on each completion
+ * (~P*P/2 spurious wake-ups): a thundering herd that hung the fan-in test
+ * under TSan. A spurious wake-up here means a thread that found its task
+ * still pending; pthread may produce a stray one, never a herd. */
+TEST(await_wakes_one_thread) {
+    enum { P = 1000 };
+    int64_t before = zell__await_spurious_wakeups();
+    zell_chan *ch = zell_chan_new(8, NULL, 1);
+    static fan_ctx fcs[P];
+    static zell_task *ps[P];
+    for (int64_t i = 0; i < P; i++) {
+        fcs[i] = (fan_ctx){ ch, i, 1 };
+        ps[i] = zell_task_spawn(fan_producer, &fcs[i]);
+    }
+    /* let the producers pile up: each blocked send starts a spare worker */
+    struct timespec ts = { 0, 300 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    int64_t sum = 0, v;
+    for (int64_t n = 0; n < P; n++) { assert(zell_chan_recv(ch, &v)); sum += v; }
+    assert(sum == (int64_t)P * (P - 1) / 2);
+    for (int64_t i = 0; i < P; i++) { zell_task_await(ps[i]); zell_release(ps[i]); }
+    zell_release(ch);
+    int64_t spurious = zell__await_spurious_wakeups() - before;
+    if (spurious >= P) { fprintf(stderr, "  %lld spurious await wake-ups for %d completions\n", (long long)spurious, P); assert(0); }
+}
+
 /* A pending receive and a pending send are cancelled through their own
  * task (task.Any cancels losers this way) and leave the queues. */
 TEST(channel_cancel_waits) {
@@ -728,6 +758,7 @@ int main(int argc, char **argv) {
     RUN(channel_async_and_strings);
     RUN(channel_capacities);
     RUN(channel_fan_in_10k);
+    RUN(await_wakes_one_thread);
     RUN(channel_cancel_waits);
     RUN(mutex_contention_1k);
     RUN(drop_in_job_teardown_starts_task);

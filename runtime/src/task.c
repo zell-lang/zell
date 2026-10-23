@@ -719,7 +719,7 @@ static inline void hook_free(hook *h) {
 struct zell_task {
     zell_object hdr;
     int32_t mu;                 /* spin lock (task_lock): short critical sections only */
-    int32_t waiters;            /* atomic: threads blocked in zell_task_await */
+    int32_t _pad0;
     int32_t state;              /* atomic */
     int32_t _pad;
     int64_t result_size;
@@ -748,8 +748,33 @@ struct zell_task {
      * by tm_mu (NULL once it fired or was removed): lets rt_fire drop the
      * timer in O(log n) instead of scanning all timers. */
     struct timer *timer;
+    /* Threads blocked in zell_task_await (guarded by mu): each is woken
+     * through its own condition variable, exactly once, by task_complete. */
+    struct awaiter *awaiters;
     unsigned char slot[];       /* result_size bytes (8-aligned) */
 };
+
+/* A thread blocked in zell_task_await, on its stack. It parks on its own
+ * (thread-local) mutex and condition variable: a process-wide condition
+ * shared by every blocked thread turned each completion into a broadcast
+ * to all of them (10k producers blocking in zell_chan_send on a full
+ * channel spawn ~1000 spare workers; each receive then woke all 1000,
+ * which re-locked the shared mutex and went back to sleep: a thundering
+ * herd that looked like a hang under TSan). Invariant: `done` is set and
+ * the waiter signalled only after the task's state is TASK_DONE, by the
+ * completing thread, with the awaiter still linked on the task (so the
+ * waiter's stack frame is alive): a waiter that finds the task done under
+ * its lock never links itself and is never signalled. */
+typedef struct awaiter {
+    zell__plat_mutex *mu;
+    zell__plat_cond *cv;
+    int32_t done;               /* under *mu */
+    struct awaiter *next;
+} awaiter;
+
+static _Thread_local zell__plat_mutex t_park_mu = ZELL_PLAT_MUTEX_INIT;
+static _Thread_local zell__plat_cond t_park_cv = ZELL_PLAT_COND_INIT;
+static int64_t g_await_spurious;   /* diag: wake-ups of zell_task_await that found the task still pending */
 
 static int64_t g_live_tasks; /* diag */
 
@@ -757,8 +782,8 @@ static int64_t g_live_tasks; /* diag */
  * call into user code that could take it again), so a spin lock with a
  * yield is cheaper than a pthread mutex, which every async call would
  * otherwise initialise, lock and destroy. Threads blocking on a task
- * (zell_task_await) wait on one process-wide condition instead of a
- * per-task one; completion wakes them only when the task has waiters. */
+ * (zell_task_await) link an awaiter on it and park on their own
+ * condition variable (see awaiter). */
 static inline void task_lock(zell_task *t) {
     while (__atomic_exchange_n(&t->mu, 1, __ATOMIC_ACQUIRE)) {
         while (__atomic_load_n(&t->mu, __ATOMIC_RELAXED)) zell__plat_yield();
@@ -767,10 +792,8 @@ static inline void task_lock(zell_task *t) {
 
 static inline void task_unlock(zell_task *t) { __atomic_store_n(&t->mu, 0, __ATOMIC_RELEASE); }
 
-static zell__plat_mutex g_await_mu = ZELL_PLAT_MUTEX_INIT;
-static zell__plat_cond g_await_cv = ZELL_PLAT_COND_INIT;
-
 int64_t zell__live_tasks(void) { return __atomic_load_n(&g_live_tasks, __ATOMIC_RELAXED); }
+int64_t zell__await_spurious_wakeups(void) { return __atomic_load_n(&g_await_spurious, __ATOMIC_RELAXED); }
 
 int64_t zell__sched_queue_len(void) {
     int64_t n = __atomic_load_n(&q_len, __ATOMIC_SEQ_CST);
@@ -922,15 +945,19 @@ static bool task_complete(zell_task *t, const void *result) {
     t->conts = NULL;
     cont first = t->cont0;   /* copied out: t may be freed once unlocked */
     t->cont0.fn = NULL;
-    /* A waiter increments `waiters` before it checks the state (both
-     * sequentially consistent), and checks it under g_await_mu, which the
-     * broadcast takes: it either sees DONE or is woken. */
-    if (__atomic_load_n(&t->waiters, __ATOMIC_SEQ_CST)) {
-        zell__plat_mutex_lock(&g_await_mu);
-        zell__plat_cond_broadcast(&g_await_cv);
-        zell__plat_mutex_unlock(&g_await_mu);
-    }
+    awaiter *aw = t->awaiters;   /* blocked threads: linked under the lock, so none can join after this */
+    t->awaiters = NULL;
     task_unlock(t);
+    /* Wake each blocked thread once. `next` is read first: once `done` is
+     * published the waiter may return and its frame is gone. */
+    while (aw) {
+        awaiter *n = aw->next;
+        zell__plat_mutex_lock(aw->mu);
+        aw->done = 1;
+        zell__plat_cond_signal(aw->cv);
+        zell__plat_mutex_unlock(aw->mu);
+        aw = n;
+    }
     restore_parent(t);  /* a coroutine returning: the code after it is its parent's */
     zell_release(t);
     /* After this point `t` may be freed; use only `first` and `rev`. */
@@ -1041,11 +1068,23 @@ void *zell_task_await(zell_task *t) {
     }
     int parked = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != TASK_DONE;
     if (parked) zell__rc_park(1);   /* others may merge our refcount queue (rc.c) */
-    __atomic_add_fetch(&t->waiters, 1, __ATOMIC_SEQ_CST);
-    zell__plat_mutex_lock(&g_await_mu);
-    while (__atomic_load_n(&t->state, __ATOMIC_SEQ_CST) != TASK_DONE) zell__plat_cond_wait(&g_await_cv, &g_await_mu);
-    zell__plat_mutex_unlock(&g_await_mu);
-    __atomic_sub_fetch(&t->waiters, 1, __ATOMIC_SEQ_CST);
+    /* Link under the task's lock: task_complete sets DONE and takes the
+     * list under the same lock, so either we see DONE here or the
+     * completer sees us and signals our condition variable. */
+    task_lock(t);
+    if (t->state != TASK_DONE) {
+        awaiter a = { &t_park_mu, &t_park_cv, 0, t->awaiters };
+        t->awaiters = &a;
+        task_unlock(t);
+        zell__plat_mutex_lock(&t_park_mu);
+        while (!a.done) {
+            zell__plat_cond_wait(&t_park_cv, &t_park_mu);
+            if (!a.done) __atomic_add_fetch(&g_await_spurious, 1, __ATOMIC_RELAXED);
+        }
+        zell__plat_mutex_unlock(&t_park_mu);
+    } else {
+        task_unlock(t);
+    }
     if (parked) zell__rc_unpark();
     if (t_is_worker) {
         zell__plat_mutex_lock(&q_mu);

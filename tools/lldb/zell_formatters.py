@@ -618,7 +618,7 @@ def closure_summary(v, _dict):
 
 # Fallback layout of struct zell_task (runtime/src/task.c, x86-64 glibc)
 # for executables without the zell_debug_task_layout table (gc'd release).
-_TASK_FALLBACK = (104, 208, 1)
+_TASK_FALLBACK = (104, 216, 1)
 _task_layouts = {}
 
 
