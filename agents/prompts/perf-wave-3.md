@@ -260,3 +260,13 @@ await" cost as await_chain; register fds at socket creation. Windows
   Silicon, zell-lsp from the archive).
 - Fixed on the way: mutex fast path ignoring the queue guard (double owner,
   "unlock of unlocked mutex" in the arm64 bundle smoke).
+- Later the same evening: `text.template` 1739 -> 943 ms (Go 669, **1.41x**;
+  the executor copied inline structs and so retained/released every field —
+  indices instead of copies; left: the 120-byte `Value` passed by value),
+  `zell_string_from_int` writes digits straight into the string, `fmt.Format`
+  with one `{0}` and a prefix or suffix lowered to one concatenation
+  (`builder 100MB` 340 ms vs Go 296, **1.15x**). `scripts/soak-http.sh`
+  (RSS growth gate) and `make -C runtime fuzz-json` (libFuzzer, ASan+UBSan,
+  27-file corpus) added; the fuzzer's first finding — an undefined
+  double->int64 cast in `rt_int` for out-of-range numbers — fixed by
+  saturating, reproducer in the corpus.
