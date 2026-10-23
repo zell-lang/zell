@@ -231,3 +231,75 @@ fn rename_is_versioned_null_where_nothing_and_refuses_clashes() {
     assert!(e.message.contains("clash"), "{}", e.message);
     assert!(rename_req(&mut c, &uri, total, "sum").error.is_none());
 }
+
+#[test]
+fn call_hierarchy_incoming_and_outgoing() {
+    let (dir, uri) = project_with("main.zl", SRC);
+    let mut c = Client::start(&dir);
+    assert!(c.capabilities.call_hierarchy_provider.is_some());
+    c.open(&uri, SRC);
+    let items: Option<Vec<CallHierarchyItem>> = c.request::<request::CallHierarchyPrepare>(CallHierarchyPrepareParams { text_document_position_params: tdp(&uri, pos_of(SRC, "helper()", 0, 1)), work_done_progress_params: Default::default() });
+    let helper = items.unwrap().pop().unwrap();
+    assert_eq!((helper.name.as_str(), helper.selection_range.start), ("helper", pos_of(SRC, "helper()", 0, 0)));
+    let inc: Option<Vec<CallHierarchyIncomingCall>> = c.request::<request::CallHierarchyIncomingCalls>(CallHierarchyIncomingCallsParams { item: helper, work_done_progress_params: Default::default(), partial_result_params: Default::default() });
+    let inc = inc.unwrap();
+    assert_eq!(inc.len(), 1, "{inc:?}");
+    assert_eq!(inc[0].from.name, "main");
+    assert_eq!(inc[0].from_ranges, vec![Range { start: col_in(SRC, "helper()", 1, "utf-16"), end: Position { character: col_in(SRC, "helper()", 1, "utf-16").character + 6, ..col_in(SRC, "helper()", 1, "utf-16") } }]);
+    let out: Option<Vec<CallHierarchyOutgoingCall>> = c.request::<request::CallHierarchyOutgoingCalls>(CallHierarchyOutgoingCallsParams { item: inc[0].from.clone(), work_done_progress_params: Default::default(), partial_result_params: Default::default() });
+    let out = out.unwrap();
+    assert!(out.iter().any(|o| o.to.name == "helper" && o.from_ranges.len() == 1), "{out:?}");
+    // Not a function: nothing to prepare.
+    let none: Option<Vec<CallHierarchyItem>> = c.request::<request::CallHierarchyPrepare>(CallHierarchyPrepareParams { text_document_position_params: tdp(&uri, pos_of(SRC, "total", 0, 1)), work_done_progress_params: Default::default() });
+    assert!(none.is_none());
+}
+
+/// Big files, edit storms and broken syntax at every nesting level.
+#[test]
+fn robustness_large_files_edit_storms_and_broken_syntax() {
+    // 20k lines: parse, analysis and full semantic tokens in reasonable time.
+    let mut big = String::from("namespace app\n\nimport io\n\n");
+    for i in 0..2500 {
+        big.push_str(&format!("func f{i}(a int) int {{\n    var b = a + {i}\n    if b > 3 {{\n        return b\n    }}\n    return a\n}}\n\n"));
+    }
+    big.push_str("func main() {\n    println(f1(2))\n}\n");
+    assert!(big.lines().count() >= 20_000);
+    let (dir, uri) = project_with("main.zl", &big);
+    let mut c = Client::start(&dir);
+    c.open(&uri, &big);
+    assert_eq!(c.diagnostics(&uri), vec![]);
+    let t0 = std::time::Instant::now();
+    let toks: Option<SemanticTokensResult> = c.request::<request::SemanticTokensFullRequest>(SemanticTokensParams { text_document: TextDocumentIdentifier { uri: uri.clone() }, work_done_progress_params: Default::default(), partial_result_params: Default::default() });
+    let elapsed = t0.elapsed();
+    assert!(matches!(toks, Some(SemanticTokensResult::Tokens(ref t)) if t.data.len() > 20_000));
+    assert!(elapsed < Duration::from_secs(1), "semantic tokens took {elapsed:?}");
+    eprintln!("20k-line semantic tokens: {elapsed:?}");
+
+    // 200 rapid changes: at most a few analyses start, none piles up.
+    for v in 0..200 {
+        c.change(&uri, v + 2, &big.replacen("var b = a + 0", &format!("var b = a + {v}"), 1));
+    }
+    let _ = definition(&mut c, &uri, pos_of(&big, "f1(2)", 0, 0));
+    let st = c.request_raw(zell_lsp::ANALYZER_STATUS, serde_json::Value::Null);
+    assert_eq!(st["queued"], 0, "{st}");
+    assert!(st["stats"]["started"].as_u64().unwrap() < 20, "{st}");
+
+    // A syntax error at each nesting level: no panic, positioned diagnostics.
+    let src = "namespace app\n\nfunc main() {\n    if true {\n        for i := 0; i < 3; i++ {\n            var x = 1\n        }\n    }\n}\n";
+    let (dir, uri) = project_with("main.zl", src);
+    let mut c = Client::start(&dir);
+    c.open(&uri, src);
+    let lines: Vec<&str> = src.lines().collect();
+    for (n, l) in lines.iter().enumerate().skip(2) {
+        let broken = src.replacen(l, &format!("{l} )("), 1);
+        c.change(&uri, n as i32 + 2, &broken);
+        let d = c.diagnostics(&uri);
+        assert!(!d.is_empty(), "line {n}");
+        let last = broken.lines().count() as u32;
+        assert!(d.iter().all(|d| d.range.start.line <= last && d.range.start <= d.range.end), "{d:?}");
+        for m in [request::HoverRequest::METHOD, request::Completion::METHOD, request::DocumentHighlightRequest::METHOD] {
+            let id = c.send_request(m, serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": n, "character": 6 } }));
+            assert!(c.response(&id).error.is_none(), "{m} at line {n}");
+        }
+    }
+}

@@ -69,7 +69,8 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
    выдачи диагностик; `Session` дополняет то, что требует текста и AST
    (удаление целой строки, удаление `var`).
 6. **Стабильные позиции**: внутри компилятора — байтовые смещения,
-   на границе LSP — конвертация в UTF-16 строка/колонка через `SourceFile`.
+   на границе LSP — конвертация в строку/колонку в согласованной кодировке
+   (UTF-8/16/32, `SourceFile::position_in`/`offset_in`).
 
 ## LSP-сервер (`zell lsp`)
 
@@ -108,6 +109,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | Метод | Capability | Где |
 |-------|-----------|-----|
 | `textDocument/didOpen`, `didChange`, `didSave`, `didClose` | `textDocumentSync`: `change: Incremental` (2), `save.includeText` | `lib.rs`, `sync.rs` |
+| `initialize`, `shutdown`, `exit` | `positionEncoding`: первая из `utf-8`/`utf-16`/`utf-32` в `general.positionEncodings` клиента, иначе `utf-16` | `lib.rs`, `encoding.rs` |
 | `$/cancelRequest` | — | `lib.rs` |
 | `textDocument/publishDiagnostics` (push) | — | `lib.rs` |
 | `textDocument/diagnostic`, `workspace/diagnostic` (pull) | `diagnosticProvider { identifier: "zell", interFileDependencies, workspaceDiagnostics }` | `handlers.rs` |
@@ -124,6 +126,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix], resolveProvider }` | `assist.rs` |
 | `textDocument/codeLens`, `codeLens/resolve` | `codeLensProvider { resolveProvider }` | `lens.rs` |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | `semanticTokensProvider { full: { delta: true }, range: true }` | `features.rs` |
+| `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | `callHierarchyProvider` | `hierarchy.rs` |
 | `textDocument/foldingRange`, `selectionRange` | `foldingRangeProvider`, `selectionRangeProvider` | `features.rs`, `nav.rs` |
 | `textDocument/formatting`, `rangeFormatting` | `documentFormattingProvider`, `documentRangeFormattingProvider` | `assist.rs` |
 | `workspace/didChangeWatchedFiles`, `didChangeConfiguration` | — | `lib.rs` |
@@ -133,8 +136,20 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 
 Подробности:
 
-- **Синхронизация** инкрементальная: диапазоны `contentChanges` в UTF-16
-  применяются к копии текста у сервера по порядку (`\r` перед `\n` не часть
+- **Жизненный цикл** (LSP 3.17): запросы до `initialize` — ошибка
+  `ServerNotInitialized` (−32002); после `shutdown` — `InvalidRequest`, а
+  ждущие в очереди отменяются; `exit` без `shutdown` — код выхода 1.
+  Паника в обработчике отвечает `InternalError`, сервер продолжает работу.
+  Соответствие спецификации по методам — `docs/LSP_CONFORMANCE.md`.
+- **Rename**: `WorkspaceEdit` одним ответом на все файлы (в том числе
+  неоткрытые); `documentChanges` с версиями открытых документов, если
+  клиент объявил `workspace.workspaceEdit.documentChanges`, иначе
+  `changes`. Переименование, при котором имя совпало бы с видимым в месте
+  использования (локальная, член пространства имён, импорт) или с соседним
+  членом, отклоняется с объяснением; `prepareRename` там, где нет символа, —
+  `null`, на символе std/зависимости — ошибка с причиной.
+- **Синхронизация** инкрементальная: диапазоны `contentChanges` в
+  согласованной кодировке применяются к копии текста у сервера по порядку (`\r` перед `\n` не часть
   строки, позиции за концом строки/текста прижимаются к концу); изменение
   без `range` заменяет весь текст. Разбор откладывается до старта анализа,
   поэтому серия `didChange` стоит одного разбора и одного анализа.

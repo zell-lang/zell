@@ -536,7 +536,7 @@ fn in_comment_or_string(prefix: &str) -> bool {
 }
 
 /// The innermost function or method whose declaration contains `off`.
-fn enclosing_fn(a: &Analysis, file: usize, off: u32) -> Option<SymbolId> {
+pub(crate) fn enclosing_fn(a: &Analysis, file: usize, off: u32) -> Option<SymbolId> {
     a.index
         .symbols
         .iter()

@@ -37,6 +37,7 @@ mod encoding;
 mod features;
 mod files;
 mod handlers;
+mod hierarchy;
 mod lens;
 mod nav;
 mod sync;
@@ -251,6 +252,7 @@ pub fn capabilities() -> ServerCapabilities {
         rename_provider: Some(OneOf::Right(RenameOptions { prepare_provider: Some(true), work_done_progress_options: Default::default() })),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+        call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
             legend: features::legend(),
             full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),

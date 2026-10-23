@@ -3,7 +3,7 @@
 //! see the crate docs), or against the current text for the text-only
 //! ones, and returns its result or an error.
 
-use crate::{assist, features, files, lens, nav, path_of, range, Server};
+use crate::{assist, features, files, hierarchy, lens, nav, path_of, range, Server};
 use lsp_server::{Request, RequestId};
 use lsp_types::request::Request as _;
 use lsp_types::*;
@@ -60,6 +60,9 @@ impl Server {
             request::DocumentHighlightRequest => Self::highlights,
             request::DocumentDiagnosticRequest => Self::document_diagnostic,
             request::WillRenameFiles => Self::will_rename_files,
+            request::CallHierarchyPrepare => Self::prepare_call_hierarchy,
+            request::CallHierarchyIncomingCalls => Self::incoming_calls,
+            request::CallHierarchyOutgoingCalls => Self::outgoing_calls,
         }
         match req.method.as_str() {
             request::WorkspaceDiagnosticRequest::METHOD => match serde_json::from_value::<WorkspaceDiagnosticParams>(req.params) {
@@ -221,6 +224,22 @@ impl Server {
         }
         let span = a.name_span_at(file, off).ok_or("no name at this position")?;
         Ok((sym_id, span))
+    }
+
+    fn prepare_call_hierarchy(&mut self, p: CallHierarchyPrepareParams) -> Reply<Option<Vec<CallHierarchyItem>>> {
+        let tdp = p.text_document_position_params;
+        let v = self.analysis_version;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| hierarchy::prepare(&a, v, file, off, &|f| self.uri_of(&a, f))))
+    }
+
+    fn incoming_calls(&mut self, p: CallHierarchyIncomingCallsParams) -> Reply<Option<Vec<CallHierarchyIncomingCall>>> {
+        let v = self.analysis_version;
+        Ok(self.analysis.clone().and_then(|a| hierarchy::incoming(&a, v, &p.item, &|f| self.uri_of(&a, f))))
+    }
+
+    fn outgoing_calls(&mut self, p: CallHierarchyOutgoingCallsParams) -> Reply<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let v = self.analysis_version;
+        Ok(self.analysis.clone().and_then(|a| hierarchy::outgoing(&a, v, &p.item, &|f| self.uri_of(&a, f))))
     }
 
     fn prepare_rename(&mut self, p: TextDocumentPositionParams) -> Reply<Option<PrepareRenameResponse>> {
