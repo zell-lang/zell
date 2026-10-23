@@ -464,11 +464,34 @@ impl<'a> Sema<'a> {
         None
     }
 
+    /// `json.Value` in a file with `import encoding.json`: a builtin
+    /// attribute name (`json`, `yaml`, `toml`, ...) as the head of a
+    /// qualified path is the imported namespace of that last segment, not
+    /// the attribute's value struct (which has no members to qualify).
+    fn attr_name_namespace(&mut self, segs: &[&ast::Ident]) -> Option<NsIdx> {
+        let n = segs[0].name.as_str();
+        if segs.len() < 2 || !super::reflect::ATTR_STRUCTS.contains(&n) || self.nss[self.cur_ns].members.contains_key(n) {
+            return None;
+        }
+        let suffix = format!(".{n}");
+        let (i, ns) = self.file_scopes[self.cur_file].imports.iter().enumerate().find_map(|(i, e)| match e {
+            ImportEntry::Glob(ns) if self.nss[*ns].path.ends_with(&suffix) => Some((i, *ns)),
+            _ => None,
+        })?;
+        if let Some(u) = self.file_scopes[self.cur_file].import_uses.get_mut(i) {
+            u.1 = true;
+        }
+        Some(ns)
+    }
+
     /// Resolves as many leading segments of `segs` as name declarations
     /// (namespaces, types, static methods, variants); returns the result and
     /// the number of segments consumed. `None` if the head is unknown.
     pub(crate) fn resolve_segments(&mut self, segs: &[&ast::Ident], report: bool) -> Option<(PathRes, usize)> {
-        let mut cur = self.lookup_global(segs[0], report)?;
+        let mut cur = match self.attr_name_namespace(segs) {
+            Some(ns) => PathRes::Member(Member::Ns(ns)),
+            None => self.lookup_global(segs[0], report)?,
+        };
         self.ide_res(segs[0], cur);
         let mut i = 1;
         while i < segs.len() {
