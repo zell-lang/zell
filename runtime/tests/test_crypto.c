@@ -418,6 +418,69 @@ TEST(chacha20poly1305_rfc8439) {
     assert(!zell__chacha20poly1305_open(key, nonce, aad, 12, out, n, back));
 }
 
+
+/* RFC 8439 A.5 (AEAD decryption test vector, 265 bytes: also covers the 512-byte-free tail path) */
+static void chacha_a5(void) {
+    static const char pt[] = "Internet-Drafts are draft documents valid for a maximum of six months and may be "
+                             "updated, replaced, or obsoleted by other documents at any time. It is inappropriate "
+                             "to use Internet-Drafts as reference material or to cite them other than as "
+                             "/\xe2\x80\x9c" "work in progress./\xe2\x80\x9d";
+    size_t n = sizeof pt - 1;
+    assert(n == 265);
+    uint8_t key[32], nonce[12], aad[12], out[265 + 16], back[265];
+    unhex(key, "1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0");
+    unhex(nonce, "000000000102030405060708");
+    unhex(aad, "f33388860000000000004e91");
+    zell__chacha20poly1305_seal(key, nonce, aad, 12, (const uint8_t *)pt, n, out);
+    check_hex(out + n, 16, "eead9d67890cbb22392336fea1851f38");
+    check_hex(out, n + 16, "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b948114ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523eaf4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa76991955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709beead9d67890cbb22392336fea1851f38");
+    assert(zell__chacha20poly1305_open(key, nonce, aad, 12, out, n, back));
+    assert(memcmp(back, pt, n) == 0);
+}
+
+/* Seal many lengths and hash everything; the digest comes from an independent
+ * implementation (python-cryptography), so it checks AVX2, portable and Poly1305. */
+static void chacha_lengths(const char *want) {
+    static const size_t lens[] = { 0, 1, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 4099, 65536 + 7 };
+    uint8_t key[32], nonce[12], aad[13];
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i * 7 + 1);
+    for (int i = 0; i < 12; i++) nonce[i] = (uint8_t)(i + 3);
+    for (int i = 0; i < 13; i++) aad[i] = (uint8_t)(i * 3);
+    uint8_t *pt = malloc(65536 + 7), *ct = malloc(65536 + 7 + 16), *back = malloc(65536 + 7);
+    assert(pt && ct && back);
+    zell_hash_ctx h;
+    zell__hash_init(&h, ZELL_HASH_SHA256);
+    for (size_t k = 0; k < sizeof lens / sizeof lens[0]; k++) {
+        size_t L = lens[k];
+        for (size_t i = 0; i < L; i++) pt[i] = (uint8_t)(i * 31 + L);
+        zell__chacha20poly1305_seal(key, nonce, aad, 13, pt, L, ct);
+        zell__hash_update(&h, ct, L + 16);
+        assert(zell__chacha20poly1305_open(key, nonce, aad, 13, ct, L, back));
+        assert(memcmp(back, pt, L) == 0);
+        /* in-place */
+        memcpy(back, pt, L);
+        zell__chacha20(key, nonce, 1, back, L, back);
+        assert(memcmp(back, ct, L) == 0);
+    }
+    uint8_t d[32];
+    zell__hash_final(&h, d);
+    check_hex(d, 32, want);
+    free(pt); free(ct); free(back);
+}
+
+TEST(chacha20poly1305_paths) {
+    const char *want = "2ab754d5ac9d2c7fa5190ab6c67870954667a524405db343d5b525037eea3132";
+    int have = zell__cpu_has_avx2();
+    chacha_a5();
+    chacha_lengths(want);
+    zell__avx2_force_off(1);
+    assert(!zell__cpu_has_avx2());
+    chacha_a5();
+    chacha_lengths(want);
+    zell__avx2_force_off(0);
+    printf("       (AVX2 %s)\n", have ? "available: both paths tested" : "not available: portable path only");
+}
+
 /* ---- X25519 (RFC 7748 5.2, 6.1) ---- */
 
 TEST(x25519_rfc7748) {
@@ -640,6 +703,7 @@ int main(void) {
     RUN(hkdf_rfc5869);
     RUN(aes_gcm);
     RUN(chacha20poly1305_rfc8439);
+    RUN(chacha20poly1305_paths);
     RUN(x25519_rfc7748);
     RUN(ed25519_rfc8032);
     RUN(p256_ecdsa_ecdh);

@@ -2087,7 +2087,9 @@ HMAC — собственная реализация на C по FIPS 180-4 / RF
   []byte) []byte!` (`alg` — `"sha256"`, `"sha384"`, `"sha512"`, `"sha1"`);
   `crypto.hmac.Sum(alg, key, data)`. SHA-256 на x86-64 с SHA-NI —
   intrinsics `sha256rnds2`/`sha256msg1`/`sha256msg2` (выбор по cpuid,
-  `ZELL_NO_SHANI=1` отключает), иначе переносимый C.
+  `ZELL_NO_SHANI=1` отключает), иначе переносимый C. ChaCha20-Poly1305 на x86-64 с AVX2:
+  ChaCha20 по 8 блоков за проход, Poly1305 (лимбы 2^44, 4 блока на редукцию) вперемешку с раундами
+  (выбор по cpuid, `ZELL_NO_AVX2=1` отключает), иначе переносимый C.
 - `crypto.aes`: `GcmSeal(key, nonce, plaintext, aad) []byte!`
   (шифртекст + 16-байтовый тег), `GcmOpen(key, nonce, ciphertext, aad)
   []byte!` (`aes-gcm: message authentication failed`), `EncryptBlock`,
