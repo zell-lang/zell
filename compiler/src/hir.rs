@@ -829,6 +829,19 @@ pub enum Builtin {
     /// `encoding.json.rtMake<T>(n int) []T` (internal): `n` zeroed elements
     /// with `len == cap == n` (`zell_slice_new_ops`); the nil slice for 0.
     SliceMake,
+    /// `args = [capacity]`: a runtime channel of `elem` (runtime
+    /// `zell_task_chan_new`), its handle as an `int`. `fallible` is `T!`
+    /// and `tuple` is `(T, bool)`: the result layouts of [`Self::ChanRecv`]
+    /// and [`Self::ChanNext`], whose sizes, ops and status offsets the
+    /// runtime is told.
+    ChanNew { elem: TypeId, fallible: TypeId, tuple: TypeId },
+    /// `args = [handle, value]`: `Task<void>` (runtime `zell_task_chan_send`;
+    /// the value is copied and retained by the runtime).
+    ChanSend,
+    /// `args = [handle]`: `Task<T!>` (runtime `zell_task_chan_recv`).
+    ChanRecv,
+    /// `args = [handle]`: `Task<(T, bool)>` (runtime `zell_task_chan_next`).
+    ChanNext,
 }
 
 /// One primitive print operation of a lowered `println`.

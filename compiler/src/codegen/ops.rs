@@ -478,6 +478,50 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.call_rt("zell_slice_new_ops", &[out.into(), size.into(), n.into(), n.into(), ops.into()]);
                 Ok(Val::owned(self.b.build_load(self.slice_ty(), out, "").unwrap()))
             }
+            Builtin::ChanNew { elem, fallible, tuple } => {
+                // The runtime stores elements with T's ops and writes the
+                // receive results in the compiled layouts of `T!` and
+                // `(T, bool)`: value at 0, status word at its field offset.
+                let cap = self.expr(&args[0])?.get();
+                let esz = self.i64_ty().const_int(self.size_of(elem), false);
+                let eops = self.value_ops(elem);
+                let fsz = self.i64_ty().const_int(self.size_of(fallible), false);
+                let fops = self.value_ops(fallible);
+                let ferr = self.i64_ty().const_int(self.field_offset(fallible, 1), false);
+                let tsz = self.i64_ty().const_int(self.size_of(tuple), false);
+                let tops = self.value_ops(tuple);
+                let tok = self.i64_ty().const_int(self.field_offset(tuple, 1), false);
+                let h = self.call_rt_v(
+                    "zell_task_chan_new",
+                    &[cap.into(), esz.into(), eops.into(), fsz.into(), fops.into(), ferr.into(), tsz.into(), tops.into(), tok.into()],
+                );
+                Ok(Val::borrowed(h))
+            }
+            Builtin::ChanSend => {
+                let h = self.expr(&args[0])?.get();
+                let v = self.expr(&args[1])?;
+                let vt = args[1].ty;
+                let vty = self.llty(vt);
+                let tmp = self.entry_alloca(vty, "send.v", false);
+                self.b.build_store(tmp, v.get()).unwrap();
+                let t = self.call_rt_v("zell_task_chan_send", &[h.into(), tmp.into()]);
+                self.drop_val(vt, v);   /* the runtime retained its own copy */
+                Ok(Val::owned(t))
+            }
+            Builtin::ChanRecv | Builtin::ChanNext => {
+                let h = self.expr(&args[0])?.get();
+                let f = if op == Builtin::ChanRecv { "zell_task_chan_recv" } else { "zell_task_chan_next" };
+                Ok(Val::owned(self.call_rt_v(f, &[h.into()])))
+            }
+        }
+    }
+
+    /// Byte offset of field `i` of the aggregate type `t` (0 when `t` is
+    /// not an aggregate, e.g. `void!`, which is just the error pointer).
+    fn field_offset(&mut self, t: TypeId, i: u32) -> u64 {
+        match self.llty(t) {
+            inkwell::types::BasicTypeEnum::StructType(st) => self.td.offset_of_element(&st, i).unwrap_or(0),
+            _ => 0,
         }
     }
 }

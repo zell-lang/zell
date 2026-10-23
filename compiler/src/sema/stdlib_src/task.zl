@@ -1,61 +1,35 @@
 // The Zell-source part of task (see sema/stdsrc.rs for the rules).
-// Delay, Yield, All and Any are runtime functions (stdlib.rs); the types
-// here are built from three runtime primitives: signals (rtSignal: a
-// pending Task<void> that rtFire completes once), per-object spin locks
+// Delay, Yield, All and Any are runtime functions (stdlib.rs), and so are
+// Channel<T> and Mutex (runtime/src/task_sync.c, through the rtChan*/
+// rtMutex* primitives); the rest is built from signals (rtSignal/rtWaker:
+// a pending Task<void> that rtFire completes once), per-object spin locks
 // (rtLock/rtUnlock on an int field, held only for a few statements, never
 // across an await) and the task context slot (rtGetCtx/rtSetCtx).
 namespace task
 
 // Mutex is an async mutual-exclusion lock. The zero value is unlocked;
 // `await m.Lock()` waits until the caller owns it, `m.Unlock()` hands it
-// to the oldest waiter (FIFO). Not re-entrant.
+// to the oldest waiter (FIFO). Not re-entrant. The three words belong to
+// the runtime (ABI.md 10.6): the lock state and the queue of waiting
+// tasks; a Mutex is not copied while in use.
 struct Mutex {
-    guard   int
-    locked  bool
-    waiters []Task<void>
+    state    int
+    waitHead int
+    waitTail int
 
     // Lock waits until the mutex is free and takes it (FIFO among waiters).
     func Lock() Task<void> {
-        rtLock(&this.guard)
-        if !this.locked {
-            this.locked = true
-            rtUnlock(&this.guard)
-            return Delay(0)
-        }
-        var s = rtWaker()
-        this.waiters = append(this.waiters, s)
-        rtUnlock(&this.guard)
-        return s
+        return rtMutexLock(&this.state)
     }
 
     // TryLock takes the mutex if it is free; reports whether it did.
     func TryLock() bool {
-        rtLock(&this.guard)
-        var ok = !this.locked
-        this.locked = true
-        rtUnlock(&this.guard)
-        return ok
+        return rtMutexTryLock(&this.state)
     }
 
     // Unlock releases the mutex, handing it to the oldest waiter; it panics if not locked.
     func Unlock() {
-        rtLock(&this.guard)
-        if !this.locked {
-            rtUnlock(&this.guard)
-            panic("unlock of unlocked mutex")
-        }
-        if len(this.waiters) == 0 {
-            this.locked = false
-            rtUnlock(&this.guard)
-            return
-        }
-        // Ownership passes directly to the oldest waiter.
-        var s = this.waiters[0]
-        var none Task<void>
-        this.waiters[0] = none
-        this.waiters = this.waiters[1..]
-        rtUnlock(&this.guard)
-        rtFire(s)
+        rtMutexUnlock(&this.state)
     }
 }
 
@@ -118,181 +92,64 @@ struct WaitGroup {
 // its Recv). Copies of a Channel share it. `await ch.Send(v)` waits for
 // room, `await ch.Recv()` for a value and fails once the channel is closed
 // and drained; Send on a closed channel panics. `for v in ch` receives
-// until then (Next, the iteration protocol).
+// until then (Next, the iteration protocol). The channel itself lives in
+// the runtime (ABI.md 10.7): waiting senders and receivers are queued
+// there and each is woken exactly once.
 struct Channel<T> {
-    st *chanState<T>
+    st *chanRef
 
     // New makes a channel with a buffer of capacity values (0: unbuffered); the same as `task.Channel<T>(capacity)`.
     static func New(capacity int) Channel<T> {
         if capacity < 0 {
             panic("negative channel capacity")
         }
-        return Channel<T>{st: new chanState<T>{capacity: capacity}}
+        return Channel<T>{st: new chanRef{h: rtChanNew<T>(capacity)}}
     }
 
     // Send waits for room (or a receiver) and sends v; it panics on a closed channel.
     func Send(v T) Task<void> {
-        return this.st.send(v)
+        return rtChanSend<T>(this.st.h, v)
     }
 
     // Recv waits for a value; it fails once the channel is closed and drained.
     func Recv() Task<T!> {
-        return this.st.recv()
+        return rtChanRecv<T>(this.st.h)
     }
 
     // The iteration protocol: `for v in ch` (inside an async function)
     // receives values until the channel is closed and drained.
-    async func Next() (T, bool) {
-        var v = try await this.Recv() catch _ {
-            var zero T
-            return (zero, false)
-        }
-        return (v, true)
+    func Next() Task<(T, bool)> {
+        return rtChanNext<T>(this.st.h)
     }
 
     // Close closes the channel: pending and later receives drain the buffer, then fail.
     func Close() {
-        this.st.close()
+        rtChanClose(this.st.h)
     }
 
     // Number of buffered values.
     func Len() int {
-        rtLock(&this.st.guard)
-        var n = len(this.st.buf)
-        rtUnlock(&this.st.guard)
-        return n
+        return rtChanLen(this.st.h)
     }
 
     // Cap returns the buffer capacity.
     func Cap() int {
-        return this.st.capacity
+        return rtChanCap(this.st.h)
     }
 
     // IsClosed reports whether Close was called.
     func IsClosed() bool {
-        rtLock(&this.st.guard)
-        var c = this.st.closed
-        rtUnlock(&this.st.guard)
-        return c
+        return rtChanIsClosed(this.st.h)
     }
 }
 
-struct chanState<T> {
-    guard    int
-    capacity int
-    buf      []T
-    closed   bool
-    sent     int
-    taken    int
-    recvq    []Task<void>
-    sendq    []Task<void>
+// The runtime channel shared by the copies of a Channel; released with
+// the last one.
+struct chanRef {
+    h int
 
-    func room() int {
-        if this.capacity == 0 {
-            return 1
-        }
-        return this.capacity
-    }
-
-    // Wakes the oldest waiting receiver (guard held).
-    func wakeRecv() {
-        if len(this.recvq) == 0 {
-            return
-        }
-        var s = this.recvq[0]
-        var none Task<void>
-        this.recvq[0] = none
-        this.recvq = this.recvq[1..]
-        rtFire(s)
-    }
-
-    // Wakes every waiting sender (guard held); they re-check.
-    func wakeSenders() {
-        for s in this.sendq {
-            rtFire(s)
-        }
-        this.sendq = nil
-    }
-
-    // In a cancelled task Send returns without sending.
-    async func send(v T) {
-        rtLock(&this.guard)
-        for !this.closed && len(this.buf) >= this.room() {
-            if IsCancelled() {
-                rtUnlock(&this.guard)
-                return
-            }
-            var s = rtSignal()
-            this.sendq = append(this.sendq, s)
-            rtUnlock(&this.guard)
-            await s
-            rtLock(&this.guard)
-        }
-        if this.closed {
-            rtUnlock(&this.guard)
-            panic("send on closed channel")
-        }
-        this.buf = append(this.buf, v)
-        this.sent += 1
-        var seq = this.sent
-        this.wakeRecv()
-        if this.capacity == 0 {
-            // Unbuffered: wait until a receiver took the value.
-            for this.taken < seq && !this.closed && !IsCancelled() {
-                var s = rtSignal()
-                this.sendq = append(this.sendq, s)
-                rtUnlock(&this.guard)
-                await s
-                rtLock(&this.guard)
-            }
-        }
-        rtUnlock(&this.guard)
-    }
-
-    async func recv() T! {
-        rtLock(&this.guard)
-        for len(this.buf) == 0 && !this.closed {
-            if IsCancelled() {
-                rtUnlock(&this.guard)
-                return ErrCancelled
-            }
-            var s = rtSignal()
-            this.recvq = append(this.recvq, s)
-            rtUnlock(&this.guard)
-            await s
-            rtLock(&this.guard)
-        }
-        if len(this.buf) == 0 {
-            rtUnlock(&this.guard)
-            return error("channel closed")
-        }
-        var v = this.buf[0]
-        var zero T
-        this.buf[0] = zero
-        this.buf = this.buf[1..]
-        this.taken += 1
-        this.wakeSenders()
-        if len(this.buf) > 0 {
-            this.wakeRecv()
-        }
-        rtUnlock(&this.guard)
-        return v
-    }
-
-    func close() {
-        rtLock(&this.guard)
-        if this.closed {
-            rtUnlock(&this.guard)
-            panic("close of closed channel")
-        }
-        this.closed = true
-        var rs = this.recvq
-        this.recvq = nil
-        this.wakeSenders()
-        rtUnlock(&this.guard)
-        for s in rs {
-            rtFire(s)
-        }
+    func Drop() {
+        rtChanRelease(this.h)
     }
 }
 

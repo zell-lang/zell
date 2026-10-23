@@ -225,6 +225,39 @@ TEST(relay_handoffs) {
     zell_release(t);
 }
 
+/* ---- a run-next slot behind a job that never yields: the job completes a
+ * task (its awaiter lands in this worker's run-next slot) and then spins
+ * until that awaiter has run, which it only can if another worker steals
+ * the slot after the grace period (the select_many deadlock: a loop that
+ * keeps finding completed tasks never gives its worker back). ---- */
+
+static int64_t starved_ran;
+
+static void starved_cont(void *arg) { (void)arg; __atomic_store_n(&starved_ran, 1, __ATOMIC_RELEASE); }
+
+static void hog_job(zell_task *t, void *ctx) {
+    (void)ctx;
+    zell_task *w = zell_task_new_plain(0, NULL);
+    zell_task_add_continuation(w, starved_cont, NULL);
+    zell_task_complete(w, NULL);   /* the continuation goes to this worker's run-next slot */
+    zell_release(w);
+    int64_t t0 = now_ms();
+    while (!__atomic_load_n(&starved_ran, __ATOMIC_ACQUIRE)) {
+        assert(now_ms() - t0 < 5000);
+        for (volatile int i = 0; i < 1000; i++) {}   /* busy, never yields */
+    }
+    zell_task_complete(t, NULL);
+}
+
+TEST(runnext_stolen_from_busy_worker) {
+    for (int round = 0; round < 20; round++) {
+        starved_ran = 0;
+        zell_task *t = zell_task_spawn(hog_job, NULL);
+        zell_task_await(t);
+        zell_release(t);
+    }
+}
+
 /* ---- results with refcounted payloads ---- */
 
 static void make_str(zell_task *t, void *ctx) {
@@ -333,6 +366,272 @@ TEST(channel_async_and_strings) {
     zell_release(a); zell_release(b); zell_release(c);
 }
 
+/* ---- work stealing: one worker floods its local queue (the ring
+ * overflows to the global queue), the other workers drain it ---- */
+
+enum { FLOOD = 4000 };
+static pthread_t flood_thread[FLOOD];
+static int64_t flood_done;
+
+static void flood_job(void *arg) {
+    int64_t i = (int64_t)(intptr_t)arg;
+    flood_thread[i] = pthread_self();
+    __atomic_add_fetch(&flood_done, 1, __ATOMIC_RELEASE);
+}
+
+static void flooder(zell_task *t, void *ctx) {
+    (void)ctx;
+    for (int64_t i = 0; i < FLOOD; i++) zell_sched_post(flood_job, (void *)(intptr_t)i);
+    zell_task_complete(t, NULL);
+}
+
+TEST(work_stealing) {
+    flood_done = 0;
+    zell_task *f = zell_task_spawn(flooder, NULL);
+    zell_task_await(f);
+    zell_release(f);
+    int64_t t0 = now_ms();
+    while (__atomic_load_n(&flood_done, __ATOMIC_ACQUIRE) < FLOOD) {
+        assert(now_ms() - t0 < 10000);
+        sched_yield();
+    }
+    /* Every job ran exactly once (the counter), on more than one worker. */
+    int distinct = 1;
+    for (int64_t i = 1; i < FLOOD; i++) {
+        int seen = 0;
+        for (int64_t j = 0; j < i && !seen; j++) seen = pthread_equal(flood_thread[i], flood_thread[j]);
+        if (!seen) distinct++;
+    }
+    assert(distinct >= 2);
+}
+
+/* ---- run-next fairness: a pair of tasks completing each other in a tight
+ * loop on one worker (the continuation always lands in its run-next slot)
+ * must not starve a job queued in that worker's ring. The other two
+ * workers are kept busy, so nothing can steal the queued job. ---- */
+
+static int64_t busy_running, busy_release;
+static int64_t pp_steps, third_ran_at;
+
+static void busy_job(zell_task *t, void *ctx) {
+    (void)ctx;
+    __atomic_add_fetch(&busy_running, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&busy_release, __ATOMIC_ACQUIRE)) sched_yield();
+    zell_task_complete(t, NULL);
+}
+
+static void third_job(void *arg) {
+    (void)arg;
+    __atomic_store_n(&third_ran_at, pp_steps, __ATOMIC_RELEASE);
+}
+
+static void pp_step(void *arg) {
+    zell_task *done = arg;
+    if (++pp_steps >= 20000) {
+        zell_task_complete(done, NULL);
+        return;
+    }
+    /* complete a fresh task whose continuation is this function: it goes
+     * to this worker's run-next slot */
+    zell_task *t = zell_task_new_plain(0, NULL);
+    zell_task_add_continuation(t, pp_step, done);
+    zell_task_complete(t, NULL);
+    zell_release(t);
+}
+
+static void pp_start(void *arg) {
+    zell_sched_post(third_job, NULL);   /* into this worker's ring */
+    pp_step(arg);
+}
+
+TEST(runnext_fairness) {
+    busy_running = busy_release = 0;
+    pp_steps = 0;
+    third_ran_at = -1;
+    zell_task *b1 = zell_task_spawn(busy_job, NULL), *b2 = zell_task_spawn(busy_job, NULL);
+    int64_t t0 = now_ms();
+    while (__atomic_load_n(&busy_running, __ATOMIC_ACQUIRE) < 2) { assert(now_ms() - t0 < 5000); sched_yield(); }
+    zell_task *done = zell_task_new_plain(0, NULL);
+    zell_sched_post(pp_start, done);
+    zell_task_await(done);
+    int64_t at = __atomic_load_n(&third_ran_at, __ATOMIC_ACQUIRE);
+    assert(at >= 0 && at < 1000);   /* ran within the first streak, not after the 20000 steps */
+    __atomic_store_n(&busy_release, 1, __ATOMIC_RELEASE);
+    zell_task_await(b1);
+    zell_task_await(b2);
+    zell_release(b1);
+    zell_release(b2);
+    zell_release(done);
+}
+
+/* ---- channels: cap 0, 1 and N with waiting senders and receivers; close
+ * with waiters; 10k producers into one consumer, every producer completes;
+ * cancellation of a pending receive and of a pending send ---- */
+
+static void chan_cap(int64_t cap) {
+    zell_chan *ch = zell_chan_new(8, NULL, cap);
+    /* fill the buffer, then one more sender waits */
+    zell_task *sends[4];
+    for (int64_t i = 0; i < 4; i++) sends[i] = zell_chan_send_async(ch, &i);
+    for (int64_t i = 0; i < 4; i++) assert(zell_task_is_done(sends[i]) == (i < cap));
+    assert(zell_chan_len(ch) == (cap < 4 ? cap : 4));
+    /* receives take the buffer in order, then the blocked senders in order */
+    for (int64_t i = 0; i < 4; i++) {
+        int64_t v;
+        assert(zell_chan_recv(ch, &v) && v == i);
+    }
+    for (int64_t i = 0; i < 4; i++) { zell_task_await(sends[i]); zell_release(sends[i]); }
+    /* receivers wait, each is woken exactly once, in order */
+    zell_task *recvs[3];
+    for (int i = 0; i < 3; i++) { recvs[i] = zell_chan_recv_async(ch); assert(!zell_task_is_done(recvs[i])); }
+    for (int64_t i = 10; i < 13; i++) { zell_task *s = zell_chan_send_async(ch, &i); assert(zell_task_is_done(s)); zell_release(s); }
+    for (int i = 0; i < 3; i++) {
+        unsigned char *r = zell_task_await(recvs[i]);
+        assert(*(int64_t *)r == 1 && *(int64_t *)(r + 8) == 10 + i);
+        zell_release(recvs[i]);
+    }
+    /* close with waiting receivers: all fail at once; later receives too */
+    zell_task *r1 = zell_chan_recv_async(ch), *r2 = zell_chan_recv_async(ch);
+    zell_chan_close(ch);
+    assert(*(int64_t *)zell_task_await(r1) == 0 && *(int64_t *)zell_task_await(r2) == 0);
+    zell_release(r1);
+    zell_release(r2);
+    int64_t v = 7;
+    assert(!zell_chan_recv(ch, &v) && v == 0);
+    zell_release(ch);
+}
+
+TEST(channel_capacities) {
+    chan_cap(0);
+    chan_cap(1);
+    chan_cap(3);
+}
+
+typedef struct { zell_chan *ch; int64_t id; int64_t each; } fan_ctx;
+
+static void fan_producer(zell_task *t, void *ctx) {
+    fan_ctx *fc = ctx;
+    for (int64_t i = 0; i < fc->each; i++) {
+        int64_t v = fc->id * fc->each + i;
+        zell_chan_send(fc->ch, &v);
+    }
+    zell_task_complete(t, NULL);
+}
+
+TEST(channel_fan_in_10k) {
+    enum { P = 10000, EACH = 10 };
+    zell_chan *ch = zell_chan_new(8, NULL, 64);
+    static fan_ctx fcs[P];
+    static zell_task *ps[P];
+    for (int64_t i = 0; i < P; i++) {
+        fcs[i] = (fan_ctx){ ch, i, EACH };
+        ps[i] = zell_task_spawn(fan_producer, &fcs[i]);
+    }
+    int64_t sum = 0, v;
+    for (int64_t n = 0; n < P * EACH; n++) { assert(zell_chan_recv(ch, &v)); sum += v; }
+    assert(sum == (int64_t)P * EACH * ((int64_t)P * EACH - 1) / 2);
+    for (int64_t i = 0; i < P; i++) { zell_task_await(ps[i]); assert(zell_task_is_done(ps[i])); zell_release(ps[i]); }
+    assert(zell_chan_len(ch) == 0);
+    zell_release(ch);
+}
+
+/* A pending receive and a pending send are cancelled through their own
+ * task (task.Any cancels losers this way) and leave the queues. */
+TEST(channel_cancel_waits) {
+    zell_chan *ch = zell_chan_new(8, NULL, 0);
+    zell_task *r = zell_chan_recv_async(ch);
+    assert(!zell_task_is_done(r));
+    zell_task_cancel(r);
+    unsigned char *res = zell_task_await(r);
+    assert(*(int64_t *)res == 0);
+    zell_release(r);
+    int64_t v = 5;
+    zell_task *s = zell_chan_send_async(ch, &v);
+    assert(!zell_task_is_done(s));
+    zell_task_cancel(s);
+    zell_task_await(s);
+    zell_release(s);
+    /* nothing is left queued: a receiver now waits, a sender hands off */
+    zell_task *r2 = zell_chan_recv_async(ch);
+    assert(!zell_task_is_done(r2));
+    zell_task *s2 = zell_chan_send_async(ch, &v);
+    assert(zell_task_is_done(s2) && zell_task_is_done(r2) && *(int64_t *)((unsigned char *)zell_task_result(r2) + 8) == 5);
+    zell_release(s2);
+    zell_release(r2);
+    zell_chan_close(ch);
+    zell_release(ch);
+}
+
+/* ---- mutex: 1k tasks contending, TryLock, lock of a free mutex is the
+ * immortal done task, unlock without lock panics ---- */
+
+static zell_mutex *cmu;
+static int64_t cguarded, cdone;
+static zell_task *call_done;
+
+typedef struct { int64_t left; } contender;
+
+static void contender_step(void *arg);
+
+/* Owns the lock: the critical section, then the next iteration. */
+static void contender_locked(void *arg) {
+    contender *c = arg;
+    int64_t v = cguarded;
+    if (c->left % 7 == 0) sched_yield();
+    cguarded = v + 1;
+    zell_mutex_unlock(cmu);
+    if (--c->left == 0) {
+        if (__atomic_add_fetch(&cdone, 1, __ATOMIC_ACQ_REL) == 1000) zell_task_complete(call_done, NULL);
+        return;
+    }
+    contender_step(arg);
+}
+
+/* Takes the lock without blocking the worker: a free mutex is owned at
+ * once (the immortal done task), otherwise the continuation runs when the
+ * unlocker hands the lock over (the 10.3 protocol, as compiled code does). */
+static void contender_step(void *arg) {
+    zell_task *t = zell_mutex_lock_async(cmu);
+    bool wait = zell_task_add_continuation(t, contender_locked, arg);
+    zell_release(t);   /* a pending task is kept alive by the mutex queue */
+    if (!wait) contender_locked(arg);
+}
+
+TEST(mutex_contention_1k) {
+    enum { N = 1000 };
+    cmu = zell_mutex_new();
+    cguarded = cdone = 0;
+    call_done = zell_task_new_plain(0, NULL);
+    static contender cs[N];
+    for (int i = 0; i < N; i++) { cs[i].left = 50; zell_sched_post(contender_step, &cs[i]); }
+    zell_task_await(call_done);
+    zell_release(call_done);
+    assert(cguarded == N * 50);
+    /* free again: TryLock succeeds once, a Lock of a free mutex is done at
+     * once (the shared immortal task), waiters queue in FIFO order */
+    zell_task *free_lock = zell_mutex_lock_async(cmu);
+    assert(zell_task_is_done(free_lock));
+    assert(!zell_mutex_try_lock(cmu));
+    zell_task *w1 = zell_mutex_lock_async(cmu), *w2 = zell_mutex_lock_async(cmu);
+    assert(!zell_task_is_done(w1) && !zell_task_is_done(w2));
+    zell_mutex_unlock(cmu);
+    assert(zell_task_is_done(w1) && !zell_task_is_done(w2));
+    zell_mutex_unlock(cmu);
+    assert(zell_task_is_done(w2));
+    zell_mutex_unlock(cmu);
+    assert(zell_mutex_try_lock(cmu));
+    zell_mutex_unlock(cmu);
+    zell_release(w1);
+    zell_release(w2);
+    zell_release(free_lock);
+    zell_release(cmu);
+}
+
+static void unlock_unlocked(void) {
+    zell_mutex *m = zell_mutex_new();
+    zell_mutex_unlock(m);
+}
+
 /* ---- misuse ---- */
 
 static void double_complete(void) {
@@ -394,6 +693,8 @@ TEST(misuse_panics) {
     assert(strstr(buf, "panic: task completed twice"));
     assert(run_child(early_result, buf, sizeof buf) == 2);
     assert(strstr(buf, "panic: task result read before completion"));
+    assert(run_child(unlock_unlocked, buf, sizeof buf) == 2);
+    assert(strstr(buf, "panic: unlock of unlocked mutex"));
 }
 
 int main(int argc, char **argv) {
@@ -417,11 +718,18 @@ int main(int argc, char **argv) {
     RUN(delay_any);
     RUN(timer_heap_order_and_fire);
     RUN(relay_handoffs);
+    RUN(work_stealing);
+    RUN(runnext_fairness);
+    RUN(runnext_stolen_from_busy_worker);
     RUN(refcounted_result);
     RUN(mutex);
     RUN(channel_unbuffered);
     RUN(channel_buffered);
     RUN(channel_async_and_strings);
+    RUN(channel_capacities);
+    RUN(channel_fan_in_10k);
+    RUN(channel_cancel_waits);
+    RUN(mutex_contention_1k);
     RUN(drop_in_job_teardown_starts_task);
 
     zell_runtime_shutdown();

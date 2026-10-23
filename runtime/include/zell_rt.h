@@ -560,6 +560,8 @@ void zell_task_set_ctx(zell_object *ctx);      /* borrowed; retained */
 /* A task for callback-style producers; unlike zell_task_new it does not
  * become the current task (ABI.md 10.11). */
 zell_task *zell_task_new_plain(int64_t result_size, const zell_value_ops *result_ops);
+/* The immortal completed Task<void> (ABI.md 10.2): retain/release no-ops. */
+zell_task *zell_task_done(void);
 
 /* Synchronous fast path of async functions (ABI.md 10.3): the coroutine's
  * task, made at its first suspension (`task` if it exists already; returns
@@ -590,6 +592,29 @@ void zell_task_rt_fire(zell_task *signal);     /* complete (idempotent), cancels
 void zell_task_spin_lock(int64_t *slot);        /* 0 = free, 1 = held */
 void zell_task_spin_unlock(int64_t *slot);
 zell_task *zell_task_yield(void);              /* completes from a fresh job, +1 */
+
+/* task.Channel<T> (task_sync.c, ABI.md 10.7): the handle is the channel
+ * object's address, owned (+1) by the Zell chanRef box until
+ * zell_task_chan_release. The receive tasks' results have the compiled
+ * layouts of `T!` (recv) and `(T, bool)` (next): their sizes, ops and the
+ * offsets of the error / ok word are given at creation. */
+int64_t zell_task_chan_new(int64_t capacity, int64_t elem_size, const zell_value_ops *elem_ops,
+                           int64_t fal_size, const zell_value_ops *fal_ops, int64_t fal_err_off,
+                           int64_t tup_size, const zell_value_ops *tup_ops, int64_t tup_ok_off);
+void zell_task_chan_release(int64_t h);
+zell_task *zell_task_chan_send(int64_t h, const void *elem);  /* elem borrowed; Task<void>, +1 */
+zell_task *zell_task_chan_recv(int64_t h);                    /* Task<T!>, +1 */
+zell_task *zell_task_chan_next(int64_t h);                    /* Task<(T, bool)>, +1 */
+void zell_task_chan_close(int64_t h);
+int64_t zell_task_chan_len(int64_t h);
+int64_t zell_task_chan_cap(int64_t h);
+bool zell_task_chan_is_closed(int64_t h);
+
+/* task.Mutex (task_sync.c, ABI.md 10.6): m points at the struct's three
+ * int words { state, waitHead, waitTail }, all zero when unlocked. */
+zell_task *zell_task_mutex_lock(int64_t *m);    /* Task<void> (done at once if free), +1 */
+bool zell_task_mutex_try_lock(int64_t *m);
+void zell_task_mutex_unlock(int64_t *m);        /* panics `unlock of unlocked mutex` */
 
 /* Readiness waits (task_io.c, ABI.md 10.9). Result: int64_t
  * 0 = ready, 1 = timed out, 2 = the fd was released with zell_io_forget,
