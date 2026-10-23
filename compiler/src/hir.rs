@@ -826,6 +826,9 @@ pub enum Builtin {
     /// `args = [arena handle, n]`: `n` zeroed `T` in the arena; the type is
     /// `[]T` (runtime `zell_arena_slice`).
     ArenaSlice,
+    /// `encoding.json.rtMake<T>(n int) []T` (internal): `n` zeroed elements
+    /// with `len == cap == n` (`zell_slice_new_ops`); the nil slice for 0.
+    SliceMake,
 }
 
 /// One primitive print operation of a lowered `println`.

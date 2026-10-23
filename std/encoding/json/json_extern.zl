@@ -7,5 +7,118 @@ namespace encoding.json
 // C: zell_encoding_json_quote (runtime/src/std_*.c).
 extern func Quote(s string) string
 
-// C: zell_encoding_json_scan (runtime/src/std_*.c).
-extern func scan(a string) []string!
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_parse (runtime/src/std_*.c).
+extern func rtParse(a string) int!
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_free (runtime/src/std_*.c).
+extern func rtFree(a int)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_root (runtime/src/std_*.c).
+extern func rtRoot(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_kind (runtime/src/std_*.c).
+extern func rtKind(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_is_int (runtime/src/std_*.c).
+extern func rtIsInt(a int) bool
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_bool (runtime/src/std_*.c).
+extern func rtBool(a int) bool
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_int (runtime/src/std_*.c).
+extern func rtInt(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_float (runtime/src/std_*.c).
+extern func rtFloat(a int) float
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_str (runtime/src/std_*.c).
+extern func rtStr(a int) string
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_len (runtime/src/std_*.c).
+extern func rtLen(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_first (runtime/src/std_*.c).
+extern func rtFirst(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_next (runtime/src/std_*.c).
+extern func rtNext(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_get (runtime/src/std_*.c).
+extern func rtGet(a int, b string) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_index (runtime/src/std_*.c).
+extern func rtIndex(a int, b int, c int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_new (runtime/src/std_*.c).
+extern func rtWNew() int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_finish (runtime/src/std_*.c).
+extern func rtWFinish(a int) string
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_raw (runtime/src/std_*.c).
+extern func rtWRaw(a int, b string)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_key (runtime/src/std_*.c).
+extern func rtWKey(a int, b string, c bool)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_str (runtime/src/std_*.c).
+extern func rtWStr(a int, b string)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_int (runtime/src/std_*.c).
+extern func rtWInt(a int, b int)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_uint (runtime/src/std_*.c).
+extern func rtWUint(a int, b uint)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_float (runtime/src/std_*.c).
+extern func rtWFloat(a int, b float)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_bool (runtime/src/std_*.c).
+extern func rtWBool(a int, b bool)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_node (runtime/src/std_*.c).
+extern func rtWNode(a int, b int)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_key_int (runtime/src/std_*.c).
+extern func rtWKeyInt(a int, b string, c bool, d int)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_key_str (runtime/src/std_*.c).
+extern func rtWKeyStr(a int, b string, c bool, d string)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_key_float (runtime/src/std_*.c).
+extern func rtWKeyFloat(a int, b string, c bool, d float)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_key_bool (runtime/src/std_*.c).
+extern func rtWKeyBool(a int, b string, c bool, d bool)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_w_strs (runtime/src/std_*.c).
+extern func rtWStrs(a int, b []string)

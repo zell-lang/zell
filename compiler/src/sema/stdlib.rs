@@ -367,6 +367,10 @@ pub enum Special {
     /// `arena.rtArenaAlloc<T>(h int, n int) []T` (internal, used by
     /// `Arena.Alloc<T>`) → [`crate::hir::Builtin::ArenaSlice`].
     ArenaAlloc,
+    /// `encoding.json.rtMake<T>(n int) []T` (internal, used by the typed
+    /// decoder to size a slice before filling its elements in place) →
+    /// [`crate::hir::Builtin::SliceMake`].
+    JsonMake,
 }
 
 /// Special functions by namespace and name.
@@ -382,6 +386,7 @@ pub const SPECIALS: &[(&str, &str, Special)] = &[
     ("errors", "Frames", Special::ErrorsFrames),
     ("arena", "rtArenaNew", Special::ArenaNew),
     ("arena", "rtArenaAlloc", Special::ArenaAlloc),
+    ("encoding.json", "rtMake", Special::JsonMake),
 ];
 
 /// Builtin stdlib struct types: (namespace, name, fields as (name, type)).
@@ -837,9 +842,40 @@ pub const FUNCS: &[StdFunc] = &[
     f!("encoding.hex", "EncodeString", "string", "string", "zell_encoding_hex_encode_string"),
     f!("encoding.hex", "Decode", "string", "[]byte!", "zell_encoding_hex_decode"),
     f!("encoding.hex", "DecodeString", "string", "string!", "zell_encoding_hex_decode_string"),
-    // encoding.json: the C half (std_json.c); the rest is Zell (sema/reflect_src/json.zl)
+    // encoding.json: the C half (std_json.c, ABI.md 17.4): the parsed
+    // document (rtParse .. rtIndex; handles are runtime addresses, node 0
+    // is null) and the text writer (rtW*); the rest is Zell
+    // (sema/reflect_src/json.zl)
     f!("encoding.json", "Quote", "string", "string", "zell_encoding_json_quote"),
-    f!("encoding.json", "scan", "string", "[]string!", "zell_encoding_json_scan"),
+    f!("encoding.json", "rtParse", "string", "int!", "zell_encoding_json_rt_parse"),
+    f!("encoding.json", "rtFree", "int", "void", "zell_encoding_json_rt_free"),
+    f!("encoding.json", "rtRoot", "int", "int", "zell_encoding_json_rt_root"),
+    f!("encoding.json", "rtKind", "int", "int", "zell_encoding_json_rt_kind"),
+    f!("encoding.json", "rtIsInt", "int", "bool", "zell_encoding_json_rt_is_int"),
+    f!("encoding.json", "rtBool", "int", "bool", "zell_encoding_json_rt_bool"),
+    f!("encoding.json", "rtInt", "int", "int", "zell_encoding_json_rt_int"),
+    f!("encoding.json", "rtFloat", "int", "float", "zell_encoding_json_rt_float"),
+    f!("encoding.json", "rtStr", "int", "string", "zell_encoding_json_rt_str"),
+    f!("encoding.json", "rtLen", "int", "int", "zell_encoding_json_rt_len"),
+    f!("encoding.json", "rtFirst", "int", "int", "zell_encoding_json_rt_first"),
+    f!("encoding.json", "rtNext", "int", "int", "zell_encoding_json_rt_next"),
+    f!("encoding.json", "rtGet", "int, string", "int", "zell_encoding_json_rt_get"),
+    f!("encoding.json", "rtIndex", "int, int, int", "int", "zell_encoding_json_rt_index"),
+    f!("encoding.json", "rtWNew", "", "int", "zell_encoding_json_rt_w_new"),
+    f!("encoding.json", "rtWFinish", "int", "string", "zell_encoding_json_rt_w_finish"),
+    f!("encoding.json", "rtWRaw", "int, string", "void", "zell_encoding_json_rt_w_raw"),
+    f!("encoding.json", "rtWKey", "int, string, bool", "void", "zell_encoding_json_rt_w_key"),
+    f!("encoding.json", "rtWStr", "int, string", "void", "zell_encoding_json_rt_w_str"),
+    f!("encoding.json", "rtWInt", "int, int", "void", "zell_encoding_json_rt_w_int"),
+    f!("encoding.json", "rtWUint", "int, uint", "void", "zell_encoding_json_rt_w_uint"),
+    f!("encoding.json", "rtWFloat", "int, float", "void", "zell_encoding_json_rt_w_float"),
+    f!("encoding.json", "rtWBool", "int, bool", "void", "zell_encoding_json_rt_w_bool"),
+    f!("encoding.json", "rtWNode", "int, int", "void", "zell_encoding_json_rt_w_node"),
+    f!("encoding.json", "rtWKeyInt", "int, string, bool, int", "void", "zell_encoding_json_rt_w_key_int"),
+    f!("encoding.json", "rtWKeyStr", "int, string, bool, string", "void", "zell_encoding_json_rt_w_key_str"),
+    f!("encoding.json", "rtWKeyFloat", "int, string, bool, float", "void", "zell_encoding_json_rt_w_key_float"),
+    f!("encoding.json", "rtWKeyBool", "int, string, bool, bool", "void", "zell_encoding_json_rt_w_key_bool"),
+    f!("encoding.json", "rtWStrs", "int, []string", "void", "zell_encoding_json_rt_w_strs"),
     // internal primitives of the Zell-source net (sema/stdlib_src/net.zl, net_udp.zl);
     // sockets are runtime handles (ABI.md 16)
     f!("net", "rtOpError", "error, string, error", "error", "zell_net_rt_op_error"),

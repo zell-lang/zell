@@ -1204,8 +1204,15 @@ func ToJson<T>(value T) string {
   `Bool`, `Float`, `Int`, `String`, `Len`, `Index`, `Get`, `Has`, `Keys`,
   `Items`, `Format`), конструкторы `NewNull`/`NewBool`/`NewNumber`/
   `NewString`/`NewArray`/`NewObject`, `Decode<T>(v)`, `Quote(s)`.
-  Токенизатор — C (`runtime/src/std_json.c`). Нет `Reader`/`Writer`,
-  `Options{Indent}`, `Schema<T>`, конвертеров.
+  Разбор — C (`runtime/src/std_json.c`): текст за один проход
+  превращается в документ-арену узлов, `Value` — узел такого документа
+  (документ живёт, пока жив хотя бы один его `Value`), `Parse<T>` обходит
+  узлы напрямую, `Format<T>` пишет в C-буфер; строки Zell создаются
+  только для строковых полей результата. Вложенность глубже 512
+  контейнеров отвергается (`json: nesting too deep`). Пустой массив
+  `[]` разбирается в пустой (не nil) срез и форматируется обратно как
+  `[]`; nil-срез, map и указатель — `null` (как в Go). Нет
+  `Reader`/`Writer`, `Options{Indent}`, `Schema<T>`, конвертеров.
 - `strings.Builder` (`Write`, `String`, `Len`, `Reset`).
 - Те же `Fields<T>()`-обходы дают `Parse<T>`/`Format<T>` для
   `encoding.csv` (`@csv(name:, index:, skip:, omitEmpty:)`),

@@ -379,7 +379,13 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     (`Users[2].id: expected int, found string`; `json: ...` at the top level);
     `json.Format` writes struct fields in declaration order (all of them unless
     `@json(skip: true)`), sorts map keys, and writes nil slices, maps and
-    pointers as `null`. — `stdlib/json_*`
+    pointers as `null`; a decoded `[]` is an empty non-nil slice and formats
+    back as `[]` (examples/README.md decision 22). Syntax errors are
+    `json: <what> at offset N` for lexical ones (unterminated string, control
+    character, invalid escape / `\u` escape / number / character, number out
+    of range) and `json: unexpected end of input`, `json: expected , or ] in
+    an array, found <token>` etc. for grammar ones; more than 512 nested
+    containers is `json: nesting too deep`. — `stdlib/json_*`
 45. **`log`**: `log.Info(msg)`, `log.Warn(msg)` write `INFO msg` /
     `WARN msg` lines to stderr (the default logger: Information and up,
     output template `{Level:u4} {Message:lj}{NewLine}{Exception}`, Serilog's

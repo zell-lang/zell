@@ -559,6 +559,11 @@ impl<'a> Sema<'a> {
                 self.check_args_loose(args);
                 self.invalid(span)
             }
+            Special::JsonMake => {
+                self.err("rtMake needs a type argument (rtMake<T>(n))", span);
+                self.check_args_loose(args);
+                self.invalid(span)
+            }
             Special::Println | Special::Print => {
                 let mut items = Vec::new();
                 let mut prev_str: Option<bool> = None;

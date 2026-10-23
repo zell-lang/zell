@@ -3,133 +3,132 @@
 // `if reflect.TypeOf<T>().Kind == ...` tests are resolved at compile time,
 // so every instance is straight-line code for its type. Library code names
 // other namespaces by their full path (it is instantiated in user scope).
+//
+// The text is parsed by the C runtime (runtime/src/std_json.c, ABI.md 17.4)
+// into one arena document of nodes; a Value is a node of such a document
+// and Parse<T> walks the nodes directly, allocating Zell strings only for
+// the string fields of the destination. Format<T> appends to a runtime
+// writer (rtW*). Error paths are built only when a value is wrong.
 namespace encoding.json
 
-// A dynamic JSON value (json.ParseValue).
+// A parsed document, shared by the Values made from it and freed with the
+// last of them.
+struct document {
+    h int
+
+    func Drop() {
+        rtFree(this.h)
+    }
+}
+
+// A dynamic JSON value (json.ParseValue): a node of a parsed document. The
+// zero Value is null.
 struct Value {
-    kind  int
-    b     bool
-    n     float
-    s     string
-    items []Value
-    keys  []string
+    d *document
+    n int
 
     // IsNull reports whether the value is null (also the zero Value).
     func IsNull() bool {
-        return this.kind == 0
+        return rtKind(this.n) == 0
     }
 
     // IsBool reports whether the value is a boolean.
     func IsBool() bool {
-        return this.kind == 1
+        return rtKind(this.n) == 1
     }
 
     // IsNumber reports whether the value is a number.
     func IsNumber() bool {
-        return this.kind == 2
+        return rtKind(this.n) == 2
     }
 
     // IsString reports whether the value is a string.
     func IsString() bool {
-        return this.kind == 3
+        return rtKind(this.n) == 3
     }
 
     // IsArray reports whether the value is an array.
     func IsArray() bool {
-        return this.kind == 4
+        return rtKind(this.n) == 4
     }
 
     // IsObject reports whether the value is an object.
     func IsObject() bool {
-        return this.kind == 5
+        return rtKind(this.n) == 5
     }
 
     // "null", "bool", "number", "string", "array" or "object".
     func Type() string {
-        return kindName(this.kind)
+        return kindName(rtKind(this.n))
     }
 
     // Bool returns the boolean; an error for other kinds.
     func Bool() bool! {
-        if this.kind != 1 {
-            return error("json: " + kindName(this.kind) + " is not a bool")
+        if rtKind(this.n) != 1 {
+            return error("json: " + this.Type() + " is not a bool")
         }
-        return this.b
+        return rtBool(this.n)
     }
 
     // Float returns the number; an error for other kinds.
     func Float() float! {
-        if this.kind != 2 {
-            return error("json: " + kindName(this.kind) + " is not a number")
+        // rtFloat is NaN for every node that is not a number (JSON has no NaN).
+        var f = rtFloat(this.n)
+        if math.IsNaN(f) {
+            return error("json: " + this.Type() + " is not a number")
         }
-        return this.n
+        return f
     }
 
-    // Int returns the number as an int; an error for other kinds.
+    // Int returns the number as an int; an error for other kinds and for
+    // numbers with a fraction.
     func Int() int! {
-        if this.kind != 2 {
-            return error("json: " + kindName(this.kind) + " is not a number")
+        if rtIsInt(this.n) {
+            return rtInt(this.n)
         }
-        return integral(this.n, "")?
+        if rtKind(this.n) != 2 {
+            return error("json: " + this.Type() + " is not a number")
+        }
+        return integral(rtFloat(this.n))?
     }
 
     // String returns the string; an error for other kinds.
     func String() string! {
-        if this.kind != 3 {
-            return error("json: " + kindName(this.kind) + " is not a string")
+        if rtKind(this.n) != 3 {
+            return error("json: " + this.Type() + " is not a string")
         }
-        return this.s
+        return rtStr(this.n)
     }
 
     // Number of elements of an array or members of an object, else 0.
     func Len() int {
-        if this.kind == 4 || this.kind == 5 {
-            return len(this.items)
-        }
-        return 0
+        return rtLen(this.n)
     }
 
     // Element i of an array (null if out of range or not an array).
     func Index(i int) Value {
-        if this.kind == 4 && i >= 0 && i < len(this.items) {
-            return this.items[i]
-        }
-        return Value{}
+        return Value{d: this.d, n: rtIndex(this.doc(), this.n, i)}
     }
 
     // Member `key` of an object (null if missing or not an object; the
     // last one wins for duplicate keys).
     func Get(key string) Value {
-        var i = this.find(key)
-        if i < 0 {
-            return Value{}
-        }
-        return this.items[i]
+        return Value{d: this.d, n: rtGet(this.n, key)}
     }
 
     // Has reports whether an object has key.
     func Has(key string) bool {
-        return this.find(key) >= 0
-    }
-
-    func find(key string) int {
-        var found = -1
-        if this.kind == 5 {
-            for i, k in this.keys {
-                if k == key {
-                    found = i
-                }
-            }
-        }
-        return found
+        return rtGet(this.n, key) != 0
     }
 
     // Member names of an object in document order.
     func Keys() []string {
         var out []string = []
-        if this.kind == 5 {
-            for k in this.keys {
-                out = append(out, k)
+        if rtKind(this.n) == 5 {
+            var k = rtFirst(this.n)
+            for _ in 0..rtLen(this.n) {
+                out = append(out, rtStr(k))
+                k = rtNext(rtNext(k))
             }
         }
         return out
@@ -138,17 +137,35 @@ struct Value {
     // Elements of an array (or member values of an object).
     func Items() []Value {
         var out []Value = []
-        for x in this.items {
-            out = append(out, x)
+        var kind = rtKind(this.n)
+        if kind == 4 {
+            var c = rtFirst(this.n)
+            for _ in 0..rtLen(this.n) {
+                out = append(out, Value{d: this.d, n: c})
+                c = rtNext(c)
+            }
+        } else if kind == 5 {
+            var k = rtFirst(this.n)
+            for _ in 0..rtLen(this.n) {
+                out = append(out, Value{d: this.d, n: rtNext(k)})
+                k = rtNext(rtNext(k))
+            }
         }
         return out
     }
 
     // Compact JSON text of the value.
     func Format() string {
-        var b = strings.Builder{}
-        writeValue(&b, *this)
-        return b.String()
+        var w = rtWNew()
+        rtWNode(w, this.n)
+        return rtWFinish(w)
+    }
+
+    func doc() int {
+        if this.d == nil {
+            return 0
+        }
+        return this.d.h
     }
 }
 
@@ -159,26 +176,36 @@ func NewNull() Value {
 
 // NewBool returns a boolean value.
 func NewBool(b bool) Value {
-    return Value{kind: 1, b: b}
+    if b {
+        return fromText("true")
+    }
+    return fromText("false")
 }
 
-// NewNumber returns a number value.
+// NewNumber returns a number value (null for NaN and infinities).
 func NewNumber(n float) Value {
-    return Value{kind: 2, n: n}
+    var w = rtWNew()
+    rtWFloat(w, n)
+    return fromText(rtWFinish(w))
 }
 
 // NewString returns a string value.
 func NewString(s string) Value {
-    return Value{kind: 3, s: s}
+    return fromText(Quote(s))
 }
 
 // NewArray returns an array of copies of items.
 func NewArray(items []Value) Value {
-    var copy []Value = []
-    for x in items {
-        copy = append(copy, x)
+    var w = rtWNew()
+    rtWRaw(w, "[")
+    for i, x in items {
+        if i > 0 {
+            rtWRaw(w, ",")
+        }
+        rtWNode(w, x.n)
     }
-    return Value{kind: 4, items: copy}
+    rtWRaw(w, "]")
+    return fromText(rtWFinish(w))
 }
 
 // NewObject returns an object of keys to values (in that order); an error if the lengths differ.
@@ -186,13 +213,19 @@ func NewObject(keys []string, values []Value) Value! {
     if len(keys) != len(values) {
         return error("json.NewObject: keys and values differ in length")
     }
-    var ks []string = []
-    var vs []Value = []
+    var w = rtWNew()
+    rtWRaw(w, "{")
     for i, k in keys {
-        ks = append(ks, k)
-        vs = append(vs, values[i])
+        rtWKey(w, k, i == 0)
+        rtWNode(w, values[i].n)
     }
-    return Value{kind: 5, keys: ks, items: vs}
+    rtWRaw(w, "}")
+    return fromText(rtWFinish(w))
+}
+
+// The Value of a text written by the writer (always valid JSON).
+func fromText(text string) Value {
+    return try ParseValue(text) else Value{}
 }
 
 func kindName(k int) string {
@@ -216,129 +249,13 @@ func kindName(k int) string {
 
 // -- parsing ----------------------------------------------------------------
 
-// Parses a JSON text into a dynamic Value.
+// Parses a JSON text into a dynamic Value. Syntax errors read "json: <what>
+// at offset N" (lexical) or "json: expected , or ] in an array, found
+// number 2", "json: unexpected end of input" (grammar); nesting deeper than
+// 512 containers is "json: nesting too deep".
 func ParseValue(text string) Value! {
-    var p = parser{toks: scan(text)?}
-    var v = p.value(0)?
-    if p.pos < len(p.toks) {
-        return error("json: unexpected " + show(p.toks[p.pos]) + " after the top-level value")
-    }
-    return v
-}
-
-struct parser {
-    toks []string
-    pos  int
-
-    func next() string! {
-        if this.pos >= len(this.toks) {
-            return error("json: unexpected end of input")
-        }
-        var t = this.toks[this.pos]
-        this.pos += 1
-        return t
-    }
-
-    func peek() string {
-        if this.pos < len(this.toks) {
-            return this.toks[this.pos]
-        }
-        return ""
-    }
-
-    func value(depth int) Value! {
-        if depth > 512 {
-            return error("json: nesting too deep")
-        }
-        var t = this.next()?
-        var c = t[0..1]
-        if c == "s" {
-            return Value{kind: 3, s: t[1..]}
-        }
-        if c == "n" {
-            var n = strings.ToFloat(t[1..])?
-            return Value{kind: 2, n: n}
-        }
-        if t == "t" {
-            return Value{kind: 1, b: true}
-        }
-        if t == "f" {
-            return Value{kind: 1}
-        }
-        if t == "z" {
-            return Value{}
-        }
-        if t == "[" {
-            var items []Value = []
-            if this.peek() == "]" {
-                this.pos += 1
-                return Value{kind: 4, items: items}
-            }
-            for {
-                var x = this.value(depth + 1)?
-                items = append(items, x)
-                var sep = this.next()?
-                if sep == "]" {
-                    break
-                }
-                if sep != "," {
-                    return error("json: expected , or ] in an array, found " + show(sep))
-                }
-            }
-            return Value{kind: 4, items: items}
-        }
-        if t == "{" {
-            var keys []string = []
-            var items []Value = []
-            if this.peek() == "}" {
-                this.pos += 1
-                return Value{kind: 5, keys: keys, items: items}
-            }
-            for {
-                var k = this.next()?
-                if k[0..1] != "s" {
-                    return error("json: expected a string key in an object, found " + show(k))
-                }
-                var colon = this.next()?
-                if colon != ":" {
-                    return error("json: expected : after an object key, found " + show(colon))
-                }
-                var x = this.value(depth + 1)?
-                keys = append(keys, k[1..])
-                items = append(items, x)
-                var sep = this.next()?
-                if sep == "}" {
-                    break
-                }
-                if sep != "," {
-                    return error("json: expected , or } in an object, found " + show(sep))
-                }
-            }
-            return Value{kind: 5, keys: keys, items: items}
-        }
-        return error("json: unexpected " + show(t))
-    }
-}
-
-// A token for messages.
-func show(t string) string {
-    var c = t[0..1]
-    if c == "s" {
-        return "string " + Quote(t[1..])
-    }
-    if c == "n" {
-        return "number " + t[1..]
-    }
-    if t == "t" {
-        return "true"
-    }
-    if t == "f" {
-        return "false"
-    }
-    if t == "z" {
-        return "null"
-    }
-    return "'" + t + "'"
+    var h = rtParse(text)?
+    return Value{d: new document{h: h}, n: rtRoot(h)}
 }
 
 // Parses a JSON text into a T (structs by their fields and @json, slices,
@@ -346,183 +263,228 @@ func show(t string) string {
 // variant name, json.Value, any). Errors name the path: "users[2].id: ...".
 func Parse<T>(text string) T! {
     var v = ParseValue(text)?
-    var out T
-    decode(v, "", &out)?
-    return out
+    return Decode<T>(v)?
 }
 
 // Decodes a dynamic Value into a T.
 func Decode<T>(v Value) T! {
     var out T
-    decode(v, "", &out)?
+    decode(v.d, v.n, &out)?
     return out
 }
 
-func prefix(path string) string {
-    if path == "" {
-        return "json: "
+// A decoding error: what was wrong and the path of the bad value
+// ("Users[2].id"), extended on the way out of the decoder; "json: <msg>" at
+// the top level.
+struct pathError {
+    path string
+    msg  string
+
+    func Message() string {
+        if this.path == "" {
+            return "json: " + this.msg
+        }
+        return this.path + ": " + this.msg
     }
-    return path + ": "
 }
 
-func join(path string, name string) string {
-    if path == "" {
-        return name
-    }
-    return path + "." + name
+func fail(msg string) error {
+    return pathError{msg: msg}
 }
 
-func mismatch(path string, want string, v Value) error {
-    return error(prefix(path) + "expected " + want + ", found " + kindName(v.kind))
+// err with the path segment seg (a field or key name, or "[i]") in front.
+func at(err error, seg string) error {
+    switch err {
+        case pathError e:
+            if e.path == "" {
+                e.path = seg
+            } else if strings.HasPrefix(e.path, "[") {
+                e.path = seg + e.path
+            } else {
+                e.path = seg + "." + e.path
+            }
+            return e
+        default:
+            return err
+    }
 }
 
-// The integer value of n (an error if it has a fraction or is too large).
-func integral(n float, path string) int! {
-    if n != math.Trunc(n) || n < -9223372036854775808.0 || n >= 9223372036854775808.0 {
-        return error(prefix(path) + "expected int, found number " + fmt.Format("{0}", n))
-    }
-    return int(n)
+func mismatch(want string, n int) error {
+    return fail("expected " + want + ", found " + kindName(rtKind(n)))
 }
 
-func intIn(v Value, path string, lo int, hi int) int! {
-    if v.kind != 2 {
-        return mismatch(path, "int", v)
+// The integer value of f (an error if it has a fraction or is too large).
+func integral(f float) int! {
+    if f != math.Trunc(f) || f < -9223372036854775808.0 || f >= 9223372036854775808.0 {
+        return fail("expected int, found number " + fmt.Format("{0}", f))
     }
-    var n = integral(v.n, path)?
-    if n < lo || n > hi {
-        return error(prefix(path) + "number " + fmt.Format("{0}", n) + " out of range")
-    }
-    return n
+    return int(f)
 }
 
-func decode<T>(v Value, path string, out *T) void! {
+func intIn(n int, lo int, hi int) int! {
+    var v = 0
+    if rtIsInt(n) {
+        v = rtInt(n)
+    } else {
+        if rtKind(n) != 2 {
+            return mismatch("int", n)
+        }
+        v = integral(rtFloat(n))?
+    }
+    if v < lo || v > hi {
+        return fail("number " + fmt.Format("{0}", v) + " out of range")
+    }
+    return v
+}
+
+func decode<T>(d *document, n int, out *T) void! {
     if reflect.TypeOf<T>() == reflect.TypeOf<Value>() {
-        *out = v
+        *out = Value{d: d, n: n}
         return
     }
     if reflect.TypeOf<T>().Kind == reflect.Kind.Pointer ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Slice ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Map {
-        if v.kind == 0 {
+        if rtKind(n) == 0 {
             *out = nil
             return
         }
     }
     if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
-        if v.kind != 5 {
-            return mismatch(path, "object", v)
+        if rtKind(n) != 5 {
+            return mismatch("object", n)
         }
+        // f.Attribute<reflect.json>(), f.Name and f.Get are resolved at
+        // compile time; written inline (not held in variables) so that the
+        // name tests fold to constants too.
         for f in reflect.Fields<T>() {
-            var tag = f.Attribute<reflect.json>()
-            if tag != nil && tag.skip {
+            if f.Attribute<reflect.json>() != nil && f.Attribute<reflect.json>().skip {
                 continue
             }
             var name = f.Name
-            if tag != nil && tag.name != "" {
-                name = tag.name
+            if f.Attribute<reflect.json>() != nil && len(f.Attribute<reflect.json>().name) > 0 {
+                name = f.Attribute<reflect.json>().name
             }
-            var i = v.find(name)
-            if i >= 0 {
-                decode(v.items[i], join(path, name), &f.Get(*out))?
+            var c = rtGet(n, name)
+            if c != 0 {
+                try decode(d, c, &f.Get(*out)) catch err {
+                    return at(err, name)
+                }
             }
         }
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.String {
-        if v.kind != 3 {
-            return mismatch(path, "string", v)
+        if rtKind(n) != 3 {
+            return mismatch("string", n)
         }
-        *out = v.s
+        *out = rtStr(n)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Bool {
-        if v.kind != 1 {
-            return mismatch(path, "bool", v)
+        if rtKind(n) != 1 {
+            return mismatch("bool", n)
         }
-        *out = v.b
+        *out = rtBool(n)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Int {
-        *out = intIn(v, path, math.MinInt, math.MaxInt)?
+        *out = intIn(n, math.MinInt, math.MaxInt)?
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Int8 {
-        *out = int8(intIn(v, path, -128, 127)?)
+        *out = int8(intIn(n, -128, 127)?)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Int16 {
-        *out = int16(intIn(v, path, -32768, 32767)?)
+        *out = int16(intIn(n, -32768, 32767)?)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Int32 {
-        *out = int32(intIn(v, path, math.MinInt32, math.MaxInt32)?)
+        *out = int32(intIn(n, math.MinInt32, math.MaxInt32)?)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Uint {
-        *out = uint(intIn(v, path, 0, math.MaxInt)?)
+        *out = uint(intIn(n, 0, math.MaxInt)?)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Uint8 {
-        *out = byte(intIn(v, path, 0, 255)?)
+        *out = byte(intIn(n, 0, 255)?)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Uint16 {
-        *out = uint16(intIn(v, path, 0, 65535)?)
+        *out = uint16(intIn(n, 0, 65535)?)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Uint32 {
-        *out = uint32(intIn(v, path, 0, math.MaxUint32)?)
+        *out = uint32(intIn(n, 0, math.MaxUint32)?)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Float {
-        if v.kind != 2 {
-            return mismatch(path, "number", v)
+        if rtKind(n) != 2 {
+            return mismatch("number", n)
         }
-        *out = v.n
+        *out = rtFloat(n)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Float32 {
-        if v.kind != 2 {
-            return mismatch(path, "number", v)
+        if rtKind(n) != 2 {
+            return mismatch("number", n)
         }
-        *out = float32(v.n)
+        *out = float32(rtFloat(n))
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Enum {
-        if v.kind != 3 {
-            return mismatch(path, "string", v)
+        if rtKind(n) != 3 {
+            return mismatch("string", n)
         }
         var t = reflect.TypeOf<T>()
-        var variant = t.Variant(v.s)
+        var s = rtStr(n)
+        var variant = t.Variant(s)
         if variant == nil || len(variant.Fields) > 0 {
-            return error(prefix(path) + "unknown " + t.Name + " value " + Quote(v.s))
+            return fail("unknown " + t.Name + " value " + Quote(s))
         }
         reflect.storeTag(out, variant.Index)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Slice {
-        if v.kind != 4 {
-            return mismatch(path, "array", v)
+        if rtKind(n) != 4 {
+            return mismatch("array", n)
         }
-        decodeSlice(v.items, path, out)?
+        decodeSlice(d, n, out)?
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Map {
         if reflect.TypeOf<T>().Key.Kind == reflect.Kind.String {
-            if v.kind != 5 {
-                return mismatch(path, "object", v)
+            if rtKind(n) != 5 {
+                return mismatch("object", n)
             }
-            decodeMap(v, path, out)?
+            decodeMap(d, n, out)?
         } else {
-            return error(
-                prefix(path) +
-                    "cannot decode into " +
-                    reflect.TypeOf<T>().Name +
-                    " (map keys must be strings)",
-            )
+            return fail("cannot decode into " + reflect.TypeOf<T>().Name + " (map keys must be strings)")
         }
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Pointer {
-        decodePtr(v, path, out)?
+        decodePtr(d, n, out)?
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Any {
-        *out = v
+        *out = Value{d: d, n: n}
     } else {
-        return error(prefix(path) + "cannot decode into " + reflect.TypeOf<T>().Name)
+        return fail("cannot decode into " + reflect.TypeOf<T>().Name)
     }
 }
 
-func decodeSlice<E>(items []Value, path string, out *[]E) void! {
-    var res []E = []
-    for i, x in items {
-        var e E
-        decode(x, path + "[" + fmt.Format("{0}", i) + "]", &e)?
-        res = append(res, e)
+func decodeSlice<E>(d *document, n int, out *[]E) void! {
+    var count = rtLen(n)
+    if count == 0 {
+        // `[]` decodes to an empty slice that is not nil, so that it formats
+        // back as `[]` (null decodes to nil and formats as null).
+        var z E
+        var one []E = [z]
+        *out = one[0..0]
+        return
+    }
+    // A slice of the final size, decoded element by element in place
+    // (rtMake<E>(n) is the compiler's sized-slice intrinsic: n zeroed
+    // elements, len == cap == n).
+    var res = rtMake<E>(count)
+    var c = rtFirst(n)
+    for i in 0..count {
+        try decode(d, c, &res[i]) catch err {
+            return at(err, "[" + fmt.Format("{0}", i) + "]")
+        }
+        c = rtNext(c)
     }
     *out = res
 }
 
-func decodeMap<V>(v Value, path string, out *map[string]V) void! {
+func decodeMap<V>(d *document, n int, out *map[string]V) void! {
     var m = map[string]V{}
-    for i, k in v.keys {
+    var k = rtFirst(n)
+    for _ in 0..rtLen(n) {
+        var key = rtStr(k)
+        var vn = rtNext(k)
         var e V
-        decode(v.items[i], join(path, k), &e)?
-        m[k] = e
+        try decode(d, vn, &e) catch err {
+            return at(err, key)
+        }
+        m[key] = e
+        k = rtNext(vn)
     }
     *out = m
 }
 
-func decodePtr<E>(v Value, path string, out **E) void! {
+func decodePtr<E>(d *document, n int, out **E) void! {
     var e E
-    decode(v, path, &e)?
+    decode(d, n, &e)?
     *out = &e
 }
 
@@ -531,121 +493,148 @@ func decodePtr<E>(v Value, path string, out **E) void! {
 // Compact JSON text of v (structs by their fields and @json(name, skip,
 // omitEmpty), slices and arrays, maps (keys sorted), pointers, strings,
 // numbers, bools, plain enums by variant name, json.Value, any holding
-// those).
+// those). Nil slices, maps and pointers are null; an empty slice is [].
 func Format<T>(v T) string {
-    var b = strings.Builder{}
-    write(&b, v)
-    return b.String()
+    var w = rtWNew()
+    write(w, v)
+    return rtWFinish(w)
 }
 
-func write<T>(b *strings.Builder, v T) {
+func write<T>(w int, v T) {
     if reflect.TypeOf<T>() == reflect.TypeOf<Value>() {
-        writeValue(b, v)
+        rtWNode(w, v.n)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
-        b.Write("{")
+        rtWRaw(w, "{")
         var first = true
         for f in reflect.Fields<T>() {
-            var tag = f.Attribute<reflect.json>()
-            if tag != nil && tag.skip {
+            if f.Attribute<reflect.json>() != nil && f.Attribute<reflect.json>().skip {
                 continue
             }
             var name = f.Name
-            if tag != nil && tag.name != "" {
-                name = tag.name
+            if f.Attribute<reflect.json>() != nil && len(f.Attribute<reflect.json>().name) > 0 {
+                name = f.Attribute<reflect.json>().name
             }
-            if tag != nil && tag.omitEmpty && isEmpty(f.Get(v)) {
+            if f.Attribute<reflect.json>() != nil && f.Attribute<reflect.json>().omitEmpty && isEmpty(f.Get(v)) {
                 continue
             }
-            if !first {
-                b.Write(",")
-            }
+            writeField(w, name, first, f.Get(v))
             first = false
-            b.Write(Quote(name))
-            b.Write(":")
-            write(b, f.Get(v))
         }
-        b.Write("}")
+        rtWRaw(w, "}")
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.String {
-        b.Write(Quote(v))
+        rtWStr(w, v)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Bool {
-        if v {
-            b.Write("true")
-        } else {
-            b.Write("false")
-        }
+        rtWBool(w, v)
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Float ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Float32 {
-        writeFloat(b, float(v))
+        rtWFloat(w, float(v))
+    } else if reflect.TypeOf<T>().Kind == reflect.Kind.Uint {
+        rtWUint(w, uint(v))
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Int ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Int8 ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Int16 ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Int32 ||
-        reflect.TypeOf<T>().Kind == reflect.Kind.Uint ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Uint8 ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Uint16 ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Uint32 {
-        b.Write(fmt.Format("{0}", v))
+        rtWInt(w, int(v))
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Char {
-        b.Write(Quote(string(v)))
+        rtWStr(w, string(v))
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Enum {
-        b.Write(Quote(fmt.Format("{0}", v)))
+        rtWStr(w, fmt.Format("{0}", v))
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Slice {
         if v == nil {
-            b.Write("null")
+            rtWRaw(w, "null")
+        } else if reflect.TypeOf<T>().Elem.Kind == reflect.Kind.String {
+            rtWStrs(w, v)
         } else {
-            b.Write("[")
+            rtWRaw(w, "[")
             for i, x in v {
                 if i > 0 {
-                    b.Write(",")
+                    rtWRaw(w, ",")
                 }
-                write(b, x)
+                write(w, x)
             }
-            b.Write("]")
+            rtWRaw(w, "]")
         }
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Array {
-        b.Write("[")
+        rtWRaw(w, "[")
         for i, x in v {
             if i > 0 {
-                b.Write(",")
+                rtWRaw(w, ",")
             }
-            write(b, x)
+            write(w, x)
         }
-        b.Write("]")
+        rtWRaw(w, "]")
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Map {
         if v == nil {
-            b.Write("null")
+            rtWRaw(w, "null")
         } else {
-            var keys []string = []
-            var vals []string = []
-            for k, x in v {
-                keys = append(keys, keyString(k))
-                var sub = strings.Builder{}
-                write(&sub, x)
-                vals = append(vals, sub.String())
-            }
-            sortPairs(keys, vals)
-            b.Write("{")
-            for i, k in keys {
-                if i > 0 {
-                    b.Write(",")
-                }
-                b.Write(Quote(k))
-                b.Write(":")
-                b.Write(vals[i])
-            }
-            b.Write("}")
+            writeMap(w, v)
         }
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Pointer {
         if v == nil {
-            b.Write("null")
+            rtWRaw(w, "null")
         } else {
-            write(b, *v)
+            write(w, *v)
         }
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Any {
-        writeAny(b, v)
+        writeAny(w, v)
     } else {
-        b.Write("null")
+        rtWRaw(w, "null")
     }
+}
+
+// A struct member: key and value in one runtime call for the scalar types.
+func writeField<F>(w int, name string, first bool, v F) {
+    if reflect.TypeOf<F>().Kind == reflect.Kind.String {
+        rtWKeyStr(w, name, first, v)
+    } else if reflect.TypeOf<F>().Kind == reflect.Kind.Int ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Int8 ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Int16 ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Int32 ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Uint8 ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Uint16 ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Uint32 {
+        rtWKeyInt(w, name, first, int(v))
+    } else if reflect.TypeOf<F>().Kind == reflect.Kind.Float ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Float32 {
+        rtWKeyFloat(w, name, first, float(v))
+    } else if reflect.TypeOf<F>().Kind == reflect.Kind.Bool {
+        rtWKeyBool(w, name, first, v)
+    } else {
+        rtWKey(w, name, first)
+        write(w, v)
+    }
+}
+
+// An object with the members sorted by key (as Go does).
+func writeMap<K, V>(w int, m map[K]V) {
+    var keys []K = []
+    var names []string = []
+    for k, _ in m {
+        keys = append(keys, k)
+        names = append(names, keyString(k))
+    }
+    // Insertion sort of names, moving keys along.
+    for i in 1..len(names) {
+        var j = i
+        for j > 0 && names[j - 1] > names[j] {
+            var s = names[j]
+            names[j] = names[j - 1]
+            names[j - 1] = s
+            var k = keys[j]
+            keys[j] = keys[j - 1]
+            keys[j - 1] = k
+            j -= 1
+        }
+    }
+    rtWRaw(w, "{")
+    for i, k in keys {
+        rtWKey(w, names[i], i == 0)
+        write(w, m[k])
+    }
+    rtWRaw(w, "}")
 }
 
 func keyString<K>(k K) string {
@@ -653,22 +642,6 @@ func keyString<K>(k K) string {
         return k
     } else {
         return fmt.Format("{0}", k)
-    }
-}
-
-// Insertion sort of keys, moving vals along.
-func sortPairs(keys []string, vals []string) {
-    for i in 1..len(keys) {
-        var j = i
-        for j > 0 && keys[j - 1] > keys[j] {
-            var k = keys[j]
-            keys[j] = keys[j - 1]
-            keys[j - 1] = k
-            var x = vals[j]
-            vals[j] = vals[j - 1]
-            vals[j - 1] = x
-            j -= 1
-        }
     }
 }
 
@@ -698,67 +671,19 @@ func isEmpty<F>(x F) bool {
     }
 }
 
-func writeFloat(b *strings.Builder, f float) {
-    if math.IsNaN(f) || math.IsInf(f, 0) {
-        b.Write("null")
-    } else {
-        b.Write(fmt.Format("{0}", f))
-    }
-}
-
-func writeAny(b *strings.Builder, x any) {
+func writeAny(w int, x any) {
     switch x {
         case string s:
-            b.Write(Quote(s))
+            rtWStr(w, s)
         case int n:
-            b.Write(fmt.Format("{0}", n))
+            rtWInt(w, n)
         case float f:
-            writeFloat(b, f)
+            rtWFloat(w, f)
         case bool t:
-            if t {
-                b.Write("true")
-            } else {
-                b.Write("false")
-            }
+            rtWBool(w, t)
         case Value v:
-            writeValue(b, v)
+            rtWNode(w, v.n)
         default:
-            b.Write("null")
-    }
-}
-
-func writeValue(b *strings.Builder, v Value) {
-    if v.kind == 0 {
-        b.Write("null")
-    } else if v.kind == 1 {
-        if v.b {
-            b.Write("true")
-        } else {
-            b.Write("false")
-        }
-    } else if v.kind == 2 {
-        writeFloat(b, v.n)
-    } else if v.kind == 3 {
-        b.Write(Quote(v.s))
-    } else if v.kind == 4 {
-        b.Write("[")
-        for i, x in v.items {
-            if i > 0 {
-                b.Write(",")
-            }
-            writeValue(b, x)
-        }
-        b.Write("]")
-    } else {
-        b.Write("{")
-        for i, k in v.keys {
-            if i > 0 {
-                b.Write(",")
-            }
-            b.Write(Quote(k))
-            b.Write(":")
-            writeValue(b, v.items[i])
-        }
-        b.Write("}")
+            rtWRaw(w, "null")
     }
 }

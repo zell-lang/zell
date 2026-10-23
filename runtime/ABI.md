@@ -2041,13 +2041,77 @@ returned as the error. `fnval` is a closure-convention thunk
 
 ### 17.4 encoding.json
 
-| Zell | C | Notes |
-|---|---|---|
-| `json.Quote(s)` | `zell_string *zell_encoding_json_quote(const zell_string *s)` | JSON string literal: quotes, `\" \\ \n \r \t \b \f`, other control bytes as `\u00XX`; other bytes (UTF-8) unchanged |
-| internal `json.scan(text)` | `void zell_encoding_json_scan(const zell_string *text, zell_slice *out, zell_error **err)` | `[]string` of tokens (`elem_size` 8, `zell_ops_ref`): `{ } [ ] : ,`, `s` + unescaped string bytes (`\uXXXX` and surrogate pairs to UTF-8, lone surrogates U+FFFD), `n` + number text (RFC 8259 syntax), `t` `f` `z` (true, false, null). Lexical errors: `json: <what> at offset N` (byte offset) |
+`src/std_json.c`. The runtime parses a JSON text (RFC 8259) in one pass
+into a **document**: one array of 16-byte nodes in depth-first document
+order, owned by the document together with a byte arena for the strings
+that had escapes and the lazily built index tables of long arrays. The
+document retains the source text (string nodes without escapes point into
+it) and is freed in one call. Handles are addresses passed as `int64_t`:
+the document (`rt_parse` result) and nodes (`0` = no node, which every
+query treats as null). Nodes have no refcounts; a node handle is valid
+until its document is freed. `json.Value` (Zell,
+`compiler/src/sema/reflect_src/json.zl`) is `{*document, node}` where
+`document` is a refcounted Zell object whose `Drop` calls `rt_free`, so a
+document lives as long as any Value made from it; `Parse<T>` walks the
+nodes of one document and frees it when it returns. Documents are not
+thread-safe (one task parses, Values may then be read from one thread at a
+time).
 
-The parser, `json.Value`, `Parse<T>` and `Format<T>` are Zell
-(`compiler/src/sema/reflect_src/json.zl`).
+```c
+struct zell__json_node {           /* 16 bytes, private to std_json.c */
+    uint8_t type;                  /* 0 null, 1 bool, 2 number, 3 string, 4 array, 5 object */
+    uint8_t flags;                 /* 1: number is an int64 (u.i), 2: array has an index table */
+    uint16_t pad;
+    uint32_t len;                  /* string bytes; array elements; object pairs; bool value */
+    union { int64_t i; double f; const char *s; struct { uint32_t span, table; } c; } u;
+};
+```
+
+A container node is followed by the nodes of its elements (an object: key
+node, value node, key node, ...); `u.c.span` is the number of nodes in its
+subtree (itself included), so the next sibling of a node is `node + span`
+(1 for scalars). Numbers: an integer literal that fits int64 (not `-0`) is
+an int (flag 1); everything else is a double parsed with Clinger's fast
+path (mantissa < 2^53, |exponent| <= 22) or `strtod`; `1e400` and the like
+are rejected. Strings: `\uXXXX` and surrogate pairs decode to UTF-8, lone
+surrogates to U+FFFD; other bytes pass through unchanged (no UTF-8
+validation). Nesting deeper than 512 containers is rejected. The scanner
+uses SSE2 where `__SSE2__` is defined (strings: the first `"`, `\` or
+control byte in 16-byte blocks; whitespace runs), else portable loops.
+
+| Zell (internal unless noted) | C | Notes |
+|---|---|---|
+| `json.Quote(s)` (public) | `zell_string *zell_encoding_json_quote(const zell_string *s)` | +1 JSON string literal: quotes, `\" \\ \n \r \t \b \f`, other control bytes as `\u00XX`; other bytes (UTF-8) unchanged |
+| `rtParse(text)` | `int64_t zell_encoding_json_rt_parse(const zell_string *text, zell_error **err)` | the document (retains `text`), or 0 with `*err`. Lexical errors: `json: <what> at offset N` (`unterminated string`, `control character in string`, `invalid escape in string`, `invalid \u escape`, `invalid number`, `number out of range`, `invalid character 'c'`, `invalid byte 0xNN`); grammar: `json: unexpected end of input`, `json: expected , or ] in an array, found <token>`, `... , or } in an object, found ...`, `... a string key in an object, found ...`, `... : after an object key, found ...`, `json: unexpected <token>`, `json: unexpected <token> after the top-level value` (`<token>` is `number 2`, `string "x"` (as written), `true`, `'}'`), `json: nesting too deep` |
+| `rtFree(d)` | `void zell_encoding_json_rt_free(int64_t d)` | frees the document (nodes, arena, tables) and releases the text |
+| `rtRoot(d)` | `int64_t zell_encoding_json_rt_root(int64_t d)` | the root node |
+| `rtKind(n)` | `int64_t zell_encoding_json_rt_kind(int64_t n)` | the type above (0 for node 0) |
+| `rtIsInt(n)` | `bool zell_encoding_json_rt_is_int(int64_t n)` | number node written as an integer that fits int64 |
+| `rtBool(n)`, `rtInt(n)` | `bool/int64_t zell_encoding_json_rt_{bool,int}(int64_t n)` | the value; 0/false for other kinds |
+| `rtFloat(n)` | `double zell_encoding_json_rt_float(int64_t n)` | the number (an int node converted); **NaN** for every other kind, so one call reads and classifies (JSON has no NaN) |
+| `rtMake<T>(n)` | compiler intrinsic → `zell_slice_new_ops(out, sizeof T, n, n, ops)` (5.2) | `n` zeroed elements, `len == cap == n` (nil for 0): the typed decoder sizes a slice once and decodes into its elements in place |
+| `rtStr(n)` | `zell_string *zell_encoding_json_rt_str(int64_t n)` | +1 copy of a string node (NULL for `""` and other kinds) |
+| `rtLen(n)` | `int64_t zell_encoding_json_rt_len(int64_t n)` | elements of an array / pairs of an object, 0 for scalars |
+| `rtFirst(n)` | `int64_t zell_encoding_json_rt_first(int64_t n)` | first element / first key node, 0 for an empty container or a scalar |
+| `rtNext(n)` | `int64_t zell_encoding_json_rt_next(int64_t n)` | the node after `n`'s subtree: the next sibling; after a key node, its value. Not bounds-checked: callers count with `rtLen` |
+| `rtGet(obj, key)` | `int64_t zell_encoding_json_rt_get(int64_t obj, const zell_string *key)` | the value of the last pair named `key` (bytewise), 0 if absent or not an object |
+| `rtIndex(d, arr, i)` | `int64_t zell_encoding_json_rt_index(int64_t d, int64_t arr, int64_t i)` | element `i`, 0 if out of range or not an array. Arrays of 16+ elements get a `uint32_t` offset table in the document on the first call (O(1) afterwards); shorter ones are walked |
+| `rtWNew()` | `int64_t zell_encoding_json_rt_w_new(void)` | a writer: one uniquely owned `zell_string` grown in place (`zell__object_resize`, doubling) |
+| `rtWFinish(w)` | `zell_string *zell_encoding_json_rt_w_finish(int64_t w)` | +1 the text written so far; frees the writer (its capacity stays with the string) |
+| `rtWRaw(w, s)` | `void zell_encoding_json_rt_w_raw(int64_t w, const zell_string *s)` | appends the bytes of `s` as they are (`{`, `,`, `null`, ...) |
+| `rtWKey(w, name, first)` | `void zell_encoding_json_rt_w_key(int64_t w, const zell_string *name, bool first)` | `,` unless `first`, then the quoted name and `:` |
+| `rtWStr(w, s)` | `void zell_encoding_json_rt_w_str(int64_t w, const zell_string *s)` | the quoted string (as `Quote`) |
+| `rtWInt(w, v)`, `rtWUint(w, v)` | `void zell_encoding_json_rt_w_{int,uint}(int64_t w, int64_t/uint64_t v)` | decimal digits |
+| `rtWFloat(w, f)` | `void zell_encoding_json_rt_w_float(int64_t w, double f)` | the shortest round-trip text as `println` prints floats (fixed unless the exponent is < -4 or >= 6, `-0`); NaN and infinities as `null` |
+| `rtWBool(w, b)` | `void zell_encoding_json_rt_w_bool(int64_t w, bool b)` | `true` / `false` |
+| `rtWNode(w, n)` | `void zell_encoding_json_rt_w_node(int64_t w, int64_t n)` | the compact text of a node's subtree (node 0: `null`); int nodes as integers, other numbers as `rtWFloat` |
+| `rtWKeyInt(w, name, first, v)`, `rtWKeyStr`, `rtWKeyFloat`, `rtWKeyBool` | `void zell_encoding_json_rt_w_key_{int,str,float,bool}(int64_t w, const zell_string *name, bool first, <value>)` | `rtWKey` followed by the value, in one call (the struct members of `Format<T>`) |
+| `rtWStrs(w, strs)` | `void zell_encoding_json_rt_w_strs(int64_t w, const zell_slice *strs)` | a `[]string` (`elem_size` 8) as `["a","b"]` (the caller writes `null` for a nil slice) |
+
+`json.Value`, `Parse<T>` (the typed decoder specialised per `T` at compile
+time, calling the node queries), `Format<T>` (calling the writer with
+constant field names) and the `New*` constructors (which write a text and
+parse it) are Zell (`compiler/src/sema/reflect_src/json.zl`).
 
 ## 18. diag and log
 

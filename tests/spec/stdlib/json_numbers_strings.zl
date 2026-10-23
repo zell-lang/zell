@@ -1,0 +1,54 @@
+// test: json numbers keep int and float apart (int64 limits, exponents, -0, out-of-range ints) and strings decode every escape, surrogate pairs and lone surrogates
+// status: passing
+namespace spec.stdlib.json_numbers_strings
+
+import encoding
+import io
+
+struct Nums {
+    I  int
+    I8 int8
+    U8 byte
+    F  float
+    F2 float
+}
+
+func main() void! {
+    var v = json.ParseValue("[0, -0, 42, 9223372036854775807, -9223372036854775808, 9223372036854775808, 1e2, 1.0, 0.1, 1E-7, 2.5e+3, 123456789012345678901234]")?
+    for i in 0..v.Len() {
+        var x = v.Index(i)
+        var asInt = try x.Int() catch err {
+            println(i, x.Float()?, "int:", err)
+            continue
+        }
+        println(i, x.Float()?, asInt)
+    }
+    println(v.Format())
+
+    var n = json.Parse<Nums>("{\"I\": 1e2, \"I8\": -128, \"U8\": 255, \"F\": 7, \"F2\": 1e21}")?
+    println(n.I, n.I8, n.U8, n.F, n.F2)
+    println(json.Format(n))
+    try json.Parse<Nums>("{\"I8\": 128}") catch err {
+        println(err)
+    }
+    try json.Parse<Nums>("{\"U8\": -1}") catch err {
+        println(err)
+    }
+    try json.Parse<Nums>("{\"I\": 1.5}") catch err {
+        println(err)
+    }
+    try json.Parse<Nums>("{\"I\": 9223372036854775808}") catch err {
+        println(err)
+    }
+    try json.Parse<Nums>("{\"I\": \"1\"}") catch err {
+        println(err)
+    }
+
+    var s = json.ParseValue("[\"\\\"\\\\\\/\\b\\f\\n\\r\\t\", \"\\u00e9\\u4e2d\", \"\\ud83d\\ude00\", \"\\ud800x\", \"\\udc00\", \"plain text\", \"\"]")?
+    for i in 0..s.Len() {
+        var t = s.Index(i).String()?
+        println(i, len(t), json.Quote(t))
+    }
+    println(s.Format())
+    println(json.Format("tab\there\n\"q\"\\"))
+}

@@ -469,6 +469,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.call_rt("zell_arena_slice", &[out.into(), h.into(), size.into(), n.into(), ops.into()]);
                 Ok(Val::owned(self.b.build_load(self.slice_ty(), out, "").unwrap()))
             }
+            Builtin::SliceMake => {
+                let et = self.elem_of(ty).unwrap();
+                let n = self.expr(&args[0])?.get();
+                let out = self.entry_alloca(self.slice_ty().into(), "mslice", false);
+                let size = self.i64_ty().const_int(self.size_of(et), false);
+                let ops = self.value_ops(et);
+                self.call_rt("zell_slice_new_ops", &[out.into(), size.into(), n.into(), n.into(), ops.into()]);
+                Ok(Val::owned(self.b.build_load(self.slice_ty(), out, "").unwrap()))
+            }
         }
     }
 }

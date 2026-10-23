@@ -1,0 +1,52 @@
+// test: json.ParseValue rejects malformed texts (lexical errors with the byte offset, grammar errors with the offending token, nesting deeper than 512) and accepts the edge cases
+// status: passing
+namespace spec.stdlib.json_syntax
+
+import encoding
+import io
+
+func show(text string) {
+    try json.ParseValue(text) catch err {
+        println(err)
+        return
+    }
+    println("ok")
+}
+
+func main() void! {
+    show("")
+    show("   ")
+    show("[1, 2")
+    show("{\"a\"")
+    show("{\"a\":")
+    show("[1 2]")
+    show("[01]")
+    show("{1: 2}")
+    show("{\"a\" 1}")
+    show("{\"a\":1,}")
+    show("[1,]")
+    show("}")
+    show("{\"id\": 1} 5")
+    show("{\"id\": 1} x")
+    show("\"abc")
+    show("\"a\tb\"")
+    show("\"\\x\"")
+    show("\"\\u12\"")
+    show("nul")
+    show("1e400")
+    show("-")
+    show("1.")
+    // 512 nested arrays are fine, 513 are not
+    var deep = ""
+    for _ in 0..512 {
+        deep += "["
+    }
+    for _ in 0..512 {
+        deep += "]"
+    }
+    show(deep)
+    show("[" + deep + "]")
+    // whitespace everywhere, empty containers, duplicate keys (the last one wins)
+    var v = json.ParseValue(" \n\t{ \"a\" : [ ] , \"b\" : { } , \"a\" : 2 } \r\n")?
+    println(v.Len(), v.Keys(), v.Get("a").Int()?, v.Get("b").Len(), v.Get("b").Type(), v.Format())
+}
