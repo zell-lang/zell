@@ -84,14 +84,49 @@ warning-free and the runtime `-Werror` clean.
 
 Done: lexer/parser, sema + HIR, LLVM codegen (structs, interfaces, enums,
 closures, defer, errors, async via LLVM coroutines), C runtime + core
-stdlib, `zell build/run/check`, package manifests/workspaces/lock,
-LSP + VS Code client, examples and benchmarks.
+stdlib, `zell build/run/check/test/fmt`, package manifests/workspaces/lock,
+LSP (3.17 conformance in `docs/LSP_CONFORMANCE.md`, lints L0001–L0009,
+refactorings) + VS Code client, IDEA plugin (`zell-lang/zell-idea-plugin`,
+CI releases `YYYY.M.<build>`), examples, benchmarks, performance wave 1–2
+(`agents/prompts/perf-wave-3.md` has every item's numbers), language
+decisions of 2026-10-23 (comma-ok map lookup, leading-dot continuation,
+type aliases, contextual `in`, keywords as attribute/field names), showcase
+repos in `zell-lang` (`zconf`, `example-web-service`, `example-cli`,
+`example-worker`; `docs/EXAMPLES.md`).
 
-Next (see `DESIGN.md` stages and `tests/spec` pending counts): memory
-management (ownership elision; the cycle collector's gaps: cycles
-through maps in threaded processes, tasks, errors), generics, block `try`,
-error traces, reflection + attributes as values, `zell fmt`, stdlib
-(`collections`, `net`, `http`, `encoding.json`), framework packages
-(`docs/FRAMEWORK.md`; plan "тонкое ядро, фреймворк в пакетах": `web`/`data`
-move to `zell-lang/web`, `zell-lang/data` after `reflect.TypesWith<A>()` and
-expression trees land), platforms (`docs/PLATFORMS.md`).
+Next, in this order:
+
+1. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md` items 11 (unify
+   `json/yaml/toml.Value` methods), 17 (`web` error-mapping hook
+   `MapError<E>(status)`), 19 (`ExitCoder` through `?("ctx")` wrapping), 20
+   (generic/local type aliases), 25 (panic backtraces with `file:line` from
+   a compact pc table, usable stripped), 26 (red test
+   `reflection.rs::no_reflection_without_use`: stdlib interface signatures
+   are resolved eagerly and force `http.Request` → whole stdlib → `reflect`;
+   make them lazy). Simplify the showcase repos to one package now that
+   `zell test` builds dependencies.
+2. **Security tooling** — `zell audit` (OSV-format advisory DB
+   `zell-lang/advisory-db`, check `zell.lock` and the toolchain version,
+   `--deny` for CI), capability analysis of dependencies written into the
+   lock (`zell tree --caps`), security lints in `sema/lint.rs` (SQL by string
+   concatenation, `exec` with request data, insecure TLS, hardcoded
+   secrets, path traversal, weak hashes), fuzz targets for every parser
+   (HTTP/1.1, HTTP/2, TLS records, YAML/TOML/XML, zstd/brotli, regex) like
+   `make -C runtime fuzz-json`, release signing (minisign/sigstore).
+3. **LSP pass 3** — `docs/LSP_CONFORMANCE.md` missing items: inline
+   function, implement interface, change signature, completion quality
+   (textEdit/sortText/snippets), cancellation off the main thread, dynamic
+   registration + `workspace/configuration`, incremental analysis per
+   namespace; go-to-definition on type aliases.
+4. **Memory and performance** — perf-wave-3 open items: task-per-await
+   structural cost (await_chain 10.9x Go, WebSocket fix 4 poller→worker
+   hand-off), P-256 verify, LTO by default, `--static` = musl/scratch
+   images, package proxy public instance, `zell tool counters`
+   (dotnet-counters analogue over `diag`).
+5. **Language and framework** (`DESIGN.md` stages, `docs/REFLECTION_PLAN.md`,
+   `docs/FRAMEWORK.md`): ownership elision, cycle-collector gaps (maps in
+   threaded processes, tasks, errors), generics completion, block `try`,
+   `reflect.TypesWith<A>()` then `web` → `zell-lang/web`, expression trees
+   then `data` → `zell-lang/data`, run-time reflection, stdlib
+   (`collections`, `net`, `encoding.json` write API — `Value.Set`),
+   platforms (`docs/PLATFORMS.md`, Apple signing).
