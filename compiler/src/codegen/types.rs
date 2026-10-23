@@ -132,7 +132,14 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let t = f.locals[p.0 as usize].ty;
             params.push(self.llty(t).into());
         }
-        let ret = if f.is_async { Some(self.ptr_ty().into()) } else { self.llty_opt(f.ret) };
+        // An async function returns through its trailing result slot
+        // (`CodeGen::coro_res_ty`, ABI.md §10.3).
+        let ret = if f.is_async {
+            params.push(self.ptr_ty().into());
+            None
+        } else {
+            self.llty_opt(f.ret)
+        };
         Ok(match ret {
             None => self.ctx.void_type().fn_type(&params, false),
             Some(r) => r.fn_type(&params, false),

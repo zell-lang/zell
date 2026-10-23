@@ -1,7 +1,7 @@
 //! Expressions: places, loads, literals, calls, indexing and maps.
 
 use super::{unsupported, CodeGen, Val, R};
-use crate::hir::{Callee, ConstValue, Expr, ExprKind, ExternId};
+use crate::hir::{Callee, ConstValue, Expr, ExprKind, ExternId, FuncId};
 use crate::types::{Type, TypeId};
 use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType};
@@ -602,24 +602,57 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // Calls
     // ------------------------------------------------------------------
 
+    /// Evaluates the arguments of a direct call of `fid` (see [`Self::arg`]);
+    /// returns them with the holds of moved arguments and the cleanup depth
+    /// before them.
+    fn direct_args(&mut self, fid: FuncId, args: &[Expr]) -> R<(Vec<BasicMetadataValueEnum<'ctx>>, Vec<super::cleanup::Hold>, usize)> {
+        let d = self.depth();
+        let mut vals = Vec::new();
+        let mut moved_holds = Vec::new();
+        for (k, a) in args.iter().enumerate() {
+            let moved = self.facts.moved(fid, k);
+            let borrowed = !self.facts.owned(fid, k);
+            let later = args[k + 1..].iter().any(|x| self.may_run_code(x));
+            let (v, h) = self.arg(a, moved, borrowed, later)?;
+            if moved {
+                moved_holds.push(h);
+            }
+            vals.push(v.get().into());
+        }
+        Ok((vals, moved_holds, d))
+    }
+
+    /// A direct call of async function `fid`: returns the result slot it
+    /// wrote (`CodeGen::coro_res_ty`), to be read by an `await` or turned
+    /// into a `Task<T>` by `coro_res_task`.
+    pub(crate) fn call_async_direct(&mut self, fid: FuncId, args: &[Expr]) -> R<PointerValue<'ctx>> {
+        let (mut ma, moved_holds, d) = self.direct_args(fid, args)?;
+        let ret = self.prog.funcs[fid.0 as usize].ret;
+        let rty = self.coro_res_ty(ret);
+        let res = self.entry_alloca(rty.into(), "res", false);
+        ma.push(res.into());
+        let fv = self.funcs[fid.0 as usize];
+        self.b.build_call(fv, &ma, "").unwrap();
+        for h in moved_holds {
+            self.unhold(h);
+        }
+        self.release_temps_from(d);
+        Ok(res)
+    }
+
     fn call(&mut self, e: &Expr, callee: &Callee, args: &[Expr]) -> R<Val<'ctx>> {
         match callee {
             Callee::Func(fid) => {
-                let d = self.depth();
-                let mut vals = Vec::new();
-                let mut moved_holds = Vec::new();
-                for (k, a) in args.iter().enumerate() {
-                    let moved = self.facts.moved(*fid, k);
-                    let borrowed = !self.facts.owned(*fid, k);
-                    let later = args[k + 1..].iter().any(|x| self.may_run_code(x));
-                    let (v, h) = self.arg(a, moved, borrowed, later)?;
-                    if moved {
-                        moved_holds.push(h);
-                    }
-                    vals.push(v);
+                let f = &self.prog.funcs[fid.0 as usize];
+                if f.is_async {
+                    // The call's `Task<T>` is kept (not awaited here).
+                    let ret = f.ret;
+                    let res = self.call_async_direct(*fid, args)?;
+                    let t = self.coro_res_task(ret, res);
+                    return Ok(Val::owned(t.into()));
                 }
+                let (ma, moved_holds, d) = self.direct_args(*fid, args)?;
                 let fv = self.funcs[fid.0 as usize];
-                let ma: Vec<BasicMetadataValueEnum> = vals.iter().map(|v| v.get().into()).collect();
                 let r = self.b.build_call(fv, &ma, "").unwrap().try_as_basic_value().left();
                 for h in moved_holds {
                     self.unhold(h);

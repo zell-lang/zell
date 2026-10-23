@@ -1,0 +1,44 @@
+// test: defers of an async func that never suspended run at its return, LIFO, before the caller continues; context set inside it does not leak out
+// status: passing
+namespace spec.async2.sync_defer_order
+
+import io
+
+var Label = task.Key<string>()
+
+func LabelOrNone() string {
+    var p = task.Get(Label)
+    if p == nil {
+        return "(none)"
+    }
+    return *p
+}
+
+async func Work(name string) int {
+    defer println("defer 1", name)
+    defer println("defer 2", name)
+    println("body", name)
+    return len(name)
+}
+
+async func Spanned() int {
+    // Pushes a logging property for the rest of the function and never
+    // pops it: the caller must not see it after the call returns.
+    var scope = log.Context.Push("request", "r1")
+    _ = scope
+    println("inside", len(log.Context.Properties()))
+    return 1
+}
+
+async func main() {
+    println("got", await Work("ab"))
+    println("got", await Work("xyz"))
+    println("before", len(log.Context.Properties()))
+    println("got", await Spanned())
+    println("after", len(log.Context.Properties()))
+    await task.With(Label, "req", async func() {
+        println("in With", LabelOrNone())
+        println("got", await Work("q"))
+    })
+    println("after With", LabelOrNone())
+}

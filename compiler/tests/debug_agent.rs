@@ -252,11 +252,20 @@ fn next_over_await_stays_in_task() {
     let t = ev["threadId"].as_i64().unwrap();
     let (_, func, line) = s.top(t);
     assert_eq!((func.as_str(), line), ("app.Work", line_of(&s.src, "before_await")));
+    // Before its first suspension an async function runs as part of the
+    // caller's task (ABI.md 10.3): Work is still on main's thread here,
+    // while Half, which already suspended, has a task of its own.
+    let threads = s.c.request("threads", json!({})).unwrap();
+    let names: Vec<String> = threads["threads"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect();
+    assert!(threads["threads"].as_array().unwrap().iter().any(|x| x["id"] == t && x["name"] == "main"), "{threads}");
+    assert!(names.iter().any(|n| n.contains("Half")) && !names.iter().any(|n| n.contains("Work")), "{threads}");
+    s.c.request("next", json!({"threadId": t})).unwrap();
+    // The await suspends: Work gets its task there and the step ends in it.
+    let ev = s.stopped();
+    assert_eq!(ev["reason"].as_str(), Some("step"));
+    let t = ev["threadId"].as_i64().unwrap();
     let threads = s.c.request("threads", json!({})).unwrap();
     assert!(threads["threads"].as_array().unwrap().iter().any(|x| x["id"] == t && x["name"].as_str().unwrap().contains("Work")), "{threads}");
-    s.c.request("next", json!({"threadId": t})).unwrap();
-    let ev = s.stopped();
-    assert_eq!((ev["reason"].as_str(), ev["threadId"].as_i64()), (Some("step"), Some(t)), "the step ends in the same task");
     let (_, func, line) = s.top(t);
     assert_eq!((func.as_str(), line), ("app.Work", line_of(&s.src, "after_await")));
     let vs = s.vars(t);

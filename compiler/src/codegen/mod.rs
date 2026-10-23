@@ -108,8 +108,17 @@
 //! the result into a slot and branches there; the exit block runs deferred
 //! closures (LIFO, up to 64 per call, kept in an alloca'd array), releases
 //! the locals and returns. `async` functions are LLVM switched-resume
-//! coroutines following ABI.md §10.3 (see [`async_`]); their frames come
-//! from `zell_coro_frame_alloc` and go back with `zell_coro_frame_free`. The build pipeline
+//! coroutines following ABI.md §10.3 (see [`async_`]): `void @f(params,
+//! ptr %res)` with `%res -> { ptr task; T value }`; the coroutine makes
+//! its `Task<T>` (`zell_task_lazy`) only at its first suspension and
+//! stores it into `res.task`, while a body that returns without suspending
+//! leaves NULL there and moves its result into `res.value` (the
+//! synchronous fast path: no task, and no frame when the body has no
+//! suspend point, through `llvm.coro.alloc`). Frames come from
+//! `zell_coro_frame_alloc` and go back with `zell_coro_frame_free`. Callers
+//! awaiting a direct call read `res.value` when `res.task` is NULL; callers
+//! keeping the task, and thunks of async functions used as values,
+//! materialise a done task with `zell_task_completed`. The build pipeline
 //! (`crate::build`) runs `default<On>`, which in LLVM 18 includes the
 //! coroutine passes (coro-early, coro-split, coro-elide, coro-cleanup; at
 //! O0 via the CoroConditionalWrapper), so coroutines are lowered at every
@@ -325,13 +334,22 @@ pub struct Options {
     pub debug_agent: bool,
 }
 
-/// Coroutine state of an `async` function being emitted.
+/// Coroutine state of an `async` function being emitted ([`async_`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Coro<'ctx> {
     pub hdl: PointerValue<'ctx>,
-    pub task: PointerValue<'ctx>,
+    /// The result type `T` of `Task<T>`, its size and value ops.
+    pub ret: TypeId,
+    pub ret_size: inkwell::values::IntValue<'ctx>,
+    pub ret_ops: PointerValue<'ctx>,
+    /// Frame slot holding the coroutine's task (NULL until it suspends).
+    pub task_slot: PointerValue<'ctx>,
+    /// Frame slot holding the caller's context (+1) to restore.
+    pub ctx_slot: PointerValue<'ctx>,
+    /// The caller's result slot `{ ptr task; T value }` (last parameter).
+    pub res: PointerValue<'ctx>,
     pub cleanup: BasicBlock<'ctx>,
-    pub suspended: BasicBlock<'ctx>,
+    pub done: BasicBlock<'ctx>,
 }
 
 /// Per-function emission state.
@@ -690,7 +708,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let blocks = st.func.get_basic_blocks();
         let body = blocks[2];
         st.alloca_b.build_unconditional_branch(st.init).unwrap();
-        if st.init.get_terminator().is_none() {
+        // The init chain may have grown blocks (a coroutine prologue):
+        // `init_b` sits at the end of its last one.
+        let init_tail = st.init_b.get_insert_block().unwrap_or(st.init);
+        if init_tail.get_terminator().is_none() {
             st.init_b.build_unconditional_branch(body).unwrap();
         }
         for bb in st.func.get_basic_blocks() {
@@ -783,9 +804,28 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // `main() void!`: the error (owned) is reported before shutdown.
         let fallible = matches!(self.prog.types.get(self.prog.funcs[entry.0 as usize].ret), crate::types::Type::Fallible(_));
         let err_slot = fallible.then(|| self.entry_alloca(self.ptr_ty().into(), "main.err", true));
-        let r = self.b.build_call(ef, &[], "").unwrap().try_as_basic_value().left();
         if self.prog.funcs[entry.0 as usize].is_async {
-            let t = r.unwrap();
+            // `async func main`: its result slot holds either the task to
+            // wait for or, when it never suspended, the result itself.
+            let ret = self.prog.funcs[entry.0 as usize].ret;
+            let rty = self.coro_res_ty(ret);
+            let res = self.entry_alloca(rty.into(), "main.res", true);
+            self.b.build_call(ef, &[res.into()], "").unwrap();
+            let tp = self.b.build_struct_gep(rty, res, 0, "").unwrap();
+            let t = self.b.build_load(self.ptr_ty(), tp, "main.task").unwrap().into_pointer_value();
+            let sync = self.b.build_is_null(t, "").unwrap();
+            let fast = self.block("main.sync");
+            let slow = self.block("main.await");
+            let join = self.block("main.join");
+            self.b.build_conditional_branch(sync, fast, slow).unwrap();
+            self.b.position_at_end(fast);
+            if let Some(es) = err_slot {
+                let vp = self.b.build_struct_gep(rty, res, 1, "").unwrap();
+                let e = self.b.build_load(self.ptr_ty(), vp, "").unwrap();
+                self.b.build_store(es, e).unwrap();
+            }
+            self.b.build_unconditional_branch(join).unwrap();
+            self.b.position_at_end(slow);
             let slot = self.call_rt_v("zell_task_await", &[t.into()]).into_pointer_value();
             if let Some(es) = err_slot {
                 let e = self.b.build_load(self.ptr_ty(), slot, "").unwrap();
@@ -793,8 +833,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.b.build_store(es, e).unwrap();
             }
             self.call_rt("zell_release", &[t.into()]);
-        } else if let (Some(es), Some(e)) = (err_slot, r) {
-            self.b.build_store(es, e).unwrap();
+            self.b.build_unconditional_branch(join).unwrap();
+            self.b.position_at_end(join);
+        } else {
+            let r = self.b.build_call(ef, &[], "").unwrap().try_as_basic_value().left();
+            if let (Some(es), Some(e)) = (err_slot, r) {
+                self.b.build_store(es, e).unwrap();
+            }
         }
         // Globals are released in reverse initialisation order once no task
         // runs any more (their destructors run before the final shutdown).

@@ -420,6 +420,29 @@ void zell_dbg_suspend(zell_dbg_frame *f) {
     if (r) {
         zell__plat_mutex_lock(&g_mu);
         r->suspended = f;
+        /* Until its first suspension a coroutine runs as part of its
+         * caller's task (ABI.md 10.3), so a step begun in this frame may be
+         * recorded on the caller's record: it moves to the coroutine's own
+         * record here and goes on when the frame resumes there, not in the
+         * caller, which merely continues after the ramp returned. */
+        for (rec *s = g_steps; s; s = s->next_step) {
+            if (s == r || s->step_frame != f) continue;
+            int step = s->step;
+            zell_dbg_frame *parent = s->step_parent;
+            int32_t depth = s->step_depth, line = s->step_line, stmt = s->step_stmt;
+            step_clear(s);
+            step_clear(r);
+            r->step = step;
+            r->step_frame = f;
+            r->step_parent = parent;
+            r->step_depth = depth;
+            r->step_line = line;
+            r->step_stmt = stmt;
+            r->next_step = g_steps;
+            g_steps = r;
+            __atomic_add_fetch(&g_nsteps, 1, __ATOMIC_RELEASE);
+            break;
+        }
         zell__plat_mutex_unlock(&g_mu);
     }
 }

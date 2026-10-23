@@ -1,0 +1,18 @@
+body ab
+defer 2 ab
+defer 1 ab
+got 2
+body xyz
+defer 2 xyz
+defer 1 xyz
+got 3
+before 0
+inside 1
+got 1
+after 0
+in With req
+body q
+defer 2 q
+defer 1 q
+got 1
+after With (none)

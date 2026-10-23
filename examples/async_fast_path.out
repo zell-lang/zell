@@ -1,0 +1,6 @@
+total 1200
+hits 3 loads 2
+cached 200 200
+error: cannot use an empty key
+sum 20000000 hits 100005
+main done

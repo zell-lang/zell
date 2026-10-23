@@ -1,21 +1,35 @@
 //! `async` functions as LLVM switched-resume coroutines (ABI.md §10.3,
 //! modelled on `runtime/tests/coro_lowering.ll`).
 //!
-//! Ramp layout: `entry` (allocas) -> `init` (task creation, `coro.id`,
-//! `coro.begin`, then zeroing of locals) -> body. `return` goes through the
-//! common exit block (defers, release of locals), which completes the task,
-//! drops the frame's task reference and branches to `cleanup` (frees the
-//! frame; there is no final suspend) and `suspended` (`coro.end`, `ret
-//! task`). `await t` registers `zell_coro_resume(hdl)` as a continuation of
-//! `t` and suspends unless `t` is already done. Outside a coroutine (C
-//! `main`), `await` blocks with `zell_task_await`.
+//! An `async func f(params) T` is `void @f(params, ptr %res)` with
+//! `%res -> { ptr task; T value }` ([`CodeGen::coro_res_ty`]). Ramp layout:
+//! `entry` (allocas) -> `init` (`coro.id`, `coro.alloc`) -> `coro.alloc`
+//! (frame from `zell_coro_frame_alloc`, skipped when LLVM proves the
+//! coroutine never suspends) -> `coro.begin` (`coro.begin`, the caller's
+//! context saved by `zell_task_get_ctx`, then zeroing of locals) -> body.
+//! The coroutine makes **no task until its first real suspension**: the
+//! body runs as part of the caller's current task, and an `await t` that
+//! has to suspend first calls `zell_task_lazy` (which makes the task,
+//! attaches it under the current task and makes it current), stores it
+//! into `res.task` and registers `zell_coro_resume(hdl)` as a continuation
+//! of `t`. `return` goes through the common exit block (defers, release of
+//! locals) and then [`CodeGen::coro_return`]: with no task the result is
+//! moved into `res.value` under a NULL `res.task` after `zell_coro_leave`
+//! restored the caller's context (the synchronous fast path: no task, and
+//! no frame unless the body has a suspend point); with a task it is
+//! completed as before. Both branch to `cleanup` (frees the frame if one
+//! was allocated; there is no final suspend) and `done` (`coro.end`, `ret
+//! void`). Callers that await a direct call read `res.value` when
+//! `res.task` is NULL ([`CodeGen::await_expr`]); callers that keep the
+//! `Task<T>` materialise a completed one ([`CodeGen::coro_res_task`]).
+//! Outside a coroutine (C `main`), `await` blocks with `zell_task_await`.
 
 use super::{unsupported, CodeGen, Coro, Val, R};
-use crate::hir::{self, Expr, ExprKind};
+use crate::hir::{self, Callee, Expr, ExprKind, FuncId};
 use crate::types::{Type, TypeId};
 use inkwell::llvm_sys::core as llc;
 use inkwell::llvm_sys::prelude::{LLVMTypeRef, LLVMValueRef};
-use inkwell::types::AsTypeRef;
+use inkwell::types::{AsTypeRef, StructType};
 use inkwell::values::{AsValueRef, BasicValueEnum, IntValue, PointerValue};
 use inkwell::IntPredicate;
 
@@ -43,49 +57,113 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
+    /// The result slot an async call writes: `{ ptr task; T value }`
+    /// (`{ ptr task }` for `Task<void>`). `task` is the coroutine's
+    /// `Task<T>` (+1) once it suspended, or NULL with the result (+1) in
+    /// `value` when it completed synchronously.
+    pub(crate) fn coro_res_ty(&mut self, ret: TypeId) -> StructType<'ctx> {
+        let mut fs: Vec<inkwell::types::BasicTypeEnum<'ctx>> = vec![self.ptr_ty().into()];
+        if let Some(t) = self.llty_opt(ret) {
+            fs.push(t);
+        }
+        self.ctx.struct_type(&fs, false)
+    }
+
+    /// Address of `res.task` (`i == 0`) or `res.value` (`i == 1`).
+    fn coro_res_field(&mut self, ret: TypeId, res: PointerValue<'ctx>, i: u32) -> PointerValue<'ctx> {
+        let st = self.coro_res_ty(ret);
+        self.b.build_struct_gep(st, res, i, "").unwrap()
+    }
+
     /// Emits the ramp prologue of async function `f` into the init block.
     pub(crate) fn coro_prologue(&mut self, f: &hir::Function) -> R<()> {
         let body = self.b.get_insert_block().unwrap();
         let init = self.fs().init;
+        let func = self.fs().func;
         self.b.position_at_end(init);
-        let size = self.i64_ty().const_int(self.size_of(f.ret), false);
-        let ops = self.value_ops(f.ret);
-        let task = self.call_rt_v("zell_task_new", &[size.into(), ops.into()]).into_pointer_value();
-        self.call_rt("zell_retain", &[task.into()]);
-        let null = self.ptr_ty().const_null().as_value_ref();
+        let ret_size = self.i64_ty().const_int(self.size_of(f.ret), false);
+        let ret_ops = self.value_ops(f.ret);
+        let null = self.ptr_ty().const_null();
         let zero = self.ctx.i32_type().const_zero().as_value_ref();
-        let id = self.intrinsic("llvm.coro.id", &mut [zero, null, null, null]);
+        let id = self.intrinsic("llvm.coro.id", &mut [zero, null.as_value_ref(), null.as_value_ref(), null.as_value_ref()]);
+        // The frame is allocated only when LLVM cannot prove that the
+        // coroutine never suspends (`coro.alloc` folds to false then).
+        let need = self.intrinsic("llvm.coro.alloc", &mut [id]);
+        let alloc = self.block("coro.alloc");
+        let begin = self.block("coro.begin");
+        self.b.build_conditional_branch(unsafe { IntValue::new(need) }, alloc, begin).unwrap();
+        self.b.position_at_end(alloc);
         let sz = self.intrinsic("llvm.coro.size.i64", &mut []);
-        let szv = unsafe { IntValue::new(sz) };
-        let mem = self.call_rt_v("zell_coro_frame_alloc", &[szv.into()]);
-        let hdl = self.intrinsic("llvm.coro.begin", &mut [id, mem.as_value_ref()]);
-        let hdl = unsafe { PointerValue::new(hdl) };
+        let mem = self.call_rt_v("zell_coro_frame_alloc", &[unsafe { IntValue::new(sz) }.into()]).into_pointer_value();
+        self.b.build_unconditional_branch(begin).unwrap();
+        self.b.position_at_end(begin);
         // Zeroing stores emitted later by `entry_alloca` follow this code.
+        self.fs().init_b.position_at_end(begin);
+        let memphi = self.b.build_phi(self.ptr_ty(), "coro.mem").unwrap();
+        memphi.add_incoming(&[(&null, init), (&mem, alloc)]);
+        let hdl = self.intrinsic("llvm.coro.begin", &mut [id, memphi.as_basic_value().as_value_ref()]);
+        let hdl = unsafe { PointerValue::new(hdl) };
+        // The coroutine's task (NULL until its first suspension) and the
+        // caller's context (+1), put back when the body returns without
+        // having suspended.
+        let task_slot = self.entry_alloca(self.ptr_ty().into(), "coro.task", false);
+        self.b.build_store(task_slot, null).unwrap();
+        let ctx_slot = self.entry_alloca(self.ptr_ty().into(), "coro.ctx", false);
+        let ctx0 = self.call_rt_v("zell_task_get_ctx", &[]);
+        self.b.build_store(ctx_slot, ctx0).unwrap();
+        let res = func.get_last_param().unwrap().into_pointer_value();
         let cleanup = self.block("coro.cleanup");
-        let suspended = self.block("coro.suspended");
+        let free = self.block("coro.free");
+        let done = self.block("coro.done");
         self.b.position_at_end(cleanup);
         let fr = self.intrinsic("llvm.coro.free", &mut [id, hdl.as_value_ref()]);
         let frv = unsafe { PointerValue::new(fr) };
+        let has = self.b.build_is_not_null(frv, "").unwrap();
+        self.b.build_conditional_branch(has, free, done).unwrap();
+        self.b.position_at_end(free);
         self.call_rt("zell_coro_frame_free", &[frv.into()]);
-        self.b.build_unconditional_branch(suspended).unwrap();
-        self.b.position_at_end(suspended);
+        self.b.build_unconditional_branch(done).unwrap();
+        self.b.position_at_end(done);
         let fls = self.ctx.bool_type().const_zero().as_value_ref();
         let none = self.token_none();
         self.intrinsic("llvm.coro.end", &mut [hdl.as_value_ref(), fls, none]);
-        self.b.build_return(Some(&task)).unwrap();
-        self.fs_mut().coro = Some(Coro { hdl, task, cleanup, suspended });
+        self.b.build_return(None).unwrap();
+        self.fs_mut().coro = Some(Coro { hdl, ret: f.ret, ret_size, ret_ops, task_slot, ctx_slot, res, cleanup, done });
         self.b.position_at_end(body);
         Ok(())
     }
 
-    /// Completes the task with the result slot and leaves the coroutine.
+    /// Leaves the coroutine with the result slot: completes the task if the
+    /// body suspended, else hands the result to the caller through `res`.
     pub(crate) fn coro_return(&mut self) -> R<()> {
         let co = self.fs().coro.unwrap();
         let (slot, rt) = match self.fs().ret_slot {
             Some((p, t)) => (p, Some(t)),
             None => (self.ptr_ty().const_null(), None),
         };
-        self.call_rt("zell_task_complete", &[co.task.into(), slot.into()]);
+        let own = self.b.build_load(self.ptr_ty(), co.task_slot, "coro.own").unwrap().into_pointer_value();
+        let sync = self.b.build_is_null(own, "").unwrap();
+        let fin_sync = self.block("coro.fin.sync");
+        let fin_task = self.block("coro.fin.task");
+        self.b.build_conditional_branch(sync, fin_sync, fin_task).unwrap();
+        // Never suspended: the caller's context again, the result (moved,
+        // no retain) and a NULL task into the caller's slot.
+        self.b.position_at_end(fin_sync);
+        let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
+        self.call_rt("zell_coro_leave", &[ctx0.into()]);
+        let tp = self.coro_res_field(co.ret, co.res, 0);
+        self.b.build_store(tp, self.ptr_ty().const_null()).unwrap();
+        if let Some(t) = rt {
+            let lt = self.llty(t);
+            let v = self.b.build_load(lt, slot, "").unwrap();
+            let vp = self.coro_res_field(co.ret, co.res, 1);
+            self.b.build_store(vp, v).unwrap();
+        }
+        self.b.build_unconditional_branch(co.cleanup).unwrap();
+        // Suspended at least once: publish the result through the task
+        // (which retains it) and drop the frame's reference.
+        self.b.position_at_end(fin_task);
+        self.call_rt("zell_task_complete", &[own.into(), slot.into()]);
         if let Some(t) = rt {
             if self.needs_rc(t) {
                 let lt = self.llty(t);
@@ -93,7 +171,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.release_val(t, v);
             }
         }
-        self.call_rt("zell_release", &[co.task.into()]);
+        self.call_rt("zell_release", &[own.into()]);
         self.b.build_unconditional_branch(co.cleanup).unwrap();
         Ok(())
     }
@@ -105,21 +183,36 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         };
         let ready = self.block("await.ready");
         let try_ = self.block("await.try");
+        let publish = self.block("await.publish");
+        let save = self.block("await.save");
         let susp = self.block("await.suspend");
         let done = self.call_rt_v("zell_task_is_done", &[t.into()]).into_int_value();
         self.b.build_conditional_branch(done, ready, try_).unwrap();
+        // The coroutine's own task, made now if this is its first
+        // suspension; the caller then gets it through `res.task`.
         self.b.position_at_end(try_);
+        let cur = self.b.build_load(self.ptr_ty(), co.task_slot, "").unwrap().into_pointer_value();
+        let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
+        let own = self.call_rt_v("zell_task_lazy", &[cur.into(), co.ret_size.into(), co.ret_ops.into(), ctx0.into()]).into_pointer_value();
+        self.b.build_store(co.task_slot, own).unwrap();
+        let first = self.b.build_is_null(cur, "").unwrap();
+        self.b.build_conditional_branch(first, publish, save).unwrap();
+        self.b.position_at_end(publish);
+        let tp = self.coro_res_field(co.ret, co.res, 0);
+        self.b.build_store(tp, own).unwrap();
+        self.b.build_unconditional_branch(save).unwrap();
+        self.b.position_at_end(save);
         self.dbga_suspend();
-        let save = self.intrinsic("llvm.coro.save", &mut [co.hdl.as_value_ref()]);
+        let sv = self.intrinsic("llvm.coro.save", &mut [co.hdl.as_value_ref()]);
         let resume = self.rt("zell_coro_resume").as_global_value().as_pointer_value();
         let reg = self.call_rt_v("zell_task_add_continuation", &[t.into(), resume.into(), co.hdl.into()]).into_int_value();
         self.b.build_conditional_branch(reg, susp, ready).unwrap();
         self.b.position_at_end(susp);
         let fls = self.ctx.bool_type().const_zero().as_value_ref();
-        let s = self.intrinsic("llvm.coro.suspend", &mut [save, fls]);
+        let s = self.intrinsic("llvm.coro.suspend", &mut [sv, fls]);
         let sv = unsafe { IntValue::new(s) };
         let i8t = self.ctx.i8_type();
-        self.b.build_switch(sv, co.suspended, &[(i8t.const_zero(), ready), (i8t.const_int(1, false), co.cleanup)]).unwrap();
+        self.b.build_switch(sv, co.done, &[(i8t.const_zero(), ready), (i8t.const_int(1, false), co.cleanup)]).unwrap();
         self.b.position_at_end(ready);
         self.dbga_resume();
         self.call_rt_v("zell_task_result", &[t.into()]).into_pointer_value()
@@ -133,6 +226,67 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         Some(v)
     }
 
+    /// The `Task<T>` (+1) of a direct async call that wrote `res`: the task
+    /// it stored, or a completed one holding the moved result.
+    pub(crate) fn coro_res_task(&mut self, ret: TypeId, res: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let tp = self.coro_res_field(ret, res, 0);
+        let t = self.b.build_load(self.ptr_ty(), tp, "res.task").unwrap().into_pointer_value();
+        let sync = self.b.build_is_null(t, "").unwrap();
+        let from = self.b.get_insert_block().unwrap();
+        let mat = self.block("res.materialize");
+        let join = self.block("res.join");
+        self.b.build_conditional_branch(sync, mat, join).unwrap();
+        self.b.position_at_end(mat);
+        let size = self.i64_ty().const_int(self.size_of(ret), false);
+        let ops = self.value_ops(ret);
+        let vp: PointerValue<'ctx> = if self.llty_opt(ret).is_some() { self.coro_res_field(ret, res, 1) } else { self.ptr_ty().const_null() };
+        let c = self.call_rt_v("zell_task_completed", &[size.into(), ops.into(), vp.into()]).into_pointer_value();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        let phi = self.b.build_phi(self.ptr_ty(), "task").unwrap();
+        phi.add_incoming(&[(&t, from), (&c, mat)]);
+        phi.as_basic_value().into_pointer_value()
+    }
+
+    /// `await f(args)` of an async function: the result straight from the
+    /// call's slot when `f` completed synchronously, else the usual await
+    /// on the task it returned.
+    fn await_direct_call(&mut self, ty: TypeId, fid: FuncId, args: &[Expr]) -> R<Val<'ctx>> {
+        let res = self.call_async_direct(fid, args)?;
+        let tp = self.coro_res_field(ty, res, 0);
+        let t = self.b.build_load(self.ptr_ty(), tp, "res.task").unwrap().into_pointer_value();
+        let sync = self.b.build_is_null(t, "").unwrap();
+        let fast = self.block("await.fast");
+        let slow = self.block("await.slow");
+        let join = self.block("await.join");
+        self.b.build_conditional_branch(sync, fast, slow).unwrap();
+        self.b.position_at_end(fast);
+        let fv = match self.llty_opt(ty) {
+            Some(lt) => {
+                let vp = self.coro_res_field(ty, res, 1);
+                Some(self.b.build_load(lt, vp, "").unwrap())
+            }
+            None => None,
+        };
+        let fast_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(slow);
+        let slot = self.await_slot(t);
+        let sv = self.load_result(ty, slot);
+        self.call_rt("zell_release", &[t.into()]);
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        Ok(match (fv, sv) {
+            (Some(a), Some(b)) => {
+                let phi = self.b.build_phi(a.get_type(), "await.val").unwrap();
+                phi.add_incoming(&[(&a, fast_end), (&b, slow_end)]);
+                Val::owned(phi.as_basic_value())
+            }
+            _ => Val::void(),
+        })
+    }
+
     /// `await t` with result type `ty`.
     pub(crate) fn await_expr(&mut self, ty: TypeId, t: &Expr) -> R<Val<'ctx>> {
         if let ExprKind::TaskAll(tasks) = &t.kind {
@@ -140,6 +294,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         if let ExprKind::Builtin { op: crate::hir::Builtin::TaskAny, args } = &t.kind {
             return self.await_any(ty, args);
+        }
+        if let ExprKind::Call { callee: Callee::Func(fid), args } = &t.kind {
+            if self.prog.funcs[fid.0 as usize].is_async {
+                return self.await_direct_call(ty, *fid, args);
+            }
         }
         let tv = self.expr(t)?;
         let tp = tv.get().into_pointer_value();
