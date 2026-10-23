@@ -253,10 +253,69 @@ impl<'a> Sema<'a> {
                         let cn = self.ide_cur_ns();
                         self.ide_def(index::SymKey::Global(gid.0), &c.name, c.span, cn);
                     }
+                    ast::Decl::TypeAlias(a) => {
+                        if let Some(at) = a.attrs.first() {
+                            self.err("attributes are not allowed on type aliases", at.span);
+                        }
+                        let id = self.aliases.len() as u32;
+                        self.aliases.push(super::Alias { decl: a, file: fi, ns, ty: None, resolving: false });
+                        self.register(ns, &a.name, Member::Alias(id));
+                    }
                     // Syntax error, already reported by the parser.
                     ast::Decl::Error(_) => {}
                 }
             }
+        }
+    }
+
+    /// Resolves every type alias (after the imports, so alias bodies see
+    /// their file's imports); from here on lookups see through aliases.
+    pub(crate) fn resolve_aliases(&mut self) {
+        self.aliases_ready = true;
+        for a in 0..self.aliases.len() {
+            self.alias_type(a as u32);
+        }
+    }
+
+    /// The type an alias stands for, resolved in the alias's own file and
+    /// namespace (no type parameters in scope); a cycle is an error.
+    pub(crate) fn alias_type(&mut self, a: u32) -> TypeId {
+        let al = &self.aliases[a as usize];
+        if let Some(t) = al.ty {
+            return t;
+        }
+        let decl = al.decl;
+        if al.resolving {
+            let (file, saved) = (al.file, self.cur_file);
+            self.cur_file = file;
+            self.err(format!("invalid recursive type alias {}", decl.name.name), decl.name.span);
+            self.cur_file = saved;
+            self.aliases[a as usize].ty = Some(self.tt.invalid);
+            return self.tt.invalid;
+        }
+        self.aliases[a as usize].resolving = true;
+        let saved = (self.cur_file, self.cur_ns, std::mem::take(&mut self.gen.tenv));
+        (self.cur_file, self.cur_ns) = (self.aliases[a as usize].file, self.aliases[a as usize].ns);
+        let t = self.resolve_type(&decl.ty);
+        (self.cur_file, self.cur_ns, self.gen.tenv) = saved;
+        let al = &mut self.aliases[a as usize];
+        al.resolving = false;
+        *al.ty.get_or_insert(t)
+    }
+
+    /// An alias of a struct, enum or interface is that declaration itself
+    /// (literals, static methods, variants); other aliases stay aliases.
+    fn unalias(&mut self, m: Member) -> Member {
+        let Member::Alias(a) = m else { return m };
+        if !self.aliases_ready {
+            return m;
+        }
+        let t = self.alias_type(a);
+        match *self.tt.get(t) {
+            Type::Struct(d) => Member::Struct(d.0),
+            Type::Enum(d) => Member::Enum(d.0),
+            Type::Interface(d) => Member::Interface(d.0),
+            _ => m,
         }
     }
 
@@ -360,6 +419,7 @@ impl<'a> Sema<'a> {
             let path = self.nss[ns].path.clone();
             self.err(format!("{} is private to namespace {path} (only capitalised names are exported)", name.name), name.span);
         }
+        let m = self.unalias(m);
         // A gated module reached by its full path (`unsafe.ReadInt`)
         // needs the capability just like `import unsafe`.
         if report && !self.nss[self.cur_ns].is_std && super::debug_agent::gate_of(&self.nss[ns].path).is_some() {
@@ -374,8 +434,8 @@ impl<'a> Sema<'a> {
     /// Looks up a non-local name: own namespace, imports, builtins, roots.
     pub(crate) fn lookup_global(&mut self, name: &ast::Ident, report: bool) -> Option<PathRes> {
         let n = name.name.as_str();
-        if let Some((m, _, _)) = self.nss[self.cur_ns].members.get(n) {
-            return Some(PathRes::Member(*m));
+        if let Some(&(m, _, _)) = self.nss[self.cur_ns].members.get(n) {
+            return Some(PathRes::Member(self.unalias(m)));
         }
         // Stdlib code is instantiated in the scope of the user file that
         // uses it, but a stdlib root it names (`hash.fnv`) is never hidden
@@ -427,8 +487,8 @@ impl<'a> Sema<'a> {
             let b = self.nss[found[1].1].path.clone();
             self.err(format!("ambiguous name {n}: imported from both {a} and {b}; use an alias (`as`) or the full path"), name.span);
         }
-        if let Some((m, _)) = found.first() {
-            return Some(PathRes::Member(*m));
+        if let Some(&(m, _)) = found.first() {
+            return Some(PathRes::Member(self.unalias(m)));
         }
         let builtin = match n {
             "error" => Some(BuiltinFn::Error),
@@ -709,6 +769,7 @@ impl<'a> Sema<'a> {
             PathRes::Member(Member::Struct(s)) => self.tt.intern(Type::Struct(DeclId(s))),
             PathRes::Member(Member::Interface(i)) => self.tt.intern(Type::Interface(DeclId(i))),
             PathRes::Member(Member::Enum(e)) => self.tt.intern(Type::Enum(DeclId(e))),
+            PathRes::Member(Member::Alias(a)) => self.alias_type(a),
             _ => return None,
         })
     }

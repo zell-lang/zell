@@ -167,6 +167,7 @@ impl Eval<'_> {
                 Decl::Func(f) => self.keep(&mut f.attrs),
                 Decl::Var(v) => self.keep(&mut v.attrs),
                 Decl::Const(c) => self.keep(&mut c.attrs),
+                Decl::TypeAlias(a) => self.keep(&mut a.attrs),
                 Decl::Error(_) => true,
             };
             if keep {

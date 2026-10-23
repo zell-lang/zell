@@ -218,7 +218,7 @@ fn brace_delta(line: &str) -> i32 {
 /// namespace is added if missing. `...` placeholders become comments.
 fn snippet_to_file(code: &str) -> String {
     let code = code.replace("...", "/* ... */");
-    let decl_starts = ["namespace ", "import ", "struct ", "interface ", "enum ", "func ", "async func ", "@"];
+    let decl_starts = ["namespace ", "import ", "struct ", "interface ", "enum ", "func ", "async func ", "type ", "@"];
     let (mut top, mut body) = (String::new(), String::new());
     let mut depth = 0;
     let mut in_decl = false;

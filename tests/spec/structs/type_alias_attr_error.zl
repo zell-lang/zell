@@ -1,0 +1,11 @@
+// error: attributes are not allowed on type aliases
+// status: passing
+namespace spec.structs.type_alias_attr_error
+
+@deprecated("old")
+type Old = int
+
+func main() {
+    var x Old = 1
+    _ = x
+}

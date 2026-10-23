@@ -407,6 +407,14 @@ impl Parser<'_> {
             }
             TokenKind::Var => Decl::Var(self.var_decl()?),
             TokenKind::Const => Decl::Const(self.const_decl()?),
+            // `type` is a contextual keyword: only in `type Name = T`.
+            TokenKind::Ident(s) if s == "type" && matches!(self.peek_n(1), TokenKind::Ident(_)) && self.peek_n(2) == &TokenKind::Assign => {
+                let start = self.bump().span;
+                let name = self.ident()?;
+                self.bump(); // `=`
+                let ty = self.parse_type()?;
+                Decl::TypeAlias(TypeAliasDecl { attrs: Vec::new(), name, ty, span: self.span_from(start) })
+            }
             TokenKind::Static => {
                 return Err(self.error_at(self.span(), "`static` is only allowed on methods inside a struct"))
             }
@@ -421,6 +429,7 @@ impl Parser<'_> {
                 Decl::Func(d) => (d.attrs, d.span) = (attrs, span),
                 Decl::Var(d) => (d.attrs, d.span) = (attrs, span),
                 Decl::Const(d) => (d.attrs, d.span) = (attrs, span),
+                Decl::TypeAlias(d) => (d.attrs, d.span) = (attrs, span),
                 Decl::Error(_) => {}
             }
         }

@@ -74,10 +74,13 @@ qualified_name ::= name_segment (DOT name_segment)*
 name_segment ::= IDENTIFIER | NAMESPACE | IMPORT | AS | STRUCT | INTERFACE | ENUM | FUNC | STATIC | ASYNC | AWAIT | VAR | CONST | IF | ELSE | FOR | SWITCH | CASE | DEFAULT | RETURN | BREAK | CONTINUE | DEFER | TRY | CATCH | NEW | NIL | TRUE | FALSE | MAP | THIS
 
 // A declaration ending in `}` gets an automatic SEMI at the newline after it.
-top_level_decl ::= attribute* ((struct_decl | interface_decl | enum_decl | func_decl) eos? | extern_func_decl eos | var_decl eos | const_decl eos)
+top_level_decl ::= attribute* ((struct_decl | interface_decl | enum_decl | func_decl) eos? | extern_func_decl eos | var_decl eos | const_decl eos | type_alias_decl eos)
 // `extern` is a contextual keyword (an IDENTIFIER spelled "extern"): a runtime
 // (C) function without a body, only in the generated std/**/*_extern.zl files.
 extern_func_decl ::= IDENTIFIER func_signature
+// `type Name = T`: a transparent type alias. `type` is a contextual keyword
+// (an IDENTIFIER spelled "type"), only at the top level before `Name =`.
+type_alias_decl ::= IDENTIFIER IDENTIFIER ASSIGN type
 
 // `@json("name")`, `@reflect`, `@deprecated(reason: "...")`, `@allowCycle`;
 // an attribute on its own line is followed by an automatic SEMI.

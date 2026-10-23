@@ -113,6 +113,11 @@ impl<'a> Sema<'a> {
             PathRes::Member(Member::Special(sp)) => self.special(sp, args, span),
             PathRes::Builtin(b) => self.builtin(b, args, span, expected),
             PathRes::BuiltinType(t) => self.conversion(t, args, span),
+            // `Celsius(x)` with `type Celsius = float`: the aliased type's conversion.
+            PathRes::Member(Member::Alias(a)) => {
+                let t = self.alias_type(a);
+                self.conversion(t, args, span)
+            }
             PathRes::Variant(e, v) => {
                 let fields: Vec<TypeId> = self.enums[e as usize].variants[v as usize].fields.iter().map(|f| f.1).collect();
                 let vname = format!("{}.{}", self.enums[e as usize].name, name.name);

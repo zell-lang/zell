@@ -297,6 +297,10 @@ impl<'a> Fmt<'a> {
             Decl::Func(f) => self.func(f),
             Decl::Var(v) => self.var(v),
             Decl::Const(c) => self.const_(c),
+            Decl::TypeAlias(a) => {
+                let kw = self.after_attrs(&a.attrs, a.span.start);
+                concat(vec![self.attrs(&a.attrs, kw), text(format!("type {} = ", a.name.name)), self.ty(&a.ty)])
+            }
             Decl::Error(s) => text(self.slice(*s)),
         }
     }

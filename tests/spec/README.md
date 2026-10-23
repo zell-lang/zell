@@ -695,6 +695,16 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     not changed. `var a, b = f()` is accepted as `var (a, b) = f()`. No `in`
     operator. Lowered as `hir::Builtin::MapLookup` over the existing
     `zell_map_get*` (NULL = absent), no new runtime entry. — `basics/map_comma_ok`
+83. **Type aliases** (`DESIGN.md` "Псевдонимы типов"): `type Name = T` at
+    the top level is transparent — resolved once, after the imports, in
+    the alias's own file; an alias of a struct/enum/interface *is* that
+    declaration for literals, static methods and variants, an alias of a
+    builtin converts (`Celsius(36)`), `reflect.TypeOf<Alias>()` names the
+    aliased type. Cycles are `invalid recursive type alias`; attributes on
+    an alias are an error; generic and local aliases are not supported,
+    nor are aliases in the Zell-source stdlib (lazily instantiated
+    templates). `type` stays an ordinary name elsewhere.
+    — `structs/type_alias`, `structs/type_alias_cycle_error`, `structs/type_alias_attr_error`
 
 ## Ambiguities found in DESIGN.md
 

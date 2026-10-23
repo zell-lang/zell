@@ -1,0 +1,89 @@
+// test: `type Name = T` is a transparent alias: of a struct (literals, methods, static methods), an enum, a function type, a slice, a map, a builtin (conversion), an alias of an alias; an alias in a method signature satisfies an interface; reflection sees the aliased type
+// status: passing
+namespace spec.structs.type_alias
+
+import io
+
+struct Point {
+    X, Y int
+
+    func Sum() int { return this.X + this.Y }
+
+    static func Origin() Point { return Point{} }
+}
+
+enum Color { Red, Green }
+
+type P = Point
+type Pt = P
+type Shade = Color
+type Op = func(int, int) int
+type Ints = []int
+type Ages = map[string]int
+type Celsius = float
+
+interface Summer {
+    func Sum() int
+}
+
+interface Mapper {
+    func Apply(f Op, xs Ints) Ints
+}
+
+struct Doubler {
+    func Apply(f func(int, int) int, xs []int) []int {
+        var out Ints
+        for x in xs {
+            out = append(out, f(x, x))
+        }
+        return out
+    }
+}
+
+func apply(f Op, a, b int) int {
+    return f(a, b)
+}
+
+func total(xs Ints) int {
+    var t = 0
+    for x in xs {
+        t += x
+    }
+    return t
+}
+
+func main() {
+    var p P = Point{X: 1, Y: 2}
+    var q = Pt{X: 3, Y: 4}
+    var r Point = q
+    println(p.Sum(), q.Sum(), r.X, P.Origin().X)
+    var s Summer = q
+    println(s.Sum())
+
+    var c Shade = Color.Green
+    println(c == Shade.Green, c == Color.Red)
+
+    var add Op = (a int, b int) => a + b
+    println(apply(add, 2, 3), apply((a int, b int) => a * b, 2, 3))
+
+    var xs Ints = [1, 2, 3]
+    var ys []int = xs
+    println(total(ys), len(xs))
+
+    var ages Ages = map[string]int{"a": 1}
+    ages["b"] = 2
+    println(len(ages), ages["b"])
+
+    var t = Celsius(36)
+    var f float = t
+    println(t, f + 0.5)
+
+    var m Mapper = Doubler{}
+    println(m.Apply(add, [1, 2]))
+
+    println(reflect.TypeOf<Pt>().Name, reflect.TypeOf<Ints>().Name)
+
+    // `type` is a keyword only in `type Name = T` at the top level.
+    var type = "kind"
+    println(type)
+}

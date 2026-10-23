@@ -355,6 +355,7 @@ impl<'a> Sema<'a> {
 
     pub(crate) fn member_key(&self, m: Member) -> Option<SymKey> {
         Some(match m {
+            Member::Alias(_) => return None,
             Member::Struct(i) => SymKey::Struct(i),
             Member::Interface(i) => SymKey::Interface(i),
             Member::Enum(i) => SymKey::Enum(i),

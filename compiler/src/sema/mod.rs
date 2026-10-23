@@ -145,6 +145,20 @@ pub(crate) enum Member {
     Ns(NsIdx),
     /// A generic function, struct or enum (index into `GenState::templates`).
     Generic(u32),
+    /// `type Name = T` (index into [`Sema::aliases`]); lookups give the
+    /// aliased struct, enum or interface itself once aliases are resolved.
+    Alias(u32),
+}
+
+/// A type alias `type Name = T` (DESIGN.md "Псевдонимы типов").
+pub(crate) struct Alias<'a> {
+    pub decl: &'a ast::TypeAliasDecl,
+    pub file: usize,
+    pub ns: NsIdx,
+    /// The aliased type once resolved.
+    pub ty: Option<TypeId>,
+    /// Being resolved (a cycle reaches it again).
+    pub resolving: bool,
 }
 
 /// A namespace during analysis.
@@ -296,6 +310,10 @@ pub(crate) enum VarRef {
 /// The analyser state.
 pub(crate) struct Sema<'a> {
     pub files: &'a [&'a ast::File],
+    /// Type aliases of the user files.
+    pub aliases: Vec<Alias<'a>>,
+    /// Set by [`Sema::resolve_aliases`]: lookups may resolve aliases.
+    pub aliases_ready: bool,
     pub diags: &'a mut Diagnostics,
     pub tt: TypeTable,
     pub nss: Vec<Ns>,
@@ -385,6 +403,8 @@ impl<'a> Sema<'a> {
             func_src: Vec::new(),
             sigs: Vec::new(),
             globals: Vec::new(),
+            aliases: Vec::new(),
+            aliases_ready: false,
             global_src: Vec::new(),
             global_state: Vec::new(),
             global_folded: HashMap::new(),
@@ -419,13 +439,14 @@ impl<'a> Sema<'a> {
     }
 
     fn run(&mut self) {
-        let phases: [fn(&mut Self); 11] = [
+        let phases: [fn(&mut Self); 12] = [
             Self::build_stdlib,
             Self::collect_decls,
             Self::add_std_structs,
             Self::register_collections,
             Self::register_std_sources,
             Self::resolve_imports,
+            Self::resolve_aliases,
             Self::resolve_template_bounds,
             Self::resolve_signatures,
             Self::check_implements,

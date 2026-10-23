@@ -165,6 +165,32 @@ var count int        // без инициализатора: нулевое зн
 regex, путей Windows, SQL). Строки — неизменяемые, UTF-8. Срезы и map — как в Go (ссылочная семантика
 на общий буфер). Подсрез записывается диапазоном: `s[1..3]`, `s[..2]`, `s[2..]`.
 
+### Псевдонимы типов
+
+`type Name = Type` на верхнем уровне вводит прозрачный псевдоним: новое
+имя того же типа, а не новый номинальный тип. `Name` и `Type` взаимозаменяемы
+везде — в присваиваниях, сигнатурах (метод с псевдонимом в сигнатуре
+реализует интерфейс с исходным типом и наоборот), наборах методов,
+литералах (`P{X: 1}` для `type P = Point`), статических методах и
+вариантах (`Shade.Green`), преобразованиях (`Celsius(36)` для
+`type Celsius = float`); `reflect.TypeOf<Name>()` возвращает исходный тип.
+
+```zell
+type Handler = func(Request) Response!
+type Ints = []int
+type P = geo.Point
+```
+
+- Видимость — как у других объявлений (с заглавной буквы — экспорт);
+  псевдоним может ссылаться на другой псевдоним, цикл (`type A = []A`,
+  `type A = B` + `type B = A`) — ошибка «invalid recursive type alias».
+- `type` — контекстное ключевое слово: только в `type Name =` на верхнем
+  уровне; в остальных местах это обычное имя (`var type = "x"`).
+- Обобщённые псевдонимы (`type Pair<T> = (T, T)`) и локальные (внутри
+  функции) не поддерживаются; атрибуты на псевдониме — ошибка (кроме
+  `@cfg`). В исходниках stdlib на Zell (`sema/stdlib_src`) псевдонимы
+  пока не поддерживаются.
+
 ## Функции
 
 Параметр — `имя тип`. Возвращаемый тип — после закрывающей скобки, без
@@ -2460,7 +2486,8 @@ async func main() {
 ```
 file        = { attribute } "namespace" path { import } { decl } ;   (* @cfg(...) here excludes the file *)
 import      = "import" path [ "as" ident ] ;
-decl        = { attribute } ( struct | interface | enum | func | externfunc | var | const ) ;
+decl        = { attribute } ( struct | interface | enum | func | externfunc | var | const | typealias ) ;
+typealias   = "type" ident "=" type ;         (* transparent alias; "type" is contextual *)
 attribute   = "@" path [ "(" [ attrarg { "," attrarg } ] ")" ] ;
 attrarg     = [ name ":" ] expr ;            (* in attribute arguments a call takes attrargs: @cfg(not(os: "windows")) *)
 name        = ident | keyword ;              (* field and attribute argument names: @Conf(enum: "a") *)

@@ -240,6 +240,11 @@ fn decl_shape(d: &ast::Decl, h: &mut DefaultHasher) {
             c.ty.as_ref().map(|t| ty(t, h)).hash(h);
             attrs(&c.attrs, h);
         }
+        ast::Decl::TypeAlias(a) => {
+            a.name.name.hash(h);
+            ty(&a.ty, h);
+            attrs(&a.attrs, h);
+        }
         ast::Decl::Error(_) => {}
     }
 }
