@@ -2118,7 +2118,7 @@ ignored); an unknown one is the error `crypto: unknown hash "<name>" ...`.
 |---|---|
 | `sha2.c` | SHA-256/384/512, SHA-1; streaming `zell_hash_ctx` (plain bytes, copyable); HMAC. x86-64: SHA-256 compression with the SHA extensions (`sha256rnds2`/`msg1`/`msg2` intrinsics, `__attribute__((target))`) when cpuid reports SHA (leaf 7 EBX bit 29), SSSE3 and SSE4.1 (`zell__cpu_has_shani`); `ZELL_NO_SHANI=1` forces the portable path. Both paths give identical digests |
 | `hkdf.c` | HKDF-Extract/Expand (RFC 5869) |
-| `aes.c` | AES-128/192/256 encryption and GCM. Portable path: 64-bit bitsliced AES (4 blocks per call; Boyar-Peralta S-box circuit), GHASH by integer multiplication with holes (BearSSL `ctmul64` style). x86-64: AES-NI + PCLMULQDQ intrinsics (`__attribute__((target))`) when cpuid reports AES, PCLMULQDQ, SSSE3 and SSE4.1; `ZELL_NO_AESNI=1` forces the portable path. The key schedule always runs on the bitsliced S-box |
+| `aes.c` | AES-128/192/256 encryption and GCM. Portable path: 64-bit bitsliced AES (4 blocks per call; Boyar-Peralta S-box circuit), GHASH by integer multiplication with holes (BearSSL `ctmul64` style). x86-64: AES-NI + PCLMULQDQ intrinsics (`__attribute__((target))`) when cpuid reports AES, PCLMULQDQ, SSSE3 and SSE4.1; `ZELL_NO_AESNI=1` forces the portable path. GCM there runs 8 counter blocks through the AES rounds at once with an aggregated 8-block GHASH (powers H^1..H^8 precomputed in `zell_gcm_ctx.hpow`, one reduction per batch) interleaved into those rounds. The key schedule always runs on the bitsliced S-box |
 | `chacha20poly1305.c` | ChaCha20, Poly1305 (26-bit limbs), the RFC 8439 AEAD |
 | `fe25519.h`, `x25519.c`, `ed25519.c` | GF(2^255-19) with 51-bit limbs (`unsigned __int128`), X25519 ladder (RFC 7748), Ed25519 (RFC 8032; extended coordinates, double-and-always-add with conditional moves, bit-serial mod-L reduction) |
 | `p256.c` | P-256: Montgomery arithmetic mod p and mod n on 4x64-bit limbs, complete projective addition (Renes-Costello-Batina 2016, alg. 4), 4-bit fixed windows with full-table scans; ECDH, ECDSA with RFC 6979 nonces hedged with 32 random bytes; verification uses the same constant-time code |
@@ -2152,7 +2152,7 @@ ignored); an unknown one is the error `crypto: unknown hash "<name>" ...`.
 | `tls.rtConcat(a, b) []byte` | `void zell_net_tls_rt_concat(a, b, out)` | new slice `a \|\| b` |
 | `tls.rtZeros(n) []byte` | `void zell_net_tls_rt_zeros(int64_t n, out)` | `n` zero bytes |
 | `tls.rtCopy(dst, off, src)` | `void zell_net_tls_rt_copy(const zell_slice *dst, int64_t off, const zell_slice *src)` | `dst[off..off+len(src)] = src` in place; out of range panics |
-| `tls.rtAeadNew(kind, key) []byte!` | `void zell_net_tls_rt_aead_new(int64_t kind, key, out, err)` | record-layer AEAD context: byte 0 = kind (1 AES-GCM: followed by the `zell_gcm_ctx` image with expanded keys and H; 2 ChaCha20-Poly1305: followed by the key) |
+| `tls.rtAeadNew(kind, key) []byte!` | `void zell_net_tls_rt_aead_new(int64_t kind, key, out, err)` | record-layer AEAD context: byte 0 = kind (1 AES-GCM: followed by the `zell_gcm_ctx` image with expanded keys, H and, on the AES-NI path, H^1..H^8; 2 ChaCha20-Poly1305: followed by the key) |
 | `tls.rtAeadSeal(ctx, nonce, aad, pt) []byte` / `rtAeadOpen(ctx, nonce, aad, ct) []byte!` | `zell_net_tls_rt_aead_seal(ctx, nonce, aad, pt, out)` / `_open(..., out, err)` | 12-byte nonce; a bad tag is the error `tls: bad record MAC`; an invalid context panics |
 
 The TLS protocol itself (record framing, key schedule, handshake state

@@ -278,17 +278,62 @@ static void gcm_digest(uint8_t d[32]) {
     zell__hash_final(&h, d);
 }
 
+/* Seal/open for every pair of plaintext and AAD lengths around the 16-byte
+ * block and the 128-byte (8-block) batch; the SHA-256 of all ct||tag
+ * outputs was computed with Python's cryptography AESGCM. */
+static void gcm_batch_lengths(void) {
+    static const size_t lens[] = { 0, 1, 15, 16, 17, 63, 64, 65, 127, 128, 129, 4099 };
+    static const char *want[2] = { "b6a3a90290a6de6a36fab910ca343b91ed0411723515acca4d3cdc666ac7f779",
+                                   "9d56bfa5266f5477efbc5e188b1038f631b72c53ce860bc417ee1caff5fa1281" };
+    static uint8_t pt[4099], ad[4099], out[4099 + 16], back[4099];
+    uint8_t key[32], nonce[12];
+    for (size_t i = 0; i < sizeof pt; i++) {
+        pt[i] = (uint8_t)(i * 31 + 7);
+        ad[i] = (uint8_t)(i * 17 + 3);
+    }
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i * 3);
+    for (int i = 0; i < 12; i++) nonce[i] = (uint8_t)((i + 1) * 5);
+    for (int ki = 0; ki < 2; ki++) {
+        zell_gcm_ctx c;
+        assert(zell__gcm_init(&c, key, ki ? 32 : 16));
+        zell_hash_ctx h;
+        zell__hash_init(&h, ZELL_HASH_SHA256);
+        for (size_t li = 0; li < sizeof lens / sizeof lens[0]; li++) {
+            for (size_t ai = 0; ai < sizeof lens / sizeof lens[0]; ai++) {
+                size_t n = lens[li], a = lens[ai];
+                zell__gcm_seal(&c, nonce, ad, a, pt, n, out);
+                zell__hash_update(&h, out, n + 16);
+                assert(zell__gcm_open(&c, nonce, ad, a, out, n, back));
+                assert(memcmp(back, pt, n) == 0);
+                if (n) {
+                    out[n - 1] ^= 1;   /* last ciphertext byte: in the tail after the batches */
+                    assert(!zell__gcm_open(&c, nonce, ad, a, out, n, back));
+                    out[n - 1] ^= 1;
+                    out[0] ^= 1;       /* first byte: inside the first batch */
+                    assert(!zell__gcm_open(&c, nonce, ad, a, out, n, back));
+                    out[0] ^= 1;
+                }
+            }
+        }
+        uint8_t d[32];
+        zell__hash_final(&h, d);
+        check_hex(d, 32, want[ki]);
+    }
+}
+
 TEST(aes_gcm) {
     for (int x = 0; x < 256; x++) assert(zell__aes_sbox_ct((uint8_t)x) == sbox_ref((uint8_t)x));
     uint8_t d1[32], d2[32];
     int have_ni = zell__cpu_has_aesni();
     aes_vectors();
     gcm_vectors();
+    gcm_batch_lengths();
     gcm_digest(d1);
     zell__aes_force_portable(1);
     assert(!zell__cpu_has_aesni());
     aes_vectors();
     gcm_vectors();
+    gcm_batch_lengths();
     gcm_digest(d2);
     zell__aes_force_portable(0);
     assert(memcmp(d1, d2, 32) == 0);

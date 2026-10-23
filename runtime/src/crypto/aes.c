@@ -248,19 +248,12 @@ NI_TARGET static void ni_encrypt_block(const zell_aes_key *k, const uint8_t in[1
     _mm_storeu_si128((__m128i *)out, ni_encrypt(rk, k->nr, _mm_loadu_si128((const __m128i *)in)));
 }
 
-/* GF(2^128) multiplication of byte-reflected operands (Intel's carry-less
- * multiplication white paper, algorithm with the shift-left-by-one). */
-NI_TARGET static inline __m128i ni_gfmul(__m128i a, __m128i b) {
-    __m128i t2, t3, t4, t5, t6, t7, t8, t9;
-    t3 = _mm_clmulepi64_si128(a, b, 0x00);
-    t4 = _mm_clmulepi64_si128(a, b, 0x10);
-    t5 = _mm_clmulepi64_si128(a, b, 0x01);
-    t6 = _mm_clmulepi64_si128(a, b, 0x11);
-    t4 = _mm_xor_si128(t4, t5);
-    t5 = _mm_slli_si128(t4, 8);
-    t4 = _mm_srli_si128(t4, 8);
-    t3 = _mm_xor_si128(t3, t5);
-    t6 = _mm_xor_si128(t6, t4);
+/* Reduction of the 256-bit carry-less product hi:lo of two byte-reflected
+ * operands: shift left by one, then reduce modulo x^128 + x^7 + x^2 + x + 1
+ * (Intel's carry-less multiplication white paper). Linear, so a sum of
+ * unreduced products can be reduced once (aggregated GHASH). */
+NI_TARGET static inline __m128i ni_reduce(__m128i t3, __m128i t6) {
+    __m128i t2, t4, t5, t7, t8, t9;
     t7 = _mm_srli_epi32(t3, 31);
     t8 = _mm_srli_epi32(t6, 31);
     t3 = _mm_slli_epi32(t3, 1);
@@ -290,21 +283,150 @@ NI_TARGET static inline __m128i ni_gfmul(__m128i a, __m128i b) {
     return t6;
 }
 
+/* GF(2^128) multiplication of byte-reflected operands. */
+NI_TARGET static inline __m128i ni_gfmul(__m128i a, __m128i b) {
+    __m128i t3, t4, t5, t6;
+    t3 = _mm_clmulepi64_si128(a, b, 0x00);
+    t4 = _mm_clmulepi64_si128(a, b, 0x10);
+    t5 = _mm_clmulepi64_si128(a, b, 0x01);
+    t6 = _mm_clmulepi64_si128(a, b, 0x11);
+    t4 = _mm_xor_si128(t4, t5);
+    t5 = _mm_slli_si128(t4, 8);
+    t4 = _mm_srli_si128(t4, 8);
+    t3 = _mm_xor_si128(t3, t5);
+    t6 = _mm_xor_si128(t6, t4);
+    return ni_reduce(t3, t6);
+}
+
 NI_TARGET static inline __m128i ni_bswap(__m128i x) {
     return _mm_shuffle_epi8(x, _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
 }
 
+/* Powers of H for aggregated GHASH: hp[i] = H^(i+1) byte-reflected, and
+ * hk[i] = hp[i] with both 64-bit halves replaced by their XOR (the middle
+ * Karatsuba operand). */
+typedef struct {
+    __m128i hp[8], hk[8];
+} ni_hkeys;
+
+NI_TARGET static void ni_load_hkeys(const zell_gcm_ctx *c, ni_hkeys *k) {
+    for (int i = 0; i < 8; i++) {
+        k->hp[i] = _mm_loadu_si128((const __m128i *)c->hpow[i]);
+        k->hk[i] = _mm_xor_si128(k->hp[i], _mm_shuffle_epi32(k->hp[i], 0x4E));
+    }
+}
+
+/* H^1..H^8 into c->hpow (from c->h). */
+NI_TARGET static void ni_gcm_powers(zell_gcm_ctx *c) {
+    __m128i h = ni_bswap(_mm_loadu_si128((const __m128i *)c->h)), p = h;
+    for (int i = 0; i < 8; i++) {
+        _mm_storeu_si128((__m128i *)c->hpow[i], p);
+        p = ni_gfmul(p, h);
+    }
+}
+
+/* Accumulates the unreduced Karatsuba product of block x and key i. */
+#define NI_KMUL(x, i)                                                                        \
+    do {                                                                                     \
+        __m128i x_ = (x);                                                                    \
+        lo = _mm_xor_si128(lo, _mm_clmulepi64_si128(x_, hk->hp[i], 0x00));                 \
+        hi = _mm_xor_si128(hi, _mm_clmulepi64_si128(x_, hk->hp[i], 0x11));                 \
+        mid = _mm_xor_si128(mid, _mm_clmulepi64_si128(_mm_xor_si128(x_, _mm_shuffle_epi32(x_, 0x4E)), \
+                                                      hk->hk[i], 0x00));                     \
+    } while (0)
+
+/* y = (...((y ^ b[0]) H ^ b[1]) H ... ^ b[m-1]) H for m (1..8) whole blocks,
+ * as sum (y ^ b[0]) H^m ^ b[1] H^(m-1) ^ ... ^ b[m-1] H with a single
+ * reduction. */
+NI_TARGET static inline __m128i ni_ghash_blocks(__m128i y, const ni_hkeys *hk, const uint8_t *p, unsigned m) {
+    __m128i lo = _mm_setzero_si128(), hi = lo, mid = lo;
+    __m128i x = _mm_xor_si128(y, ni_bswap(_mm_loadu_si128((const __m128i *)p)));
+    NI_KMUL(x, m - 1);
+    for (unsigned j = 1; j < m; j++) NI_KMUL(ni_bswap(_mm_loadu_si128((const __m128i *)(p + 16 * j))), m - 1 - j);
+    mid = _mm_xor_si128(mid, _mm_xor_si128(lo, hi));
+    lo = _mm_xor_si128(lo, _mm_slli_si128(mid, 8));
+    hi = _mm_xor_si128(hi, _mm_srli_si128(mid, 8));
+    return ni_reduce(lo, hi);
+}
+
+/* The 8-block case, fully unrolled. */
+NI_TARGET static inline __m128i ni_ghash8(__m128i y, const ni_hkeys *hk, const uint8_t *p) {
+    __m128i lo = _mm_setzero_si128(), hi = lo, mid = lo;
+    NI_KMUL(_mm_xor_si128(y, ni_bswap(_mm_loadu_si128((const __m128i *)p))), 7);
+#pragma GCC unroll 8
+    for (int j = 1; j < 8; j++) NI_KMUL(ni_bswap(_mm_loadu_si128((const __m128i *)(p + 16 * j))), 7 - j);
+    mid = _mm_xor_si128(mid, _mm_xor_si128(lo, hi));
+    lo = _mm_xor_si128(lo, _mm_slli_si128(mid, 8));
+    hi = _mm_xor_si128(hi, _mm_srli_si128(mid, 8));
+    return ni_reduce(lo, hi);
+}
+
+/* 8 CTR blocks, out = in ^ E(K, base with big-endian counter c..c+7), with
+ * the aggregated GHASH of the 8 blocks at src (when src is not NULL) spread
+ * over the first 8 AES rounds so the AESENC and PCLMULQDQ units overlap.
+ * Returns the new GHASH state. All src blocks are loaded before out is
+ * written, so src may equal out (in-place decryption). */
+NI_TARGET static inline __m128i ni_ctr8_ghash8(const __m128i *rk, unsigned nr, __m128i base, uint32_t c,
+                                               const uint8_t *in, uint8_t *out, __m128i y, const ni_hkeys *hk,
+                                               const uint8_t *src) {
+    __m128i b[8];
+#pragma GCC unroll 8
+    for (int j = 0; j < 8; j++)
+        b[j] = _mm_xor_si128(_mm_insert_epi32(base, (int)__builtin_bswap32(c + (uint32_t)j), 3), rk[0]);
+    if (src) {
+        __m128i lo = _mm_setzero_si128(), hi = lo, mid = lo;
+#pragma GCC unroll 8
+        for (int r = 1; r <= 8; r++) {
+            __m128i k = rk[r];
+#pragma GCC unroll 8
+            for (int j = 0; j < 8; j++) b[j] = _mm_aesenc_si128(b[j], k);
+            /* blocks 1..7 first, block 0 (which needs the previous state y)
+             * last: the serial chain through y stays short */
+            int j = r & 7;
+            __m128i x = ni_bswap(_mm_loadu_si128((const __m128i *)(src + 16 * j)));
+            if (j == 0) x = _mm_xor_si128(x, y);
+            NI_KMUL(x, 7 - j);
+        }
+        mid = _mm_xor_si128(mid, _mm_xor_si128(lo, hi));
+        lo = _mm_xor_si128(lo, _mm_slli_si128(mid, 8));
+        hi = _mm_xor_si128(hi, _mm_srli_si128(mid, 8));
+        y = ni_reduce(lo, hi);
+    } else {
+#pragma GCC unroll 8
+        for (int r = 1; r <= 8; r++) {
+            __m128i k = rk[r];
+#pragma GCC unroll 8
+            for (int j = 0; j < 8; j++) b[j] = _mm_aesenc_si128(b[j], k);
+        }
+    }
+    for (unsigned r = 9; r < nr; r++) {
+        __m128i k = rk[r];
+#pragma GCC unroll 8
+        for (int j = 0; j < 8; j++) b[j] = _mm_aesenc_si128(b[j], k);
+    }
+#pragma GCC unroll 8
+    for (int j = 0; j < 8; j++) {
+        b[j] = _mm_aesenclast_si128(b[j], rk[nr]);
+        _mm_storeu_si128((__m128i *)(out + 16 * j),
+                         _mm_xor_si128(b[j], _mm_loadu_si128((const __m128i *)(in + 16 * j))));
+    }
+    return y;
+}
+#undef NI_KMUL
+
 /* GHASH over data (zero-padded to whole blocks); y is the reflected state. */
-NI_TARGET static __m128i ni_ghash(__m128i y, __m128i h, const uint8_t *p, size_t n) {
-    while (n >= 16) {
-        y = ni_gfmul(_mm_xor_si128(y, ni_bswap(_mm_loadu_si128((const __m128i *)p))), h);
-        p += 16;
-        n -= 16;
+NI_TARGET static __m128i ni_ghash(__m128i y, const ni_hkeys *hk, const uint8_t *p, size_t n) {
+    for (; n >= 128; p += 128, n -= 128) y = ni_ghash8(y, hk, p);
+    if (n >= 16) {
+        unsigned m = (unsigned)(n / 16);
+        y = ni_ghash_blocks(y, hk, p, m);
+        p += 16 * m;
+        n -= 16 * m;
     }
     if (n) {
         uint8_t blk[16] = { 0 };
         memcpy(blk, p, n);
-        y = ni_gfmul(_mm_xor_si128(y, ni_bswap(_mm_loadu_si128((const __m128i *)blk))), h);
+        y = ni_ghash_blocks(y, hk, blk, 1);
     }
     return y;
 }
@@ -356,31 +478,47 @@ NI_TARGET static void ni_ctr(const __m128i *rk, unsigned nr, uint8_t ctr[16], co
     zell__st32be(ctr + 12, c);
 }
 
-/* Full GCM in the AES-NI path; returns the tag in tag[16]. */
+/* Full GCM in the AES-NI path; returns the tag in tag[16]. Whole 128-byte
+ * chunks go through 8 interleaved AES pipelines and an 8-block aggregated
+ * GHASH (encryption hashes the previous chunk's ciphertext while the next
+ * chunk is encrypted; decryption hashes and decrypts the same chunk). */
 NI_TARGET static void ni_gcm(const zell_gcm_ctx *c, const uint8_t nonce[12], const uint8_t *aad, size_t alen,
                              const uint8_t *in, size_t n, uint8_t *out, bool enc, uint8_t tag[16]) {
     __m128i rk[15];
+    ni_hkeys hk;
+    unsigned nr = c->k.nr;
     ni_load_keys(&c->k, rk);
-    __m128i h = ni_bswap(_mm_loadu_si128((const __m128i *)c->h));
-    __m128i y = _mm_setzero_si128();
-    y = ni_ghash(y, h, aad, alen);
+    ni_load_hkeys(c, &hk);
+    __m128i y = ni_ghash(_mm_setzero_si128(), &hk, aad, alen);
     uint8_t ctr[16];
     memcpy(ctr, nonce, 12);
     zell__st32be(ctr + 12, 2);
+    __m128i base = _mm_loadu_si128((const __m128i *)ctr);
+    uint32_t cnt = 2;
+    size_t bulk = n & ~(size_t)127;
     if (enc) {
-        ni_ctr(rk, c->k.nr, ctr, in, n, out);
-        y = ni_ghash(y, h, out, n);
+        for (size_t i = 0; i < bulk; i += 128, cnt += 8)
+            y = ni_ctr8_ghash8(rk, nr, base, cnt, in + i, out + i, y, &hk, i ? out + i - 128 : NULL);
+        if (bulk) y = ni_ghash8(y, &hk, out + bulk - 128);
     } else {
-        y = ni_ghash(y, h, in, n);
-        ni_ctr(rk, c->k.nr, ctr, in, n, out);
+        for (size_t i = 0; i < bulk; i += 128, cnt += 8)
+            y = ni_ctr8_ghash8(rk, nr, base, cnt, in + i, out + i, y, &hk, in + i);
+    }
+    zell__st32be(ctr + 12, cnt);
+    if (enc) {
+        ni_ctr(rk, nr, ctr, in + bulk, n - bulk, out + bulk);
+        y = ni_ghash(y, &hk, out + bulk, n - bulk);
+    } else {
+        y = ni_ghash(y, &hk, in + bulk, n - bulk);
+        ni_ctr(rk, nr, ctr, in + bulk, n - bulk, out + bulk);
     }
     uint8_t lens[16];
     zell__st64be(lens, (uint64_t)alen * 8);
     zell__st64be(lens + 8, (uint64_t)n * 8);
-    y = ni_ghash(y, h, lens, 16);
+    y = ni_ghash(y, &hk, lens, 16);
     memcpy(ctr, nonce, 12);
     zell__st32be(ctr + 12, 1);
-    __m128i ej = ni_encrypt(rk, c->k.nr, _mm_loadu_si128((const __m128i *)ctr));
+    __m128i ej = ni_encrypt(rk, nr, _mm_loadu_si128((const __m128i *)ctr));
     _mm_storeu_si128((__m128i *)tag, _mm_xor_si128(ni_bswap(y), ej));
 }
 #endif
@@ -531,6 +669,9 @@ bool zell__gcm_init(zell_gcm_ctx *c, const uint8_t *key, size_t klen) {
     zell__aes_encrypt_block(&c->k, zero, c->h);
     c->h1 = zell__ld64be(c->h);
     c->h0 = zell__ld64be(c->h + 8);
+#ifdef ZELL_HAVE_AESNI
+    if (c->k.ni) ni_gcm_powers(c);
+#endif
     return true;
 }
 

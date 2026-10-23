@@ -118,6 +118,7 @@ typedef struct {
     zell_aes_key k;
     uint8_t h[16];         /* GHASH key H = E(K, 0^128) */
     uint64_t h0, h1;       /* H as big-endian halves (portable GHASH) */
+    uint8_t hpow[8][16];   /* H^1..H^8 byte-reflected (AES-NI GHASH; zero otherwise) */
 } zell_gcm_ctx;
 
 /* klen 16 or 32 (24 accepted too). */

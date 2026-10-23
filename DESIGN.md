@@ -2030,7 +2030,8 @@ HMAC — собственная реализация на C по FIPS 180-4 / RF
   []byte!` (`aes-gcm: message authentication failed`), `EncryptBlock`,
   `HasHardware()`. Ключи 16/24/32 байта, nonce 12 байт. Без AES-NI —
   bitsliced AES (64-битный, 4 блока за проход) и GHASH на умножениях «с
-  дырками», без таблиц по секретам; с AES-NI+PCLMULQDQ — intrinsics
+  дырками», без таблиц по секретам; с AES-NI+PCLMULQDQ — intrinsics,
+  8 блоков CTR за проход и агрегированный GHASH по степеням H^1..H^8
   (выбор по cpuid, `ZELL_NO_AESNI=1` отключает).
 - `crypto.chacha`: `Seal`, `Open` — ChaCha20-Poly1305 (RFC 8439).
 - `crypto.x25519`: `GenerateKey()`, `PublicKey(priv)`,
