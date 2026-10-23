@@ -1419,3 +1419,59 @@ const int64_t zell_debug_task_layout[4] = {
     (int64_t)offsetof(struct zell_task, slot),
     TASK_DONE,
 };
+
+/* ======================================================================
+ * Synchronous fast path of async functions (ABI.md 10.3)
+ *
+ * A coroutine ramp makes no task until its first real suspension: the body
+ * runs as part of the caller's current task, and when it returns without
+ * suspending the result goes to the caller through an out pointer (no
+ * task, and no frame either when LLVM sees no suspend point). These three
+ * functions are the runtime half of that protocol.
+ * ====================================================================== */
+
+/* The coroutine's own task, made at its first suspension: `t` when it
+ * already exists, else a new pending task that is attached under the
+ * current task and made current (what zell_task_new does at the start of
+ * the ramp in the eager protocol), with `ctx0` (+1, the context saved when
+ * the ramp started) as the context to put back when the coroutine suspends
+ * or completes. Returns the task with two references: the frame's and the
+ * one the ramp returns to its caller (the current-task slot holds a third,
+ * dropped by restore_parent). */
+zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *result_ops, zell_object *ctx0) {
+    if (t) return t;
+    t = task_new_ex(result_size, result_ops, 0);
+    task_attach(t, t_cur);
+    t->caller_ctx = ctx0;   /* moved */
+    t->ctx_saved = 1;
+    zell_retain(t);
+    zell_retain(t);
+    zell_task *old = t_cur;
+    t_cur = t;
+    zell_release(old);  /* t->parent holds its own reference */
+    return t;
+}
+
+/* A coroutine that made no task returns: the context saved when its ramp
+ * started (`ctx0`, +1, consumed) is current again, so whatever the body set
+ * (task.With, a diag span, log.Context.Push) does not leak into the caller. */
+void zell_coro_leave(zell_object *ctx0) {
+    zell_object *old = t_ctx;
+    if (old == ctx0) {
+        zell_release(ctx0);
+        return;
+    }
+    t_ctx = ctx0;
+    zell_release(old);
+}
+
+/* An already completed plain task holding `result` (result_size bytes
+ * copied; the slot takes over its reference, nothing is retained), +1.
+ * Materialises the result of an async function that completed without
+ * suspending when the caller keeps the Task<T> instead of awaiting it. */
+zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *result_ops, const void *result) {
+    zell_task *t = task_new_ex(result_size, result_ops, 0);
+    if (result && result_size > 0) memcpy(t->slot, result, (size_t)result_size);
+    __atomic_store_n(&t->state, TASK_DONE, __ATOMIC_RELEASE);
+    return t;
+}

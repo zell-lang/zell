@@ -1085,7 +1085,11 @@ built as `*_async` variants that return a `zell_task *`.
   completer's stack, and it may happen on any worker thread.
 - `async` functions are LLVM coroutines (switched-resume ABI). When a coroutine
   awaits a pending task, it registers its own handle as a continuation and
-  suspends. A worker later calls `zell_coro_resume(handle)`.
+  suspends. A worker later calls `zell_coro_resume(handle)`. A coroutine has
+  **no task until it first suspends**: a body that returns without suspending
+  hands its result to the caller directly (10.3), so an `await` that completes
+  synchronously allocates no task (and no frame when the body has no suspend
+  point).
 
 ### 10.2 Functions
 
@@ -1095,7 +1099,10 @@ built as `*_async` variants that return a `zell_task *`.
 | `int64_t zell_sched_workers(void)` | N |
 | `bool zell_sched_is_worker(void)` | whether the current thread is a worker |
 | `void zell_coro_resume(void *frame)` | resumes an LLVM switched-resume coroutine. It is exactly what `llvm.coro.resume` lowers to: it calls the function pointer stored in the first word of the frame. Pass `@zell_coro_resume` as `resume_fn` and the coroutine handle as `frame` |
-| `zell_task *zell_task_new(int64_t result_size, const zell_value_ops *ops)` | a new **pending** task, +1. `result_size` is `sizeof(T)` (0 for `Task<void>`). `ops` describes ownership of the result |
+| `zell_task *zell_task_new(int64_t result_size, const zell_value_ops *ops)` | a new **pending** task, +1, attached under the current task and made current (10.11). `result_size` is `sizeof(T)` (0 for `Task<void>`). `ops` describes ownership of the result. (C code wrapping a callback uses `zell_task_new_plain`; compiled coroutines use `zell_task_lazy`) |
+| `zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *ops, zell_object *ctx0)` | the coroutine's own task at its first suspension (10.3): returns `t` if it is not NULL; otherwise a new pending task attached under the current task and made current, like `zell_task_new`, whose saved caller context is `ctx0` (**+1, consumed**; from `zell_task_get_ctx` at the start of the ramp). A new task is returned with **two** references: the frame's and the one the ramp hands to its caller |
+| `void zell_coro_leave(zell_object *ctx0)` | a coroutine that never suspended (so made no task) returns: `ctx0` (+1, consumed) is the current context again, so whatever the body set does not leak into the caller (10.8) |
+| `zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *ops, const void *result)` | an already **done** plain task, +1, holding `result` (`result_size` bytes copied; the slot takes over the reference, nothing is retained). Used by callers that keep the `Task<T>` of an async call that completed synchronously |
 | `void zell_task_complete(zell_task *t, const void *result)` | stores the result (copies `result_size` bytes from `result`, which is borrowed: the task **retains** it with `ops`; `result` may be NULL for void tasks or a zero result), marks the task done, wakes blocking waiters, and posts the continuations. **Panics `task completed twice`** on a second call. After it returns, `t` may already have been freed by another thread unless the caller still owns a reference |
 | `bool zell_task_is_done(const zell_task *t)` | acquire-load of the state |
 | `bool zell_task_add_continuation(zell_task *t, zell_resume_fn fn, void *frame)` | atomically: if `t` is still pending, registers `(fn, frame)` and returns **true** (the caller must now suspend). If `t` is already done, registers nothing and returns **false** (the caller continues immediately). Each registration fires exactly once |
@@ -1122,43 +1129,70 @@ built as `*_async` variants that return a `zell_task *`.
 ### 10.3 Lowering `async func` (the protocol)
 
 For `async func f(params) T`, the compiler emits **one** LLVM function
-`ptr @f(params) presplitcoroutine` (the ramp, which is also the coroutine). Calling
-it **starts the task immediately**: the body runs synchronously on the caller's
-thread until its first real suspension, as in C#. It then returns a `Task<T>`,
-owned +1 by the caller.
+`void @f(params, ptr %res) presplitcoroutine` (the ramp, which is also the
+coroutine). `%res` points at a caller-owned slot `{ ptr task; T value }`
+(`{ ptr task }` for `Task<void>`). Calling `f` **starts it immediately**: the
+body runs synchronously on the caller's thread until its first real
+suspension, as in C#. The coroutine has **no task until then**: when the
+body suspends for the first time it makes its `Task<T>` (`zell_task_lazy`)
+and stores it, +1 for the caller, into `res.task`; when the body returns
+without ever suspending it stores NULL into `res.task` and moves its result,
++1, into `res.value`. So an async call that completes synchronously costs
+no task, and when the body has no suspend point at all LLVM also drops the
+frame (`llvm.coro.alloc` folds to false).
 
 ```text
 entry:
-  task  = zell_task_new(sizeof(T), ops_T)         ; +1, returned to the caller
-  zell_retain(task)                               ; +1 owned by the frame
+  task.slot = alloca ptr                           ; the coroutine's task, NULL until it suspends
+  ctx.slot  = alloca ptr                           ; the caller's context (+1)
   id    = llvm.coro.id(0, null, null, null)
-  mem   = zell_coro_frame_alloc(llvm.coro.size.i64())
+  need  = llvm.coro.alloc(id)                      ; false when LLVM proved there is no suspend point
+  mem   = need ? zell_coro_frame_alloc(llvm.coro.size.i64()) : null
   hdl   = llvm.coro.begin(id, mem)
+  store null -> task.slot
+  store zell_task_get_ctx() -> ctx.slot            ; +1
   ... body ...
 
 ; each `x = await e` (e : Task<U>):
   t = <evaluate e>                                 ; +1 (owned local in the frame)
   if zell_task_is_done(t) goto ready              ; fast path, optional
+  cur = load task.slot
+  own = zell_task_lazy(cur, sizeof(T), ops_T, load ctx.slot)  ; makes the task on the first call
+  store own -> task.slot
+  if cur == null: store own -> res.task            ; first suspension: the caller gets the task (+1)
   save = llvm.coro.save(hdl)
   if !zell_task_add_continuation(t, @zell_coro_resume, hdl) goto ready
   s = llvm.coro.suspend(save, false)               ; must come IMMEDIATELY after
-  switch s: 0 -> ready, 1 -> cleanup, default -> suspended
+  switch s: 0 -> ready, 1 -> cleanup, default -> done
 ready:
   x = load U from zell_task_result(t); retain x if U is a reference type
   zell_release(t)
 
-; each `return v`:
-  store v into a temporary; zell_task_complete(task, &tmp)  ; task retains v
-  release v (the temporary's own reference) if T is a reference type
-  zell_release(task)                              ; drop the frame's reference
+; `x = await g(args)` of a direct call of an async function g:
+  r = alloca { ptr task; U value }
+  call g(args, r)
+  if r.task == null: x = load r.value             ; +1, moved: no retain, no task
+  else: await r.task as above, then zell_release(r.task)
+; `t = g(args)` kept as a Task<U> (not awaited here):
+  call g(args, r); t = r.task ?: zell_task_completed(sizeof(U), ops_U, &r.value)
+
+; each `return v` (after the defers and the release of the locals):
+  own = load task.slot
+  if own == null:                                  ; never suspended: the synchronous path
+    zell_coro_leave(load ctx.slot)                 ; the caller's context again (+1 consumed)
+    store null -> res.task; store v -> res.value   ; v moved, +1 for the caller
+  else:
+    store v into a temporary; zell_task_complete(own, &tmp)  ; the task retains v
+    release v (the temporary's own reference) if T is a reference type
+    zell_release(own)                              ; drop the frame's reference
   br cleanup                                       ; NO final suspend
 
 cleanup:
-  zell_coro_frame_free(llvm.coro.free(id, hdl))
-  br suspended
-suspended:
+  mem = llvm.coro.free(id, hdl); if mem != null: zell_coro_frame_free(mem)
+  br done
+done:
   llvm.coro.end(hdl, false, none)
-  ret ptr task                                     ; resume clones turn this into ret void
+  ret void
 ```
 
 Rules the compiler must respect:
@@ -1166,10 +1200,23 @@ Rules the compiler must respect:
 - **Do not touch the frame after `zell_task_add_continuation` returns true.**
   Another worker may already be resuming the coroutine, because the task can
   complete at any moment and continuations are posted immediately. Between that
-  call and `llvm.coro.suspend` there must be no frame accesses. LLVM's coroutine
-  splitting supports this, since the code after the suspend point in the
-  ramp/resume clones is just a `ret`. This is the same pattern clang uses for C++
+  call and `llvm.coro.suspend` there must be no frame accesses, and the code
+  after the suspend point in the ramp must be just the `ret` (the
+  `coro.end` block): that is why the task is handed to the caller through
+  `res.task` *before* `coro.save` and the ramp returns `void`, not the task
+  (a value defined before the suspend and returned after it would be
+  reloaded from the frame; LLVM allows exactly one fall-through `coro.end`,
+  so per-suspend return blocks are not an option either). LLVM's coroutine
+  splitting supports this pattern; it is the one clang uses for C++
   `await_suspend` returning `bool`.
+- **The task is made at the first suspension**, not at the call: until then
+  the body runs as part of the caller's current task (10.11) and under the
+  caller's context, which the ramp saved (`zell_task_get_ctx`) and gives back
+  with `zell_coro_leave` or through `zell_task_lazy`'s `ctx0` (10.8).
+  `zell_task_lazy` must be called before `coro.save`, and `res.task` written
+  before `zell_task_add_continuation`; both happen only once per coroutine
+  (`cur == null`), so resume clones never write into the caller's slot, which
+  is gone by then.
 - **No final suspend point.** Once the result is published with
   `zell_task_complete`, nobody ever resumes the frame again, so the coroutine
   destroys its own frame (`coro.free` + `zell_coro_frame_free`). Nothing outside the
@@ -1182,19 +1229,29 @@ Rules the compiler must respect:
   `zell_coro_frame_free(p)` (NULL ok), possibly on another thread. Never mix
   them with `zell_alloc` / `zell_free`. The frame
   is not a refcounted object. The task owns the result, and the frame owns its
-  locals.
-- `await` on an expression that yields a fresh task (`await f()`): the temporary
-  task is owned by the frame and released after the result is read.
+  locals. Guard the allocation with `llvm.coro.alloc` and the free with the
+  result of `llvm.coro.free`: a coroutine without suspend points then
+  allocates nothing.
+- `await` on a direct call of an async function (`await f()`) reads
+  `res.value` when `res.task` is NULL (the value is +1, moved) and otherwise
+  awaits `res.task`, which the frame owns and releases after the result is
+  read. Any other use of the call's `Task<T>` (a variable, an argument,
+  `task.All`, a `func() Task<T>` value whose body is async) goes through
+  `zell_task_completed` when `res.task` is NULL, so a `Task<T>` seen by Zell
+  code is always a real task. An async function used as a value is called
+  through a thunk that does this.
 - `await f()?` (`T!` result): read `{value, err}` from the result slot, retain
   `err` (and the value, if needed), release the task, then apply the usual `?`
-  lowering.
+  lowering; on the synchronous path `{value, err}` comes moved from
+  `res.value`.
 - `defer` inside an async function: 0.1 recommendation is to run defers at the
-  logical function exit, before `zell_task_complete`.
+  logical function exit, before `zell_task_complete` / the store into `res`.
 
 `tests/coro_lowering.ll` is a complete, working example. `make test` compiles it
-with `clang -O2` and runs it. It contains two async functions (one awaiting
-`task.Delay`, the other awaiting the first) and a `main` that awaits with
-`zell_task_await`. Start from that file.
+with `clang -O2` and runs it. It contains four async functions (one awaiting
+`task.Delay`, one awaiting the first, one without suspend points, one
+awaiting both) and a `main` that awaits with `zell_task_await` and reads
+synchronous results. Start from that file.
 
 ### 10.4 Other ways to create tasks
 
@@ -1280,13 +1337,15 @@ Propagation, with no help from compiled code:
 - A worker sets the job's context before calling `fn(arg)` and releases whatever
   is current when `fn` returns, so contexts never leak between jobs.
 - Calling an `async` function starts it on the caller's thread, so it inherits
-  the caller's context. `zell_task_new` (the ramp) also records the caller's
-  context in the new task, and when that task first suspends
-  (`zell_task_add_continuation` returning true) or completes while current,
-  the recorded context is made current again (like the current task in
-  10.11): whatever the coroutine set (`task.With` inside it, a `diag`
-  span, `log.Context.Push`) stays with the coroutine and never leaks into the
-  caller. `task.RunWith(ctx, f)` sets `ctx`, calls `f`, and
+  the caller's context. The ramp saves the caller's context
+  (`zell_task_get_ctx`, +1) when it starts; a body that returns without
+  suspending gives it back with `zell_coro_leave`, and a body that suspends
+  hands it to its task (`zell_task_lazy`, 10.3), which makes it current
+  again when the coroutine first suspends (`zell_task_add_continuation`
+  returning true) or completes while current (like the current task in
+  10.11). Either way whatever the coroutine set (`task.With` inside it, a
+  `diag` span, `log.Context.Push`) stays with the coroutine and never leaks
+  into the caller. `task.RunWith(ctx, f)` sets `ctx`, calls `f`, and
   restores the previous context before returning `f`'s task.
 
 ### 10.9 I/O readiness waits (`src/task_io.c`)
@@ -1397,12 +1456,18 @@ rest of `task` is Zell (`compiler/src/sema/stdlib_src/task.zl`):
 **The task tree.** Every thread has a *current task* (owned, NULL = none),
 carried by jobs and continuations exactly like the context of 10.8.
 
-- `zell_task_new` (the coroutine ramp's call) makes the new task a **child of
+- `zell_task_lazy` (the coroutine's call at its **first suspension**, 10.3;
+  `zell_task_new` does the same at once) makes the new task a **child of
   the current task** and **current** itself. The current task becomes its parent
   again when the coroutine suspends (`zell_task_add_continuation` returning
   true) or completes (`zell_task_complete` of the current task); after that the
   code running on the thread is the caller's. So `async` calls form a tree with
-  no help from the compiler. Runtime-made tasks (delays, signals, waits, `All`,
+  no help from the compiler. Until its first suspension a coroutine's body
+  runs **as part of the caller's current task**: it inherits that task's
+  cancellation, and scopes or tasks it starts before suspending (a
+  `task.NewCancel()`, a nested call that suspends) attach to the caller's
+  task, not to the task the coroutine gets later; a body that never suspends
+  has no task at all. Runtime-made tasks (delays, signals, waits, `All`,
   `Any`, spawns) use `zell_task_new_plain`, which does neither;
   **C code that makes a task for a callback must use `zell_task_new_plain`**.
 - A child holds a reference to its parent until it is freed; the parent lists

@@ -561,6 +561,16 @@ void zell_task_set_ctx(zell_object *ctx);      /* borrowed; retained */
  * become the current task (ABI.md 10.11). */
 zell_task *zell_task_new_plain(int64_t result_size, const zell_value_ops *result_ops);
 
+/* Synchronous fast path of async functions (ABI.md 10.3): the coroutine's
+ * task, made at its first suspension (`task` if it exists already; returns
+ * it with the frame's and the caller's reference; `ctx0`, +1, is the
+ * context to restore); the return of a coroutine that made no task
+ * (`ctx0`, +1 consumed, is current again); a done plain task holding a
+ * moved result, +1. */
+zell_task *zell_task_lazy(zell_task *task, int64_t result_size, const zell_value_ops *result_ops, zell_object *ctx0);
+void zell_coro_leave(zell_object *ctx0);
+zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *result_ops, const void *result);
+
 /* Cancellation (ABI.md 10.11). */
 void zell_task_cancel(zell_task *task);               /* cascades to descendants */
 bool zell_task_is_cancelled(const zell_task *task);   /* NULL -> false */

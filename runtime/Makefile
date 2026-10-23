@@ -171,8 +171,8 @@ test: $(TESTS) $(CORO_TEST)
 	if [ -n "$(CORO_TEST)" ]; then \
 	  echo "== $(CORO_TEST)"; \
 	  out=$$(./$(CORO_TEST) | tr '\n' ' '); \
-	  if [ "$$out" != "21 41 " ]; then echo "coro_lowering: unexpected output '$$out'"; exit 1; fi; \
-	  echo "  ok  llvm.coro lowering prints 21 41"; pass=$$((pass+1)); \
+	  if [ "$$out" != "21 41 4 3 " ]; then echo "coro_lowering: unexpected output '$$out'"; exit 1; fi; \
+	  echo "  ok  llvm.coro lowering prints 21 41 4 3"; pass=$$((pass+1)); \
 	else echo "(clang not found: skipping coro_lowering)"; fi; \
 	echo "ALL TESTS PASSED ($$pass binaries)"
 
