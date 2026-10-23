@@ -237,9 +237,38 @@ typedef struct zell__json_parser {
     /* Open containers: node index and the elements seen so far. */
     uint32_t stack[ZELL__JSON_MAX_DEPTH];
     uint32_t count[ZELL__JSON_MAX_DEPTH];
+    /* Per open container: where its element starts begin in `elems`, or
+     * UINT32_MAX for an object. Arrays of ZELL__JSON_TABLE_MIN or more
+     * elements get their index table (rt_index) from this at close, while
+     * their nodes are still in cache; building it later would walk the
+     * subtree one dependent cache miss at a time. */
+    uint32_t mark[ZELL__JSON_MAX_DEPTH];
+    uint32_t *elems;
+    uint32_t nelems, capelems;
     int depth;
     zell_error *err;
 } zell__json_parser;
+
+/* Attaches `t` (len entries, node offsets from the array node) to the array
+ * node `arr` as its index table. */
+static void doc_add_table(zell__json_doc *doc, zell__json_node *arr, uint32_t *t) {
+    if (doc->ntables == doc->captables) {
+        doc->captables = doc->captables ? doc->captables * 2 : 4;
+        doc->tables = zell_realloc(doc->tables, (int64_t)(doc->captables * sizeof(uint32_t *)));
+    }
+    doc->tables[doc->ntables] = t;
+    arr->u.c.table = doc->ntables++;
+    arr->flags |= ZELL__JSON_F_TABLE;
+}
+
+static inline void record_elem(zell__json_parser *ps) {
+    if (ps->depth == 0 || ps->mark[ps->depth - 1] == UINT32_MAX) return;
+    if (ps->nelems == ps->capelems) {
+        ps->capelems = ps->capelems ? ps->capelems * 2 : 1024;
+        ps->elems = zell_realloc(ps->elems, (int64_t)ps->capelems * (int64_t)sizeof(uint32_t));
+    }
+    ps->elems[ps->nelems++] = ps->d->n;
+}
 
 static void fail_at(zell__json_parser *ps, const char *what, int64_t off) {
     char buf[160];
@@ -480,8 +509,18 @@ static void fail_grammar(zell__json_parser *ps, int64_t i, const char *what, con
 static void close_container(zell__json_parser *ps) {
     uint32_t idx = ps->stack[--ps->depth];
     zell__json_node *nd = &ps->d->nodes[idx];
-    nd->len = ps->count[ps->depth];
+    uint32_t cnt = ps->count[ps->depth];
+    nd->len = cnt;
     nd->u.c.span = ps->d->n - idx;
+    uint32_t mark = ps->mark[ps->depth];
+    if (mark == UINT32_MAX) return;
+    if (cnt >= ZELL__JSON_TABLE_MIN) {
+        uint32_t *t = zell_alloc((int64_t)cnt * (int64_t)sizeof(uint32_t));
+        const uint32_t *e = ps->elems + mark;
+        for (uint32_t k = 0; k < cnt; k++) t[k] = e[k] - idx;
+        doc_add_table(ps->d, nd, t);
+    }
+    ps->nelems = mark;
 }
 
 static int open_container(zell__json_parser *ps, uint8_t type) {
@@ -493,6 +532,7 @@ static int open_container(zell__json_parser *ps, uint8_t type) {
     nd->u.c.table = 0;
     ps->stack[ps->depth] = ps->d->n - 1;
     ps->count[ps->depth] = 0;
+    ps->mark[ps->depth] = type == ZELL__JSON_ARR ? ps->nelems : UINT32_MAX;
     ps->depth++;
     return 1;
 }
@@ -520,6 +560,7 @@ static int parse_document(zell__json_parser *ps) {
         if (i >= n) { fail_msg(ps, "json: unexpected end of input"); return 0; }
         uint8_t c = p[i];
         int opened = 0;
+        record_elem(ps);
         switch (c) {
         case '{':
             if (!open_container(ps, ZELL__JSON_OBJ)) return 0;
@@ -611,7 +652,9 @@ int64_t zell_encoding_json_rt_parse(const zell_string *text, zell_error **err) {
     ps.p = (const uint8_t *)zell_string_data(text);
     ps.n = n;
     ps.d = d;
-    if (!parse_document(&ps)) {
+    int ok = parse_document(&ps);
+    zell_free(ps.elems);
+    if (!ok) {
         if (err) *err = ps.err;
         else zell_release(ps.err);
         doc_free(d);
@@ -681,8 +724,12 @@ int64_t zell_encoding_json_rt_get(int64_t n, const zell_string *key) {
     uint32_t kl = (uint32_t)zell_string_len(key);
     zell__json_node *k = NODE(n) + 1;
     zell__json_node *found = NULL;
+    /* The last duplicate wins, so the scan runs to the end. Most keys
+     * differ in length or in the first byte: memcmp is rarely reached. */
+    uint8_t k0 = kl ? (uint8_t)kd[0] : 0;
     for (uint32_t i = 0, cnt = NODE(n)->len; i < cnt; i++) {
-        if (k->len == kl && (kl == 0 || memcmp(k->u.s, kd, kl) == 0)) found = k + 1;
+        if (k->len == kl && (kl == 0 || ((uint8_t)k->u.s[0] == k0 && memcmp(k->u.s, kd, kl) == 0)))
+            found = k + 1;
         k = node_next(k + 1);
     }
     return (int64_t)(intptr_t)found;
@@ -704,13 +751,7 @@ int64_t zell_encoding_json_rt_index(int64_t d, int64_t n, int64_t i) {
             t[k] = (uint32_t)(e - arr);
             e = node_next(e);
         }
-        if (doc->ntables == doc->captables) {
-            doc->captables = doc->captables ? doc->captables * 2 : 4;
-            doc->tables = zell_realloc(doc->tables, (int64_t)(doc->captables * sizeof(uint32_t *)));
-        }
-        doc->tables[doc->ntables] = t;
-        arr->u.c.table = doc->ntables++;
-        arr->flags |= ZELL__JSON_F_TABLE;
+        doc_add_table(doc, arr, t);
     }
     return (int64_t)(intptr_t)(arr + doc->tables[arr->u.c.table][i]);
 }
