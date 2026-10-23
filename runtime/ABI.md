@@ -1795,6 +1795,10 @@ Paths and other strings with an embedded NUL byte are rejected with `EINVAL`
 | `FromRunes(r []char)` | `zell_string *zell_strings_from_runes(const zell_slice *runes)` | UTF-8 encoding; surrogates, negatives and > U+10FFFF become U+FFFD |
 | `Bytes(s) []byte` / `FromBytes(b)` | `void zell_strings_bytes(const zell_string *s, zell_slice *out)` / `zell_string *zell_strings_from_bytes(const zell_slice *bytes)` | = `zell_string_to_bytes` / `zell_string_from_bytes` (copies) |
 | `Compare(a, b) int` | `int64_t zell_strings_compare(const zell_string *a, const zell_string *b)` | -1 / 0 / 1, byte-wise |
+| `rtCopy(dst, dstOff, src, srcOff, n)` | `void zell_strings_rt_copy(zell_slice *dst, int64_t dst_off, const zell_slice *src, int64_t src_off, int64_t n)` | internal (`strings.Builder`, `io` buffers): `memmove` of the bytes that fit in both spans; out-of-range offsets and counts are clamped, never a trap |
+| `rtCopyString(dst, dstOff, s, from, n)` | `void zell_strings_rt_copy_string(zell_slice *dst, int64_t dst_off, const zell_string *s, int64_t src_off, int64_t n)` | internal: the same from the bytes of `s` |
+| `rtIndexByte(b, from, c) int` | `int64_t zell_strings_rt_index_byte(const zell_slice *b, int64_t from, int64_t c)` | internal: `memchr` from `from`; -1 when absent |
+| `rtMakeBytes(n) []byte` | `void zell_strings_rt_make_bytes(int64_t n, zell_slice *out)` | internal: a zeroed `[]byte` of length and capacity `n` (`n < 0` gives an empty slice) |
 | `Title(s)` | `zell_string *zell_strings_title(const zell_string *s)` | upper-cases the first rune of each white-space separated word (Go's deprecated `strings.Title`, white space as the only separator) |
 
 **math** (`src/std_math_ext.c`). Zell has no overloading, so the int

@@ -770,6 +770,12 @@ pub const FUNCS: &[StdFunc] = &[
     f!("strings", "Bytes", "string", "[]byte", "zell_strings_bytes"),
     f!("strings", "FromBytes", "[]byte", "string", "zell_strings_from_bytes"),
     f!("strings", "Compare", "string, string", "int", "zell_strings_compare"),
+    // byte-buffer primitives of the Zell-source strings.Builder and io
+    // (reflect_src/builder.zl, stdlib_src/io.zl); bounds are clamped
+    f!("strings", "rtCopy", "[]byte, int, []byte, int, int", "void", "zell_strings_rt_copy"),
+    f!("strings", "rtCopyString", "[]byte, int, string, int, int", "void", "zell_strings_rt_copy_string"),
+    f!("strings", "rtIndexByte", "[]byte, int, int", "int", "zell_strings_rt_index_byte"),
+    f!("strings", "rtMakeBytes", "int", "[]byte", "zell_strings_rt_make_bytes"),
     f!("strings", "Title", "string", "string", "zell_strings_title"),
     // math (more); int helpers are I-prefixed (no overloading)
     f!("math", "Round", "float", "float", "zell_math_round"),

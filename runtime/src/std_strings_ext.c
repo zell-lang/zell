@@ -311,3 +311,39 @@ zell_string *zell_strings_from_bytes(const zell_slice *bytes) {
     if (!bytes || bytes->len == 0) return zell__string_alloc(0);
     return zell_string_from_bytes(bytes);
 }
+
+/* ---- byte-buffer primitives for the Zell-source strings.Builder and io
+ * (ABI.md section 14, "rt" helpers): bounds are clamped, never trapped, so
+ * the Zell side checks lengths and these only move bytes. ---- */
+
+/* Clamps [off, off+n) to [0, len); returns the count that fits. */
+static int64_t zell__clamp_span(int64_t len, int64_t off, int64_t n) {
+    if (off < 0 || off >= len || n <= 0) return 0;
+    return n > len - off ? len - off : n;
+}
+
+void zell_strings_rt_copy(zell_slice *dst, int64_t dst_off, const zell_slice *src, int64_t src_off,
+                          int64_t n) {
+    n = zell__clamp_span(dst->len, dst_off, n);
+    n = zell__clamp_span(src->len, src_off, n);
+    if (n > 0) memmove((char *)dst->data + dst_off, (const char *)src->data + src_off, (size_t)n);
+}
+
+void zell_strings_rt_copy_string(zell_slice *dst, int64_t dst_off, const zell_string *s,
+                                 int64_t src_off, int64_t n) {
+    n = zell__clamp_span(dst->len, dst_off, n);
+    n = zell__clamp_span(s ? s->len : 0, src_off, n);
+    if (n > 0) memcpy((char *)dst->data + dst_off, s->data + src_off, (size_t)n);
+}
+
+int64_t zell_strings_rt_index_byte(const zell_slice *b, int64_t from, int64_t c) {
+    if (from < 0) from = 0;
+    if (from >= b->len) return -1;
+    const char *p = memchr((const char *)b->data + from, (int)(c & 0xff), (size_t)(b->len - from));
+    return p ? (int64_t)(p - (const char *)b->data) : -1;
+}
+
+void zell_strings_rt_make_bytes(int64_t n, zell_slice *out) {
+    if (n < 0) n = 0;
+    zell_slice_new(out, 1, n, n);
+}
