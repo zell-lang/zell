@@ -69,11 +69,13 @@ slots, direct calls at every exit; `ZELL_NO_OPEN_DEFER=1`. defer_call 6.65x
 -> **0.34x Go**. Spec test memory2/open_defer. Left: functions with a
 loop defer keep the closure path entirely; panic still runs no defers.
 
-### 4. Sentinel errors with traces (30-45 min, `runtime/src/error.c`, codegen `?`)
-`error_sentinel` 5.8x Go, 1.0x with `--no-error-trace`: `return ErrOdd`
-copies the constant on the first `return` (copy-on-write of the shared
-trace). Keep the trace beside the value in the `T!` slot, or allocate once
-per propagation path with no copy on later `?`. Target <= 1.5x.
+### 4. Sentinel errors with traces — DONE 2026-10-23 (30-45 min, `runtime/src/error.c`, codegen `?`)
+Shared errors are never copied while propagating: a thread-local pending
+record (8 deep, 24 frames) collects the sites; `try/catch` attaches it only
+when the handler can observe the trace (static check), else drops it with
+zero allocations. error_sentinel 5.5x -> **2.5x**, error_new 1.95x -> 1.56x.
+Left: the remaining ~16 ns are four out-of-line runtime calls per failure;
+an inline fast path needs the record layout in the ABI.
 
 ### 5. LTO between program and runtime — DONE 2026-10-23 (45 min, `runtime/Makefile`, `compiler/src/build.rs`)
 The lookup cost was `rt_index` building a 1M-entry offset table lazily
@@ -92,12 +94,15 @@ literals allocated per call, a box per string argument); 4 in log (Event,
 extra props, joined line, float text). Next: constant slices in the
 lowering (-3), string-inline `any` (-1/string), a C-side line builder.
 
-### 7. `data` insert path (30-45 min, `std/data/data.zl`, `data_save.zl`)
-`entryOf` scans every tracked entry (quadratic `AddRange`); `batchSize()` is
-a constant 100. A pointer->entry map in `ctxState`; batch size from the
-provider's parameter limit (SQLite 32766, PostgreSQL 65535) divided by the
-column count. Target: insert <= 1.5x `database/sql` (now 7.8x), GORM slower
-than Zell on every phase.
+### 7. `data` insert path — DONE 2026-10-23 (30-45 min, `std/data/data.zl`, `data_save.zl`)
+Pointer-keyed entry map (`unsafe.AddrOf` of the box payload), batch size
+= provider parameter limit / columns, rows materialised without the
+`[][]any` copy, `First` with LIMIT 1. insert 476 -> 246 ms (sql 102,
+2.4x), lookup 4565 -> 3435 (sql 1924, 1.8x); GORM slower than Zell on
+every phase but insert. Left: per-shape SQL text + arg-plan cache,
+`e.values()` computed twice, closures per tracked entity; side finding: a
+plain `database.sql` loop measured ~2 ms per query in a scratch program
+(scratchpad floor.zl) — verify, may be a driver/scheduler issue.
 
 ### 8. Crypto, second pass (45-60 min each, `runtime/src/crypto/`)
 Ed25519 sign 8.2x (public key re-derived per signature, no fixed-base
@@ -107,10 +112,15 @@ dispatch scheme as SHA-NI/VAES (`target(...)` functions, cpuid once,
 `ZELL_NO_*` overrides, portable fallback unchanged, vectors on every path).
 TLS 1.3 handshakes (2.2x) follow from the first two.
 
-### 9. Scheduler leftovers (30-45 min, `runtime/src/task.c`)
-`await_chain` resume phase ~75 ns per frame (run-next dispatch +
-`task_complete` atomics), `fanout_fanin` pool phase 2.3x (futex wake churn
-of 50 us spinners). Profile with `-DZELL_SCHED_STATS`, then decide.
+### 9. Scheduler leftovers — DONE 2026-10-23 (30-45 min, `runtime/src/task.c`)
+Spare workers bounded at max(16, 4N) plus one per 10 ms of complete stall
+(ABI.md 10.1/10.5): 10k blocked C-API producers -> 19 threads. Compiled
+Zell code never blocks a worker (await outside async is a sema error).
+Eight atomics cut from suspend/resume with no wall change: await_chain's
+resume phase creates and completes 1M tasks where Go makes 1M plain
+calls; reaching <= 6x needs no task per level (or a task freelist / smaller
+task), measured with ZELL_WORKERS=1 (at 16 workers only ~26% of frames
+really suspend).
 
 ### 10. I/O and strings (45 min, `std/io`, `std/strings`, `runtime/src/std_strings.c`)
 Buffered read 1 KB 3.6x, line scan 2.6x, buffered write 2.0x,
