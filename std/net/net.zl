@@ -655,6 +655,7 @@ struct sock {
                 return this.fail("read", err)
             }
             if k >= 0 {
+                this.drained = k > 0 && k < len(buf) && this.nw != "udp"
                 return k
             }
             await this.waitRead("read")?

@@ -1,7 +1,9 @@
-/* poll_epoll.c - readiness poller on Linux (platform.h): level-triggered,
- * one-shot epoll (EPOLLONESHOT re-armed with EPOLL_CTL_MOD for every wait)
- * plus an eventfd for cross-thread wake-ups; or io_uring readiness polls
- * (poll_uring.c) with ZELL_IO_BACKEND=io_uring when the kernel has them. */
+/* poll_epoll.c - readiness poller on Linux (platform.h): edge-triggered
+ * epoll (EPOLLET), each fd added once for both directions and never
+ * re-armed, so a wait costs no epoll_ctl (task_io.c keeps the readiness
+ * that arrived while nobody waited), plus an eventfd for cross-thread
+ * wake-ups; or io_uring readiness polls (poll_uring.c, one-shot) with
+ * ZELL_IO_BACKEND=io_uring when the kernel has them. */
 #include "platform.h"
 
 #if defined(__linux__)
@@ -68,10 +70,9 @@ void zell__plat_poller_free(zell__plat_poller *p) {
 
 int zell__plat_poller_arm(zell__plat_poller *p, int64_t fd, int32_t interest, uint64_t token, bool registered) {
     if (p->u) return zell__uring_arm(p->u, fd, interest, token, registered);
-    struct epoll_event ev = { .events = 0, .data.u64 = token };
-    if (interest & ZELL_PLAT_READ) ev.events |= EPOLLIN | EPOLLRDHUP;
-    if (interest & ZELL_PLAT_WRITE) ev.events |= EPOLLOUT;
-    if (ev.events) ev.events |= EPOLLONESHOT;
+    /* Edge-triggered: both directions, whatever `interest` asks for. */
+    (void)interest;
+    struct epoll_event ev = { .events = EPOLLIN | EPOLLRDHUP | EPOLLOUT | EPOLLET, .data.u64 = token };
     int op = registered ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
     int rc = epoll_ctl(p->epfd, op, (int)fd, &ev);
     if (rc != 0 && errno == ENOENT && registered) rc = epoll_ctl(p->epfd, EPOLL_CTL_ADD, (int)fd, &ev);
@@ -109,6 +110,7 @@ int zell__plat_poller_wait(zell__plat_poller *p, zell__plat_event *evs, int max,
         }
         int32_t e = 0;
         if (buf[i].events & (EPOLLIN | EPOLLRDHUP)) e |= ZELL_PLAT_READ;
+        if (buf[i].events & EPOLLRDHUP) e |= ZELL_PLAT_HUP;
         if (buf[i].events & EPOLLOUT) e |= ZELL_PLAT_WRITE;
         if (buf[i].events & (EPOLLERR | EPOLLHUP)) e |= ZELL_PLAT_ERROR | ZELL_PLAT_READ | ZELL_PLAT_WRITE;
         evs[out].token = buf[i].data.u64;
@@ -129,6 +131,8 @@ void zell__plat_poller_wake(zell__plat_poller *p) {
         if (r >= 0 || errno != EINTR) break;  /* EAGAIN: counter saturated, already pending */
     }
 }
+
+bool zell__plat_poller_edge(zell__plat_poller *p) { return p->u == NULL; }
 
 const char *zell__plat_poller_backend(zell__plat_poller *p) {
     return p->u ? "io_uring" : "epoll";

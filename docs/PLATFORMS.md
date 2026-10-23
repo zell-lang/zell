@@ -51,7 +51,7 @@ arm64. Это требование к компилятору, рантайму, 
 |---|---|---|---|
 | Потоки, мьютексы, условные переменные | pthreads | pthreads | Win32 threads, SRWLock, CONDITION_VARIABLE |
 | Атомики | C11 `<stdatomic.h>` | C11 | C11 (clang) |
-| Асинхронный ввод-вывод | epoll (позже io_uring) | kqueue | IOCP |
+| Асинхронный ввод-вывод | epoll, edge-triggered (EPOLLET, регистрация один раз на fd; io_uring по `ZELL_IO_BACKEND`, one-shot) | kqueue (one-shot) | IOCP (one-shot) |
 | Таймеры | timerfd / планировщик | kqueue EVFILT_TIMER | waitable timers |
 | Файлы и каталоги | POSIX | POSIX | Win32 (`CreateFileW`, UTF-16 пути) |
 | Процессы | fork/exec, posix_spawn | posix_spawn | `CreateProcessW` |

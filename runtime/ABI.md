@@ -1542,15 +1542,27 @@ Rules and guarantees:
 
 - `fd` must be non-blocking. Any number of tasks may wait on one descriptor
   in each direction; a report wakes **every** waiter of that direction.
-- **Level-triggered, one-shot**: each wait arms the fd once (one
-  `epoll_ctl(EPOLL_CTL_MOD, EPOLLONESHOT)` / `kevent(EV_ONESHOT)`), so data
-  that is already there is reported at once and nothing is lost between a
-  read that saw `EAGAIN` and the arm. Edge-triggered mode was not chosen:
-  it saves the re-arm call but needs every reader to drain the socket to
-  `EAGAIN`, which the stdlib cannot promise for user code (a `ReadExact(4)`
-  leaves data behind); measured on `benchmarks/tcp_echo` only 1 in 15
-  operations waits at all (the rest succeed on the first try), so the arm
-  call is not the bottleneck.
+- **epoll: edge-triggered, armed once.** A descriptor is added to its
+  shard's epoll at its first wait (`EPOLLIN | EPOLLOUT | EPOLLRDHUP |
+  EPOLLET`, both directions) and never re-armed, so a wait costs no system
+  call. A report that finds no waiter of a direction is kept in the fd's
+  `ready` bits and consumed by the next wait of that direction, which
+  completes at once; a peer shutdown (`EPOLLRDHUP`) or an error/hang-up
+  makes the direction ready for good (`sticky`), since the read that
+  returns the last data does not return the EOF behind it and no new edge
+  follows. Contract for callers (all of the stdlib keeps it): **wait only
+  after the operation failed with `EAGAIN`, or after a short read of a
+  stream socket** (fewer bytes than asked: the socket is drained, any later
+  data raises a new edge; `net.sock.readInto` waits right away then,
+  saving the `recv` that would fail). A wait without that may park even
+  though data is buffered. Measured on `benchmarks/websocket_echo`: per
+  message 1 `epoll_ctl` and 1 `recv` fewer than the one-shot scheme.
+- **Other backends: level-triggered, one-shot** (kqueue `EV_ONESHOT`,
+  io_uring `POLL_ADD`, IOCP `IOCTL_AFD_POLL`, WSAPoll): each wait arms the
+  fd once, so data that is already there is reported at once and nothing
+  is lost between a read that saw `EAGAIN` and the arm; the contract above
+  holds for them trivially. `zell__plat_poller_edge` tells `task_io.c`
+  which scheme a poller uses.
 - **Reports may be spurious** (a readiness that is gone, a direction nobody
   asked for); every caller retries its operation and waits again.
 - **Stale reports** are dropped: poller events carry `(generation << 32) |

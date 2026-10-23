@@ -285,7 +285,8 @@ ZELL_PLAT_HIDDEN void zell__plat_dl_close(void *h);
 ZELL_PLAT_HIDDEN const char *zell__plat_dl_error(void);
 
 /* ---- readiness poller (async I/O backend) -----------------------------
- * A readiness poller is level-triggered and one-shot: poller_arm(fd,
+ * A readiness poller is level-triggered and one-shot (except epoll, see
+ * zell__plat_poller_edge below): poller_arm(fd,
  * interest, token) asks for ONE report when fd is ready for any direction
  * in `interest`; after that report (or a spurious one) the fd stays
  * registered but disarmed until it is armed again. One-shot level
@@ -300,7 +301,9 @@ ZELL_PLAT_HIDDEN const char *zell__plat_dl_error(void);
  * readiness from IOCTL_AFD_POLL, falling back to poll_wsapoll.c), see
  * docs/PLATFORMS.md. */
 
-enum { ZELL_PLAT_READ = 1, ZELL_PLAT_WRITE = 2, ZELL_PLAT_ERROR = 4 };
+/* ZELL_PLAT_HUP (edge-triggered pollers only): the peer shut down its side,
+ * so the fd stays readable (end of stream) from now on. */
+enum { ZELL_PLAT_READ = 1, ZELL_PLAT_WRITE = 2, ZELL_PLAT_ERROR = 4, ZELL_PLAT_HUP = 8 };
 
 /* Token of the poller's own wake-up channel in events. */
 #define ZELL_PLAT_WAKE_TOKEN UINT64_MAX
@@ -332,6 +335,22 @@ ZELL_PLAT_HIDDEN int zell__plat_poller_wait(zell__plat_poller *p, zell__plat_eve
 ZELL_PLAT_HIDDEN void zell__plat_poller_wake(zell__plat_poller *p);
 /* Name of the backend of p: "epoll", "kqueue", "iocp" or "wsapoll". */
 ZELL_PLAT_HIDDEN const char *zell__plat_poller_backend(zell__plat_poller *p);
+/* Whether p is edge-triggered (epoll on Linux; the io_uring, kqueue, IOCP
+ * and WSAPoll backends are one-shot as described above). An edge-triggered
+ * poller is armed once per fd (registered = false; interest is ignored:
+ * both directions are watched) and then reports every new readiness of
+ * either direction without being armed again; the fd's current readiness
+ * is reported once when it is added. The caller (task_io.c) remembers a
+ * report that found no waiter, and a wait must only follow an operation
+ * that failed with EAGAIN (or a short stream read). Events carry
+ * ZELL_PLAT_HUP for a peer shutdown and ZELL_PLAT_ERROR for an error or
+ * hang-up: both conditions last, but a read that returns the data before
+ * them does not report them, so the caller treats them as permanent. */
+#if defined(__linux__)
+ZELL_PLAT_HIDDEN bool zell__plat_poller_edge(zell__plat_poller *p);
+#else
+static inline bool zell__plat_poller_edge(zell__plat_poller *p) { (void)p; return false; }
+#endif
 
 /* ---- process, console, environment (posix.c / win32.c) ---------------- */
 

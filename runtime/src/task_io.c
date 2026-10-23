@@ -11,9 +11,17 @@
  * shards never touch the same lock or poller.
  *
  * zell_io_wait_readable/writable(fd, timeout) add a pending Task<int> to
- * the fd's reader or writer list and arm the fd one-shot in its shard's
- * poller (one epoll_ctl per wait, level-triggered: readiness that is
- * already there is reported at once). When the poller reports the fd (or
+ * the fd's reader or writer list. With a one-shot poller (io_uring,
+ * kqueue, IOCP, WSAPoll) the wait arms the fd in its shard's poller
+ * (level-triggered: readiness that is already there is reported at once).
+ * With an edge-triggered poller (epoll) the fd is added once, at its first
+ * wait, and a wait costs no system call: a report that finds no waiter of
+ * a direction is kept in the fd's `ready` bits, and the next wait of that
+ * direction consumes it and completes at once. That is only correct
+ * because every caller waits after an operation that failed with EAGAIN
+ * (or a short stream read, which drained the socket): readiness that came
+ * before is either consumed by that operation or still in `ready`.
+ * When the poller reports the fd (or
  * the deadline passes, or zell_io_forget releases the fd, or the waiting
  * task is cancelled) the waits are completed, which posts their
  * continuations to the scheduler like a timer does. Every waiter of a
@@ -46,6 +54,8 @@ typedef struct io_fd {
     uint32_t gen;            /* bumped when the fd is forgotten */
     int32_t armed;           /* interest armed (one-shot) in the poller */
     int32_t registered;      /* added to the shard's poller */
+    int32_t ready;           /* edge-triggered: reported directions nobody waited for */
+    int32_t sticky;          /* edge-triggered: directions ready for good (peer shutdown, error) */
 } io_fd;
 
 typedef struct io_shard {
@@ -58,6 +68,7 @@ typedef struct io_shard {
     int64_t nfds;            /* atomic: descriptors assigned (load) */
     int32_t stopping;
     int32_t index;
+    bool edge;               /* the poller is edge-triggered (armed once per fd) */
 } io_shard;
 
 typedef struct io_done {
@@ -289,6 +300,23 @@ static void *io_main(void *arg) {
             io_fd *e = entry(fd, false);
             /* stale: the fd was forgotten (and maybe reused) since it was armed */
             if (!e || __atomic_load_n(&e->shard, __ATOMIC_RELAXED) != sh->index || e->gen != gen) continue;
+            if (sh->edge) {
+                /* edge-triggered: wake the waiters, or keep the readiness for
+                 * the next wait. End of stream and errors stay: a short read
+                 * may return the last data without the EOF behind it, and no
+                 * new edge would come for the EOF. */
+                if (evs[i].events & ZELL_PLAT_HUP) e->sticky |= ZELL_PLAT_READ;
+                if (evs[i].events & ZELL_PLAT_ERROR) e->sticky |= ZELL_PLAT_READ | ZELL_PLAT_WRITE;
+                if (evs[i].events & ZELL_PLAT_READ) {
+                    if (e->rd) take_all(sh, &e->rd, IO_READY, &d);
+                    else e->ready |= ZELL_PLAT_READ;
+                }
+                if (evs[i].events & ZELL_PLAT_WRITE) {
+                    if (e->wr) take_all(sh, &e->wr, IO_READY, &d);
+                    else e->ready |= ZELL_PLAT_WRITE;
+                }
+                continue;
+            }
             e->armed = 0;  /* one-shot: the report disarmed it */
             if (evs[i].events & ZELL_PLAT_READ) take_all(sh, &e->rd, IO_READY, &d);
             if (evs[i].events & ZELL_PLAT_WRITE) take_all(sh, &e->wr, IO_READY, &d);
@@ -337,6 +365,7 @@ static void io_start(void) {
             s[i].sleep_until = INT64_MAX;
             s[i].poller = zell__plat_poller_new();
             if (!s[i].poller) zell_panic("cannot create the I/O poller");
+            s[i].edge = zell__plat_poller_edge(s[i].poller);
         }
         io_shards = s;
         io_nshards = n;
@@ -392,11 +421,20 @@ static zell_task *io_wait_for(int64_t fd, bool write, int64_t timeout_ms) {
     w->deadline = timeout_ms >= 0 ? zell__plat_mono_ns() + timeout_ms * 1000000 + 1 : 0;
     io_shard *sh = shard_lock(e, true);
     io_wait **list = write ? &e->wr : &e->rd;
-    w->next = *list;
-    *list = w;
+    int32_t dir = write ? ZELL_PLAT_WRITE : ZELL_PLAT_READ;
     int64_t immediate = -1;
+    if (sh->edge && ((e->ready | e->sticky) & dir)) {
+        /* reported while nobody waited (consumed), or EOF/error: no poller call */
+        e->ready &= ~dir;
+        immediate = IO_READY;
+    } else {
+        w->next = *list;
+        *list = w;
+    }
     int32_t want = (e->rd ? ZELL_PLAT_READ : 0) | (e->wr ? ZELL_PLAT_WRITE : 0);
-    if ((want & ~e->armed) != 0) {
+    if (immediate >= 0 || (sh->edge && e->registered)) {
+        /* nothing to arm: an edge-triggered fd is armed once */
+    } else if ((want & ~e->armed) != 0) {
         int rc = zell__plat_poller_arm(sh->poller, fd, want, token_of(e, fd), e->registered != 0);
         if (rc == 0) {
             e->registered = 1;
@@ -449,6 +487,8 @@ void zell_io_forget(int64_t fd) {
     if (e->registered) zell__plat_poller_remove(sh->poller, fd);
     e->registered = 0;
     e->armed = 0;
+    e->ready = 0;
+    e->sticky = 0;
     e->gen++;
     __atomic_store_n(&e->shard, -1, __ATOMIC_RELEASE);
     __atomic_sub_fetch(&sh->nfds, 1, __ATOMIC_RELAXED);

@@ -93,6 +93,20 @@ TEST(poller_oneshot_level) {
     pair(sv);
     zell__plat_event ev[8];
     assert(sock_write(sv[1], "ab", 2) == 2);
+    if (zell__plat_poller_edge(p)) {
+        /* edge-triggered (epoll): added once, the current readiness is
+         * reported once, then only new readiness */
+        assert(zell__plat_poller_arm(p, sv[0], ZELL_PLAT_READ, 5, false) == 0);
+        assert(zell__plat_poller_wait(p, ev, 8, 1000) == 1 && ev[0].token == 5 && (ev[0].events & ZELL_PLAT_READ));
+        assert(zell__plat_poller_wait(p, ev, 8, 20) == 0);  /* data remains, no new edge */
+        assert(sock_write(sv[1], "c", 1) == 1);
+        assert(zell__plat_poller_wait(p, ev, 8, 1000) == 1 && ev[0].token == 5 && (ev[0].events & ZELL_PLAT_READ));
+        sock_close(sv[1]);  /* peer hang-up reports readability (end of stream) */
+        assert(zell__plat_poller_wait(p, ev, 8, 1000) == 1 && (ev[0].events & ZELL_PLAT_READ));
+        zell__plat_poller_remove(p, sv[0]);
+        sock_close(sv[0]);
+        goto files;
+    }
     /* data already there: reported at once (level-triggered) */
     assert(zell__plat_poller_arm(p, sv[0], ZELL_PLAT_READ, 5, false) == 0);
     assert(zell__plat_poller_wait(p, ev, 8, 1000) == 1 && ev[0].token == 5);
@@ -110,6 +124,7 @@ TEST(poller_oneshot_level) {
     assert(zell__plat_poller_wait(p, ev, 8, 1000) == 1 && (ev[0].events & ZELL_PLAT_READ));
     zell__plat_poller_remove(p, sv[0]);
     sock_close(sv[0]);
+files:;
     /* a regular file cannot be polled; a closed fd is EBADF */
     int f = open(NULL_DEVICE, O_RDONLY);
     int rc = zell__plat_poller_arm(p, f, ZELL_PLAT_READ, 9, false);
@@ -293,6 +308,76 @@ static void pong_worker(zell_task *t, void *ctx) {
         assert(sock_write(sv[0], "q", 1) == 1);
     }
     zell_task_complete(t, NULL);
+}
+
+/* A short read drains the socket; the next wait (no recv in between, as
+ * net.sock.readInto does) must still see data that arrives before it is
+ * parked (edge-triggered epoll keeps that report in the fd's ready bits)
+ * or after (the report wakes the parked wait). */
+typedef struct late_writer {
+    int fd;
+    int n;
+} late_writer;
+
+static void *late_write_thread(void *arg) {
+    late_writer *lw = arg;
+    for (int i = 0; i < lw->n; i++) {
+        if (i % 3 == 1) zell__plat_sleep_ns(50000);   /* the reader is parked by now, mostly */
+        assert(sock_write(lw->fd, "abc", 3) == 3);
+        char c;
+        while (sock_read(lw->fd, &c, 1) != 1) zell__plat_sleep_ns(10000);   /* wait for the ack */
+    }
+    return NULL;
+}
+
+TEST(io_short_read_then_wait) {
+    int sv[2];
+    pair(sv);
+    char buf[64];
+    /* data arrives after the short read and before the wait: completes at once */
+    assert(sock_write(sv[1], "ab", 2) == 2);
+    assert(wait_code(zell_io_wait_readable(sv[0], 5000)) == 0);
+    assert(sock_read(sv[0], buf, sizeof buf) == 2);   /* short: drained */
+    assert(sock_write(sv[1], "cd", 2) == 2);
+    zell__plat_sleep_ns(20000000);                     /* the poller has seen it, nobody waited */
+    assert(wait_code(zell_io_wait_readable(sv[0], 5000)) == 0);
+    assert(sock_read(sv[0], buf, sizeof buf) == 2);
+    /* data arrives after the wait is parked: wakes it */
+    zell_task *t = zell_io_wait_readable(sv[0], 5000);
+    zell__plat_sleep_ns(20000000);
+    assert(!zell_task_is_done(t));
+    assert(sock_write(sv[1], "e", 1) == 1);
+    assert(wait_code(t) == 0);
+    assert(sock_read(sv[0], buf, sizeof buf) == 1);
+    /* racing writer: a short read, then a wait without a recv, many times
+     * (a lost wake-up shows as a timeout, code 1) */
+    late_writer lw = { sv[1], 300 };
+    pthread_t th;
+    pthread_create(&th, NULL, late_write_thread, &lw);
+    for (int i = 0; i < lw.n; i++) {
+        int64_t got = 0;
+        while (got < 3) {   /* the 3 bytes may come in pieces; every read before is short */
+            assert(wait_code(zell_io_wait_readable(sv[0], 5000)) == 0);
+            int64_t k = sock_read(sv[0], buf, sizeof buf);   /* < 0: a stale report, wait again */
+            if (k > 0) got += k;
+        }
+        assert(got == 3);
+        assert(sock_write(sv[0], "k", 1) == 1);
+    }
+    pthread_join(th, NULL);
+    /* the last data and the peer's shutdown arrive together: the short read
+     * returns the data, not the EOF behind it; the next wait must not park */
+    assert(sock_write(sv[1], "zz", 2) == 2);
+    assert(zell__plat_sock_shutdown(sv[1], ZELL_PLAT_WRITE) == 0);
+    zell__plat_sleep_ns(20000000);
+    assert(wait_code(zell_io_wait_readable(sv[0], 5000)) == 0);
+    assert(sock_read(sv[0], buf, sizeof buf) == 2);
+    assert(wait_code(zell_io_wait_readable(sv[0], 2000)) == 0);
+    assert(sock_read(sv[0], buf, sizeof buf) == 0);
+    assert(wait_code(zell_io_wait_readable(sv[0], 2000)) == 0);   /* stays readable */
+    zell_io_forget(sv[0]);
+    sock_close(sv[0]);
+    sock_close(sv[1]);
 }
 
 TEST(io_worker_ping_pong) {
@@ -729,6 +814,7 @@ int main(int argc, char **argv) {
     RUN(io_two_readers_and_timeouts);
     RUN(io_multithread_stress);
     RUN(io_worker_ping_pong);
+    RUN(io_short_read_then_wait);
     RUN(io_cancel_wakes_wait);
     RUN(net_round_trip_and_close);
     RUN(net_close_race);

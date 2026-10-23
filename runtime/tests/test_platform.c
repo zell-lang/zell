@@ -95,6 +95,8 @@ TEST(poller_raw) {
     sock_pair(sv, false);
     zell__plat_event ev[8];
     assert(zell__plat_poller_arm(p, sv[0], ZELL_PLAT_READ, 77, false) == 0);
+    if (zell__plat_poller_edge(p))   /* edge-triggered: watches both directions, reports writable once */
+        assert(zell__plat_poller_wait(p, ev, 8, 1000) == 1 && !(ev[0].events & ZELL_PLAT_READ));
     assert(zell__plat_poller_wait(p, ev, 8, 10) == 0);       /* nothing to read: timeout */
     assert(s_write(sv[1], "x", 1) == 1);
     int n = zell__plat_poller_wait(p, ev, 8, 1000);
@@ -284,13 +286,13 @@ TEST(io_waits) {
     assert(wait_code(t) == 0);
     char buf[4];
     assert(s_read(sv[0], buf, sizeof buf) == 2);
-    /* writable at once */
-    assert(wait_code(zell_io_wait_writable(sv[0], -1)) == 0);
     /* timeout */
     int64_t t0 = now_ms();
     assert(wait_code(zell_io_wait_readable(sv[0], 30)) == 1);
     assert(now_ms() - t0 >= 29);
-    /* read and write waiters on one fd at once */
+    /* read and write waiters on one fd at once; the writer completes at
+     * once (writable; on an edge-triggered poller the writability reported
+     * when the fd was added is still unconsumed: no write has failed) */
     zell_task *r = zell_io_wait_readable(sv[0], -1);
     zell_task *w = zell_io_wait_writable(sv[0], -1);
     assert(wait_code(w) == 0);
