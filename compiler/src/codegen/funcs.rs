@@ -57,6 +57,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let bl = crate::hir::borrow::borrowed_locals(self.prog, fid, f, &self.pure_fns, &stack, &|t| self.cycles.holds_cyclic(t));
         self.fs_mut().borrowed = bl.clone();
         self.fs_mut().borrow_local = bl;
+        let const_only: Vec<bool> = f.locals.iter().map(|l| !(l.captured || l.address_taken) && matches!(self.rc_kind(l.ty), super::rc::RcKind::Ref | super::rc::RcKind::Ptr)).collect();
+        let n = const_only.len();
+        self.fs_mut().const_only = const_only;
+        self.fs_mut().const_depth = vec![usize::MAX; n];
         self.setup_interior(fid, f);
         if f.ret != self.prog.types.void {
             let t = self.llty(f.ret);
@@ -78,6 +82,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let slot = self.fs().locals[p.0 as usize].unwrap();
                 self.b.build_store(slot.ptr, v).unwrap();
                 self.fs_mut().borrowed[p.0 as usize] = true;
+                self.clear_const_only(*p);
             }
         }
         self.dbga_enter(f);
@@ -119,7 +124,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     pub(crate) fn release_locals(&mut self) {
         let Some(f) = self.fs().hir else { return };
         for i in (0..f.locals.len()).rev() {
-            self.release_local(LocalId(i as u32), false);
+            self.release_local_final(LocalId(i as u32), false);
         }
         let scoped = self.fs().scoped.clone();
         for (p, t) in scoped {
@@ -181,6 +186,41 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             if zero {
                 self.b.build_store(slot.ptr, ty.const_zero()).unwrap();
             }
+        }
+    }
+
+    /// [`release_local`](Self::release_local) at a point where every store
+    /// into `l` has been emitted (the end of its block, the function exit):
+    /// nothing to do when only constants were ever stored
+    /// ([`FnState::const_only`]). Early exits (`return`, `break`, `?`) and
+    /// a `Let` executed again by a loop come before later stores in the
+    /// emission order, so they always release.
+    pub(crate) fn release_local_final(&mut self, l: LocalId, zero: bool) {
+        let (_, slot) = self.local_info(l);
+        if !slot.cell && slot.stack_obj.is_none() && self.fs().const_only.get(l.0 as usize).copied().unwrap_or(false) && !self.is_interior_local(l) {
+            if zero {
+                let (info, _) = self.local_info(l);
+                let ty = self.llty(info.ty);
+                self.b.build_store(slot.ptr, ty.const_zero()).unwrap();
+            }
+            return;
+        }
+        self.release_local(l, zero);
+    }
+
+    /// True if `v`, of a type held as one object pointer (string, `*T`,
+    /// map, error ...), is an LLVM constant: NULL or an immortal global
+    /// (a literal, a reflection table, an attribute value), which no
+    /// retain or release ever touches.
+    pub(crate) fn is_const_ref(&self, t: TypeId, v: Val<'ctx>) -> bool {
+        matches!(self.rc_kind(t), super::rc::RcKind::Ref | super::rc::RcKind::Ptr) && v.v.is_some_and(|x| x.is_pointer_value() && x.into_pointer_value().is_const())
+    }
+
+    /// Notes a store into local `l` that is not a constant pointer (see
+    /// [`FnState::const_only`]).
+    pub(crate) fn clear_const_only(&mut self, l: LocalId) {
+        if let Some(c) = self.fs_mut().const_only.get_mut(l.0 as usize) {
+            *c = false;
         }
     }
 
@@ -306,6 +346,24 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// execution) is released and a captured local gets a new cell.
     pub(crate) fn assign_local(&mut self, l: LocalId, v: Val<'ctx>, fresh: bool) -> R<()> {
         let (info, slot) = self.local_info(l);
+        let const_ref = self.is_const_ref(info.ty, v);
+        let depth = self.fs().loops.len();
+        let old_const = self.fs().const_only.get(l.0 as usize).copied().unwrap_or(false);
+        let same_depth = self.fs().const_depth.get(l.0 as usize).copied() == Some(depth);
+        if !const_ref {
+            self.clear_const_only(l);
+        } else if fresh {
+            if let Some(d) = self.fs_mut().const_depth.get_mut(l.0 as usize) {
+                *d = depth;
+            }
+        }
+        if !fresh && old_const && same_depth && !slot.cell && !self.is_interior_local(l) {
+            // The slot holds the constant of its Let (no loop in between):
+            // store without releasing it.
+            let x = self.to_owned(info.ty, v);
+            self.b.build_store(slot.ptr, x).unwrap();
+            return Ok(());
+        }
         if fresh && self.fs().borrow_local.get(l.0 as usize).copied().unwrap_or(false) {
             // A borrowed local: the value is kept alive by the place it was
             // read from. An owned value (not expected from a path) is kept

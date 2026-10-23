@@ -87,6 +87,18 @@
 //! `{i64 -1, ptr null, T}` with an immortal header, and `&x` / `p` point at
 //! its payload. Leaving the scope of such a `p` releases the fields.
 //!
+//! **Constants need no reference counting.** A constant pointer operand
+//! (NULL, or the address of an immortal global: a string literal, a
+//! reflection table, an attribute value [`ExprKind::AttrConst`]) is never
+//! retained or released (`rc_val`), and a local of a pointer type that
+//! only ever held such constants (`FnState::const_only`, cleared by the
+//! first other store; a store at the loop depth of its `Let` also skips
+//! releasing the old constant) is not released at the end of its block or
+//! at the function exit, the two points where every store to it has
+//! already been emitted. `len(s)` of a string is the inline load of the
+//! length word (NULL is 0). The error-trace calls of `?` run only when the
+//! error is not NULL (`trace::when_error`).
+//!
 //! **Reference counting fast paths.** With `Options::inline_rc` (`-O3`)
 //! `call_rt` routes `zell_retain`/`zell_release`/`zell_ptr_*` to internal
 //! `alwaysinline` helpers (`rc.rs`, `rc_inline_fn`) that update the count
@@ -365,6 +377,19 @@ pub(crate) struct FnState<'a, 'ctx> {
     /// Per local: a borrowed local ([`hir::borrow`]): stored without a
     /// retain and never released.
     pub borrow_local: Vec<bool>,
+    /// Per local (string, `*T`, map, error ... slots that are not cells,
+    /// interior or address-taken): every value stored so far was an LLVM
+    /// constant pointer (NULL or the address of an immortal global: a
+    /// literal, a reflection table, an attribute value), so the slot holds
+    /// nothing to release. Cleared by the first other store; checked by
+    /// `release_local`.
+    pub const_only: Vec<bool>,
+    /// Per local: the loop depth (`loops.len()`) at its `Let`, when that
+    /// stored a constant. A later store at the same depth (no loop between
+    /// them) always finds that constant in the slot, so it need not
+    /// release the old value; a store inside a deeper loop may find the
+    /// value of a previous iteration.
+    pub const_depth: Vec<usize>,
     /// Per local: drop flag of a stack value with a destructor (`i1`, set
     /// while the slot holds a live value).
     pub flags: Vec<Option<PointerValue<'ctx>>>,
@@ -671,6 +696,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             pins: HashMap::new(),
             borrowed: Vec::new(),
             borrow_local: Vec::new(),
+            const_only: Vec::new(),
+            const_depth: Vec::new(),
             flags: Vec::new(),
             try_targets: Vec::new(),
             interior: None,

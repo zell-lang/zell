@@ -137,10 +137,13 @@ impl<'a> Sema<'a> {
         mk(ExprKind::Zero, self.tt.invalid, span)
     }
 
-    pub(crate) fn var_expr(&self, v: VarRef, span: Span) -> hir::Expr {
+    pub(crate) fn var_expr(&mut self, v: VarRef, span: Span) -> hir::Expr {
         let ty = self.var_ty(v);
         match v {
-            VarRef::Local(l) => mk(ExprKind::Local(l), ty, span),
+            VarRef::Local(l) => {
+                self.ct_field_use(l, 1);
+                mk(ExprKind::Local(l), ty, span)
+            }
             VarRef::Upvalue(i) => mk(ExprKind::Upvalue(i), ty, span),
         }
     }
@@ -247,8 +250,22 @@ impl<'a> Sema<'a> {
         if self.tt.is_invalid(base.ty) {
             return self.invalid(name.span);
         }
+        // `f.Name` of an unrolled `reflect.Fields<T>()` variable is a constant.
+        if let ExprKind::Local(l) = base.kind {
+            if let Some(e) = self.ct_field_const(l, name) {
+                return e;
+            }
+        }
         let span = base.span.to(name.span);
         let mut b = self.auto_deref(base);
+        // `tag.name` of a compile-time attribute value is a constant.
+        if let ExprKind::Deref(inner) = &b.kind {
+            if let ExprKind::AttrConst { attr, sid } = &inner.kind {
+                if let Some(e) = self.attr_const_field(attr, *sid, &name.name, span) {
+                    return e;
+                }
+            }
+        }
         let Type::Struct(d) = *self.tt.get(b.ty) else {
             let t = self.tn(b.ty);
             self.err_help(format!("type {t} has no field {}", name.name), name.span, "field access needs a struct or a pointer to a struct");
@@ -477,6 +494,12 @@ impl<'a> Sema<'a> {
                 }
             }
             let hop = if op == B::And { BinOp::And } else { BinOp::Or };
+            // A constant left side decides (`false && x` never evaluates x,
+            // so dropping it keeps the short-circuit semantics) or drops out.
+            if let ExprKind::Const(hir::ConstValue::Bool(a)) = lv.kind {
+                let decided = if op == B::And { !a } else { a };
+                return if decided { lv } else { rv };
+            }
             return mk(ExprKind::Binary { op: hop, lhs: Box::new(lv), rhs: Box::new(rv) }, bt, span);
         }
         let hint = if matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge) { None } else { expected.filter(|t| self.tt.is_numeric(*t)) };
@@ -508,7 +531,14 @@ impl<'a> Sema<'a> {
                 self.err(format!("cannot compare {} with nil", self.tn(v.ty)), span);
                 return self.invalid(span);
             }
-            return mk(ExprKind::IsNil { value: Box::new(v), negated: op == B::Ne }, self.tt.bool_, span);
+            let negated = op == B::Ne;
+            // A compile-time attribute value is never nil; `nil` always is.
+            match v.kind {
+                ExprKind::AttrConst { .. } => return mk(ExprKind::Const(hir::ConstValue::Bool(negated)), self.tt.bool_, span),
+                ExprKind::Nil => return mk(ExprKind::Const(hir::ConstValue::Bool(!negated)), self.tt.bool_, span),
+                _ => {}
+            }
+            return mk(ExprKind::IsNil { value: Box::new(v), negated }, self.tt.bool_, span);
         }
         if self.binary_overloaded(op, lv.ty, None) && !matches!(self.tt.get(lv.ty), Type::Param(_)) {
             return self.op_binary(op, lv, opover::OpArg::Hir(rv), span);
@@ -517,7 +547,23 @@ impl<'a> Sema<'a> {
             self.err("division by zero", rv.span);
         }
         match self.binop_for(op, lv.ty, rv.ty, span) {
-            Some((hop, ty)) => mk(ExprKind::Binary { op: hop, lhs: Box::new(lv), rhs: Box::new(rv) }, ty, span),
+            Some((hop, ty)) => {
+                // Comparisons of two constants (also those that compile-time
+                // reflection folded, `tag.name != ""`) are constants.
+                if let (ExprKind::Const(a), ExprKind::Const(b)) = (&lv.kind, &rv.kind) {
+                    let eq = match (hop, a, b) {
+                        (BinOp::StrEq | BinOp::StrNe, hir::ConstValue::Str(a), hir::ConstValue::Str(b)) => Some(a == b),
+                        (BinOp::Eq | BinOp::Ne, hir::ConstValue::Int(a), hir::ConstValue::Int(b)) => Some(a == b),
+                        (BinOp::Eq | BinOp::Ne, hir::ConstValue::Bool(a), hir::ConstValue::Bool(b)) => Some(a == b),
+                        _ => None,
+                    };
+                    if let Some(eq) = eq {
+                        let negated = matches!(hop, BinOp::StrNe | BinOp::Ne);
+                        return mk(ExprKind::Const(hir::ConstValue::Bool(eq != negated)), ty, span);
+                    }
+                }
+                mk(ExprKind::Binary { op: hop, lhs: Box::new(lv), rhs: Box::new(rv) }, ty, span)
+            }
             None => self.invalid(span),
         }
     }

@@ -31,6 +31,13 @@
 //!   dispatched by a loop counter (`continue` / `break` keep their meaning).
 //!   In the abstract check of a generic body (`T` a type parameter) the body
 //!   is checked once and `f.Get(v)` has no type (no diagnostics follow).
+//!   In an unrolled copy `f.Name`, `f.Index`, `f.Exported`, `f.Embedded`
+//!   are constants and `f.Attribute<A>()` is `nil` or a pointer to the
+//!   attribute's immortal value ([`ExprKind::AttrConst`]); `tag.name` of
+//!   such a pointer is the argument's constant (or the field default),
+//!   `tag != nil` a constant, and `==`/`!=` of two constants, `&&`/`||`
+//!   with a constant left side fold too (`expr::make_binary`). A copy
+//!   whose every use of `f` folded binds `f` to nil (no table lookup).
 //! * A *static if*: an `if` whose condition is a compile-time type test
 //!   (`reflect.TypeOf<T>().Kind == reflect.Kind.Struct`, optionally through
 //!   `.Elem` / `.Key`, or `reflect.TypeOf<A>() == reflect.TypeOf<B>()`,
@@ -115,6 +122,10 @@ pub(crate) struct ReflState {
     /// (function-context depth, local, struct type, field index or `None`
     /// in an abstract check).
     ct_fields: Vec<(usize, LocalId, TypeId, Option<u32>)>,
+    /// Per compile-time field variable (depth, local): references that were
+    /// not folded away (`f.Type`, passing `f` on). A variable without any
+    /// is bound to nil instead of the `FieldInfo`.
+    ct_uses: HashMap<(usize, LocalId), u32>,
     /// Static types named by `typeof`.
     full: Vec<TypeId>,
     /// Set while resolving an attribute name (builtin attribute names must
@@ -459,6 +470,7 @@ impl<'a> Sema<'a> {
             let ct = self.refl.ct_fields.iter().rev().find(|c| c.0 == depth && c.1 == l).copied();
             if let (Some((_, _, sty, idx)), "Get", None) = (ct, name.name.as_str(), targs) {
                 self.fcx().used[l.0 as usize] = true;
+                self.ct_field_use(l, -1);
                 if args.len() != 1 {
                     self.err(format!("f.Get takes one argument (the struct value), got {}", args.len()), span);
                     self.check_args_loose(args);
@@ -478,6 +490,23 @@ impl<'a> Sema<'a> {
                 let fty = self.structs[d.0 as usize].fields[k as usize].ty;
                 return Ok(mk(ExprKind::Field { base: Box::new(v), index: k }, fty, span));
             }
+            // `f.Attribute<A>()` of a compile-time field: the attribute is
+            // known, so the result is a constant (`nil` or a pointer to the
+            // immortal attribute value), and `tag != nil` / `tag.name`
+            // fold at compile time.
+            if let (Some((_, _, sty, Some(k))), "Attribute", Some([a])) = (ct, name.name.as_str(), targs) {
+                if args.is_empty() {
+                    let aty = self.resolve_type(a);
+                    if self.tt.is_invalid(aty) {
+                        return Ok(self.invalid(span));
+                    }
+                    if let Type::Struct(ad) = *self.tt.get(aty) {
+                        self.fcx().used[l.0 as usize] = true;
+                        self.ct_field_use(l, -1);
+                        return Ok(self.ct_attribute(sty, k, ad.0, aty, span));
+                    }
+                }
+            }
         }
         let Some(&mi) = self.refl.structs.get("MethodInfo") else { return Err(base) };
         if name.name != "Call" || targs.is_some() || self.struct_of(base.ty) != Some(mi) {
@@ -496,6 +525,84 @@ impl<'a> Sema<'a> {
         let list = mk(ExprKind::SliceLit(rest), sl, span);
         let ret = self.tt.fallible(any);
         Ok(mk(ExprKind::Call { callee: hir::Callee::Func(invoke), args: vec![recv, first, list] }, ret, span))
+    }
+
+    /// Adds `delta` to the unfolded-use count of `l` if it is a compile-time
+    /// field variable of the current function (see `ReflState::ct_uses`).
+    pub(crate) fn ct_field_use(&mut self, l: LocalId, delta: i32) {
+        if self.refl.ct_fields.is_empty() {
+            return;
+        }
+        let depth = self.fns.len();
+        if self.refl.ct_fields.iter().any(|c| c.0 == depth && c.1 == l) {
+            let n = self.refl.ct_uses.entry((depth, l)).or_insert(0);
+            *n = (*n as i64 + delta as i64).max(0) as u32;
+        }
+    }
+
+    /// The constant value of `f.Attribute<A>()` for field `k` of struct
+    /// `sty`, `A` being `structs[asid]` (type `aty`): a pointer to the first
+    /// attribute of that type on the field, or `nil`.
+    fn ct_attribute(&mut self, sty: TypeId, k: u32, asid: u32, aty: TypeId, span: Span) -> hir::Expr {
+        let ptr = self.tt.pointer(aty);
+        let Type::Struct(sd) = *self.tt.get(sty) else { return mk(ExprKind::Nil, ptr, span) };
+        let attrs = self.structs[sd.0 as usize].fields.get(k as usize).map(|f| f.attrs.clone()).unwrap_or_default();
+        for a in attrs {
+            let sid = match &a.kind {
+                hir::AttrKind::User(s) => Some(*s),
+                // Builtin value structs are registered under the attribute
+                // name (`log` for `logAttr`).
+                hir::AttrKind::Builtin(n) => self.refl.structs.get(n.as_str()).copied(),
+            };
+            if sid == Some(asid) {
+                return mk(ExprKind::AttrConst { attr: Box::new(a), sid: asid }, ptr, span);
+            }
+        }
+        mk(ExprKind::Nil, ptr, span)
+    }
+
+    /// `tag.<field>` of a compile-time attribute value (`ExprKind::AttrConst`
+    /// of struct `sid`): the argument given in the attribute, else the
+    /// field's default, else the zero value; `None` when the field is not a
+    /// plain scalar or string (then the value object is read at run time).
+    pub(crate) fn attr_const_field(&mut self, attr: &hir::Attr, sid: u32, field: &str, span: Span) -> Option<hir::Expr> {
+        let f = self.structs.get(sid as usize)?.fields.iter().find(|f| f.name == field)?;
+        let (fty, default) = (f.ty, f.default.clone());
+        let v = attr.args.iter().find(|(n, _)| n == field).map(|(_, v)| v.clone()).or(default);
+        let v = match (v, self.tt.get(fty)) {
+            (Some(v @ (hir::ConstValue::Int(_) | hir::ConstValue::Float(_) | hir::ConstValue::Bool(_) | hir::ConstValue::Str(_) | hir::ConstValue::Char(_))), _) => v,
+            (None, Type::String) => hir::ConstValue::Str(String::new()),
+            (None, Type::Bool) => hir::ConstValue::Bool(false),
+            (None, Type::Int(_)) => hir::ConstValue::Int(0),
+            (None, Type::Float64 | Type::Float32) => hir::ConstValue::Float(0.0),
+            _ => return None,
+        };
+        Some(mk(ExprKind::Const(v), fty, span))
+    }
+
+    /// `f.Name`, `f.Index`, `f.Exported`, `f.Embedded` of a compile-time
+    /// field `l` (an unrolled `reflect.Fields<T>()` variable): constants.
+    /// `None` for other fields or variables.
+    pub(crate) fn ct_field_const(&mut self, l: LocalId, name: &ast::Ident) -> Option<hir::Expr> {
+        if self.refl.loaded.first() != Some(&true) {
+            return None;
+        }
+        let depth = self.fns.len();
+        let (_, _, sty, Some(k)) = self.refl.ct_fields.iter().rev().find(|c| c.0 == depth && c.1 == l).copied()? else { return None };
+        let Type::Struct(sd) = *self.tt.get(sty) else { return None };
+        let field = self.structs[sd.0 as usize].fields.get(k as usize)?;
+        let (fname, exported, embedded) = (field.name.clone(), field.exported, field.embedded);
+        let span = name.span;
+        let e = match name.name.as_str() {
+            "Name" => mk(ExprKind::Const(hir::ConstValue::Str(fname)), self.tt.string, span),
+            "Index" => mk(ExprKind::Const(hir::ConstValue::Int(k as i128)), self.tt.int, span),
+            "Exported" => mk(ExprKind::Const(hir::ConstValue::Bool(exported)), self.tt.bool_, span),
+            "Embedded" => mk(ExprKind::Const(hir::ConstValue::Bool(embedded)), self.tt.bool_, span),
+            _ => return None,
+        };
+        self.fcx().used[l.0 as usize] = true;
+        self.ct_field_use(l, -1);
+        Some(e)
     }
 
     // -- compile-time reflection ------------------------------------------------
@@ -725,18 +832,26 @@ impl<'a> Sema<'a> {
             let f = self.declare_local(&var.name, fi_ptr, LocalKind::LoopVar, var.span);
             let depth = self.fns.len();
             self.refl.ct_fields.push((depth, f, t, Some(k as u32)));
+            self.refl.ct_uses.remove(&(depth, f));
             let b = self.block(body);
             self.refl.ct_fields.pop();
+            let dynamic_uses = self.refl.ct_uses.remove(&(depth, f)).unwrap_or(0);
             self.pop_scope();
-            // f = TypeOf<T>().Fields[k]
-            let ti = self.type_of_call(t, var.span);
-            let ti_struct = self.refl_struct_ty("TypeInfo");
-            let fields_idx = self.refl.structs.get("TypeInfo").map(|s| self.structs[*s as usize].fields.iter().position(|x| x.name == "Fields").unwrap_or(0)).unwrap_or(0) as u32;
-            let sl = self.tt.slice(fi_ptr);
-            let deref = mk(ExprKind::Deref(Box::new(ti)), ti_struct, var.span);
-            let fields = mk(ExprKind::Field { base: Box::new(deref), index: fields_idx }, sl, var.span);
-            let kexpr = mk(ExprKind::Const(hir::ConstValue::Int(k as i128)), int, var.span);
-            let init = mk(ExprKind::Index { base: Box::new(fields), index: Box::new(kexpr) }, fi_ptr, var.span);
+            let init = if dynamic_uses == 0 {
+                // Every use of f was folded (f.Get, f.Name, f.Attribute<A>()):
+                // no table lookup, nothing to retain.
+                mk(ExprKind::Nil, fi_ptr, var.span)
+            } else {
+                // f = TypeOf<T>().Fields[k]
+                let ti = self.type_of_call(t, var.span);
+                let ti_struct = self.refl_struct_ty("TypeInfo");
+                let fields_idx = self.refl.structs.get("TypeInfo").map(|s| self.structs[*s as usize].fields.iter().position(|x| x.name == "Fields").unwrap_or(0)).unwrap_or(0) as u32;
+                let sl = self.tt.slice(fi_ptr);
+                let deref = mk(ExprKind::Deref(Box::new(ti)), ti_struct, var.span);
+                let fields = mk(ExprKind::Field { base: Box::new(deref), index: fields_idx }, sl, var.span);
+                let kexpr = mk(ExprKind::Const(hir::ConstValue::Int(k as i128)), int, var.span);
+                mk(ExprKind::Index { base: Box::new(fields), index: Box::new(kexpr) }, fi_ptr, var.span)
+            };
             let stmts = vec![Stmt { kind: StmtKind::Let { local: f, init: Some(init) }, span: var.span }, Stmt { kind: StmtKind::Block(b), span: body.span }];
             copies.push(hir::Block { stmts, span: body.span });
         }

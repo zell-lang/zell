@@ -144,6 +144,25 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.refl().pointers.iter().find(|(x, _)| *x == t).map(|(_, p)| *p)
     }
 
+    /// The immortal constant value object of attribute `a` (a struct
+    /// `structs[sid]` with the supplied arguments and the field defaults
+    /// filled in); returns its payload, the `*A`. Also the value of
+    /// [`ExprKind::AttrConst`].
+    pub(crate) fn attr_object(&mut self, a: &Attr, sid: u32) -> PointerValue<'ctx> {
+        let fields: Vec<(String, TypeId, Option<ConstValue>)> = self.prog.structs[sid as usize].fields.iter().map(|f| (f.name.clone(), f.ty, f.default.clone())).collect();
+        let st = self.struct_llty(sid);
+        let mut vals = Vec::new();
+        for (name, ty, default) in fields {
+            let v = a.args.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).or(default);
+            vals.push(match v {
+                Some(v) => self.const_value(ty, &v),
+                None => self.llty(ty).const_zero(),
+            });
+        }
+        let value = st.const_named_struct(&vals);
+        self.static_object(value.into(), "rattr")
+    }
+
     /// The `[]any` of attribute values of a declaration.
     fn attr_list(&mut self, attrs: &[Attr]) -> BasicValueEnum<'ctx> {
         let mut elems = Vec::new();
@@ -155,18 +174,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     None => continue,
                 },
             };
-            let fields: Vec<(String, TypeId, Option<ConstValue>)> = self.prog.structs[sid as usize].fields.iter().map(|f| (f.name.clone(), f.ty, f.default.clone())).collect();
-            let st = self.struct_llty(sid);
-            let mut vals = Vec::new();
-            for (name, ty, default) in fields {
-                let v = a.args.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).or(default);
-                vals.push(match v {
-                    Some(v) => self.const_value(ty, &v),
-                    None => self.llty(ty).const_zero(),
-                });
-            }
-            let value = st.const_named_struct(&vals);
-            let obj = self.static_object(value.into(), "rattr");
+            let obj = self.attr_object(a, sid);
             let Some(pt) = self.refl().pointers.iter().find(|(t, _)| matches!(self.ty(*t), Type::Struct(d) if d.0 == sid)).map(|(_, p)| *p) else { continue };
             let box_ = self.static_object(obj.into(), "rattrbox");
             let ti = self.type_info(pt);

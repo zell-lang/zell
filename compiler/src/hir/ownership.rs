@@ -153,7 +153,7 @@ pub fn interior_pin<'e>(p: &Program, fid: FuncId, f: &Function, facts: &ParamFac
 /// itself ([`Pin::Owned`]).
 pub fn pointer_pin<'e>(fid: FuncId, f: &Function, facts: &ParamFacts, e: &'e Expr, interior: &dyn Fn(LocalId) -> bool) -> Option<Pin<'e>> {
     match &e.kind {
-        ExprKind::Nil | ExprKind::Zero => Some(Pin::None),
+        ExprKind::Nil | ExprKind::Zero | ExprKind::AttrConst { .. } => Some(Pin::None),
         ExprKind::Local(l) if interior(*l) => Some(Pin::Interior(*l)),
         ExprKind::Local(l) => match f.params.iter().position(|x| x == l) {
             Some(k) if !facts.escapes(fid, k) && !f.locals[l.0 as usize].address_taken && !f.locals[l.0 as usize].captured => Some(Pin::None),
@@ -369,7 +369,7 @@ impl Walker<'_, '_> {
         use Pos::*;
         (self.f)(e, pos);
         match &e.kind {
-            ExprKind::Const(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::Local(_) | ExprKind::Upvalue(_) | ExprKind::Global(_) | ExprKind::FuncRef(_) | ExprKind::Closure { .. } => {}
+            ExprKind::Const(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::AttrConst { .. } | ExprKind::Local(_) | ExprKind::Upvalue(_) | ExprKind::Global(_) | ExprKind::FuncRef(_) | ExprKind::Closure { .. } => {}
             ExprKind::Field { base, .. } => self.expr(base, Read),
             ExprKind::Deref(x) => self.expr(x, Read),
             ExprKind::AddrOf(x) => match &x.kind {

@@ -901,7 +901,7 @@ impl<'a> Sema<'a> {
     /// Stores a deferred argument in a temp; returns its upvalue reference
     /// for the thunk body (constants stay inline).
     fn spill(&mut self, e: hir::Expr, caps: &mut Vec<(LocalId, TypeId)>, out: &mut Vec<Stmt>) -> hir::Expr {
-        if matches!(e.kind, ExprKind::Const(_) | ExprKind::FuncRef(_) | ExprKind::Nil | ExprKind::Zero) {
+        if matches!(e.kind, ExprKind::Const(_) | ExprKind::FuncRef(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::AttrConst { .. }) {
             return e;
         }
         let (ty, span) = (e.ty, e.span);

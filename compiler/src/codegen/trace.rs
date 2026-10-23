@@ -53,9 +53,29 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// already has one); returns the owned (possibly copied) error.
     pub(crate) fn trace_created(&mut self, err: BasicValueEnum<'ctx>, offset: u32) -> BasicValueEnum<'ctx> {
         match self.error_site(offset) {
-            Some(site) => self.call_rt_v("zell_error_created", &[err.into(), site.into()]),
+            Some(site) => self.when_error(err, |cg| cg.call_rt_v("zell_error_created", &[err.into(), site.into()])),
             None => err,
         }
+    }
+
+    /// `f(err)` when `err` is not NULL, else NULL: the trace calls run only
+    /// on the error path, so a `?` that succeeds costs a null test.
+    fn when_error(&mut self, err: BasicValueEnum<'ctx>, f: impl FnOnce(&mut Self) -> BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        let e = err.into_pointer_value();
+        let nn = self.b.build_is_not_null(e, "").unwrap();
+        let from = self.b.get_insert_block().unwrap();
+        let on_err = self.block("err.trace");
+        let done = self.block("err.done");
+        self.b.build_conditional_branch(nn, on_err, done).unwrap();
+        self.b.position_at_end(on_err);
+        let r = f(self);
+        let on_err_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).unwrap();
+        self.b.position_at_end(done);
+        let null = self.ptr_ty().const_null();
+        let phi = self.b.build_phi(self.ptr_ty(), "err").unwrap();
+        phi.add_incoming(&[(&null, from), (&r, on_err_end)]);
+        phi.as_basic_value()
     }
 
     /// Records a `returned via` frame at `offset` with optional context
@@ -65,7 +85,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         match self.error_site(offset) {
             Some(site) => {
                 let c = ctx.unwrap_or_else(|| self.ptr_ty().const_null().into());
-                self.call_rt_v("zell_error_returned", &[err.into(), site.into(), c.into()])
+                self.when_error(err, |cg| cg.call_rt_v("zell_error_returned", &[err.into(), site.into(), c.into()]))
             }
             None => match ctx {
                 Some(c) => {
