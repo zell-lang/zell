@@ -104,13 +104,14 @@ every phase but insert. Left: per-shape SQL text + arg-plan cache,
 plain `database.sql` loop measured ~2 ms per query in a scratch program
 (scratchpad floor.zl) — verify, may be a driver/scheduler issue.
 
-### 8. Crypto, second pass (45-60 min each, `runtime/src/crypto/`)
-Ed25519 sign 8.2x (public key re-derived per signature, no fixed-base
-table), P-256 6.5x/5.3x (fixed/variable-base tables, 64-bit limbs), ChaCha20
-7.8x (AVX2, 8 blocks), SHA-512 1.8x, Argon2id 3.9x (AVX2 BLAKE2b). Same
-dispatch scheme as SHA-NI/VAES (`target(...)` functions, cpuid once,
-`ZELL_NO_*` overrides, portable fallback unchanged, vectors on every path).
-TLS 1.3 handshakes (2.2x) follow from the first two.
+### 8. Crypto, second pass — DONE 2026-10-23 (45-60 min each, `runtime/src/crypto/`)
+Ed25519: precomputed constants, ref10-style constant-time base comb,
+Straus/Shamir verify, 3-round scalar reduction: sign 10.4x -> **1.29x Go**,
+verify 3.7x -> **1.18x**. P-256: constant Montgomery context, fixed-base
+comb for G, RCB exception-free doubling: sign 6.7x -> **1.98x**, verify
+5.3x -> 3.3x (generic 4x4 mont_mul ~30 ns is the bottleneck; next: P-256
+specialised reduction, wNAF for public data, addition-chain inversion).
+TLS 1.3 handshakes 2.2x -> **1.56x**. ChaCha20-Poly1305 (7.8x) not started.
 
 ### 9. Scheduler leftovers — DONE 2026-10-23 (30-45 min, `runtime/src/task.c`)
 Spare workers bounded at max(16, 4N) plus one per 10 ms of complete stall
@@ -122,12 +123,14 @@ calls; reaching <= 6x needs no task per level (or a task freelist / smaller
 task), measured with ZELL_WORKERS=1 (at 16 workers only ~26% of frames
 really suspend).
 
-### 10. I/O and strings (45 min, `std/io`, `std/strings`, `runtime/src/std_strings.c`)
-Buffered read 1 KB 3.6x, line scan 2.6x, buffered write 2.0x,
-`strings.Builder` 5.4x (keeps every piece), string sort 5x, linked list
-6.8x (cycle-collector candidate tracking — measure with `ZELL_CYCLES=off`
-first). Copy straight from the buffer into the caller's slice, `memchr` line
-scanning, one growing buffer in `Builder`.
+### 10. I/O and strings — DONE 2026-10-23 (45 min, `std/io`, `std/strings`, `runtime/src/std_strings.c`)
+memmove/memchr helpers: buffered write 1 KB **0.98x**, buffered read 1 KB
+**1.01x**, line scan 1.17x Go. `strings.Builder` one growing buffer: 5.1x
+-> 2.3x (the rest is the benchmark's `fmt.Format` itoa: string + args
+slice per call — a cheaper fmt/strconv path is next). `Sort<T: Ordered>`
+without a comparison closure + `[]string` introsort in C: 3.6x -> 1.28x.
+Linked list 6.8x: ~45% is cycle-candidate tracking (ZELL_CYCLES=off 436 vs
+795 ms), the rest refcount + allocation; nothing avoidable in the list.
 
 ### Later, needs a spec decision first
 `select` over channels/timers (DESIGN.md "Асинхронность" + grammar);
@@ -171,3 +174,42 @@ order of expected gain, each one agent run (`runtime/src/std_json.c`,
    on parse for ~500 lines plus a dispatcher.
 Also still open from wave 2: `Value` lookups 1.5x Go (1.07x with
 `ZELL_LTO=1`), per-`Value` extern calls (`math.IsNaN`/`Round`).
+
+
+## Bugs fixed on the way (2026-10-23, all merged)
+
+- **Deep release stack overflow**: freeing a 2M-node list/tree crashed in
+  `zell_release -> drop -> zell_release` recursion (both the refcount path
+  and the collector's `dead()`). Finalizers past 64 nested releases go to a
+  thread-local worklist (`zell__dead_enter/leave`, ABI.md 3.2, DESIGN.md
+  "Память"); Drop order unchanged; 2M-node list frees in 30 ms; alloc_heavy
+  +8% (per-object depth accounting), spec test `memory3/deep_release`.
+- **Collector pacing**: a collection now runs as soon as the recorded roots
+  reach the threshold (the tripping thread publishes its buffer) and
+  parking workers publish theirs — 15 collections per 10k requests instead
+  of 4-5, steady-state live objects ~2x threshold on 1/4/16 workers.
+- **Leaks in literals** (compiler, `codegen/expr.rs`): temporaries created
+  inside struct/slice/tuple/enum literal elements were dropped from the
+  cleanup stack — `time.UTC()` inside `Message{...}`, `-time.Hours(26)`
+  inside `[...]`. Spec test `memory/literal_temps`.
+- **Await thundering herd** (see item 9) and the **timers** regression (item 2).
+
+## Comparison point: .NET (2026-10-23)
+
+`benchmarks/json_codec/dotnet` (System.Text.Json source generators +
+JsonDocument, .NET 10.0.108), same 100 MB document, identical checksums;
+`benchmarks/json_codec/compare.sh` runs all three. One run, ms:
+
+| phase | Zell | Go | .NET |
+|---|---:|---:|---:|
+| typed parse | 356 | 1 067 | 954 |
+| typed format | 174 | 262 | 460 |
+| Value parse | 168 | 828 | 424 |
+| Value lookups | 61 | 50 | 266 |
+| Value format | 153 | 882 | 1 016 |
+| 1M small messages (msg/s) | 1.47M | 0.46M | 1.01M |
+
+So the "reach System.Text.Json" plan above is no longer a catch-up: Zell is
+2.5-6x ahead on the document and 1.5x on small messages. Its steps remain
+valid as further gains. Still to add for a fuller picture: an ASP.NET
+minimal-API side in `web_api` and Kestrel in `http_hello`.
