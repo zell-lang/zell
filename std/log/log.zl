@@ -1616,12 +1616,21 @@ func levelColor(l Level) string {
     return "\u{1b}[97;41m"
 }
 
+// {Exception}: the error's message, then where it was created (one
+// line); the whole return trace only for Debug and Verbose events (the
+// structured ErrorTrace property always has it).
 func exceptionText(e *Event) string {
     if e.Error == nil {
         return ""
     }
     var s = e.Error.Message() + "\n"
     var tr = errors.Trace(e.Error)
+    if tr != "" && int(e.Level) > int(Level.Debug) {
+        var nl = strings.Index(tr, "\n")
+        if nl >= 0 {
+            tr = tr[..nl]
+        }
+    }
     if tr != "" {
         s += tr
         if !strings.HasSuffix(tr, "\n") {

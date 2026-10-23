@@ -3,6 +3,7 @@
 #include "rt_internal.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -360,10 +361,23 @@ static void tb_pad(tbuf *b, size_t n) {
     while (n--) tb_put(b, " ", 1);
 }
 
-static int loc_len(const zell_error_site *s) {
+/* platform/platform.h (not included: its names clash with this file's). */
+char *zell__plat_getcwd(int *err);
+
+/* The file of a site as printed: relative to the working directory
+ * `cwd` when it is under it (absolute paths of dependencies, builds run
+ * elsewhere), else as compiled. */
+static const char *site_file(const zell_error_site *s, const char *cwd) {
+    const char *f = s->file ? s->file : "?";
+    size_t n = cwd ? strlen(cwd) : 0;
+    if (n > 1 && strncmp(f, cwd, n) == 0 && (f[n] == '/' || f[n] == '\\') && f[n + 1]) return f + n + 1;
+    return f;
+}
+
+static int loc_len(const zell_error_site *s, const char *cwd) {
     char buf[32];
     int n = snprintf(buf, sizeof buf, ":%lld", (long long)s->line);
-    return (int)strlen(s->file ? s->file : "?") + n;
+    return (int)strlen(site_file(s, cwd)) + n;
 }
 
 zell_string *zell_error_trace(const zell_error *err) {
@@ -371,11 +385,13 @@ zell_string *zell_error_trace(const zell_error *err) {
     zell_error *tmp;
     err = trace_view(err, &tmp);
     int64_t n = err->nframes + (err->created ? 1 : 0);
+    int cwd_err = 0;
+    char *cwd = n > 0 ? zell__plat_getcwd(&cwd_err) : NULL;
     size_t maxloc = 0, maxfn = 0;
     for (int64_t i = 0; i < n; i++) {
         const zell_error_site *s = err->created ? (i == 0 ? err->created : frame_at(err, i - 1)->site)
                                                  : frame_at(err, i)->site;
-        size_t l = (size_t)loc_len(s), f = strlen(s->func ? s->func : "");
+        size_t l = (size_t)loc_len(s, cwd), f = strlen(s->func ? s->func : "");
         if (l > maxloc) maxloc = l;
         if (f > maxfn) maxfn = f;
     }
@@ -387,7 +403,7 @@ zell_string *zell_error_trace(const zell_error *err) {
         if (i > 0) tb_put(&b, "\n", 1);
         tb_put(&b, created ? "  created at   " : "  returned via ", 15);
         char loc[4096];
-        int ll = snprintf(loc, sizeof loc, "%s:%lld", s->file ? s->file : "?", (long long)s->line);
+        int ll = snprintf(loc, sizeof loc, "%s:%lld", site_file(s, cwd), (long long)s->line);
         if (ll < 0) ll = 0;
         if ((size_t)ll >= sizeof loc) ll = (int)sizeof loc - 1;
         tb_put(&b, loc, (size_t)ll);
@@ -404,6 +420,7 @@ zell_string *zell_error_trace(const zell_error *err) {
     }
     zell_string *r = zell_string_new(b.p ? b.p : "", (int64_t)b.len);
     zell_free(b.p);
+    free(cwd);
     zell_release(tmp);
     return r;
 }

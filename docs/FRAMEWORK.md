@@ -677,6 +677,9 @@ using (log.Context.Push("RequestId", reqId)) { ... }   // или через asyn
   `Verbose`, `Debug`, `Information`/`Info`, `Warning`/`Warn`, `Error`,
   `Fatal`, каждый принимает ошибку первым аргументом (`Error(err, ...)`
   добавляет свойства `ErrorMessage` и `ErrorTrace` = `errors.Trace(err)`).
+  Текстовые синки в `{Exception}` пишут сообщение и одну строку — где
+  ошибка создана; всю трассу возврата — только у событий `Debug` и
+  `Verbose` (свойство `ErrorTrace` в JSON её хранит всегда).
 - Конфигурация: `log.New()`, `MinimumLevel`, `MinimumLevelOverride(prefix,
   lvl)` (по категории, самый длинный префикс), `MinimumLevelControlledBy(
   log.NewLevelSwitch(lvl))` (смена уровня на ходу), `Clock(f)` (тестовые
