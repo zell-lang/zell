@@ -234,13 +234,20 @@ timings.
 10. **No `make([]T, n)`.** Buffers are built by appending in a loop
     (`slices.Of(byte(0), n)`, `io.makeBuf`), which costs one append per
     element. That is an awkward idiom for I/O buffers. A zeroed-allocation builtin or `slices.Make<T>(n)` would
-    help.
-11. **`strings.Builder` keeps every piece.** It stores a `[]string` of
-    parts and joins them in `String()`. Building 100 MB from 10-byte
-    pieces keeps about 30M parts alive until the join (10M of them are
-    allocated `itoa` strings), while Go
-    appends into one growing byte buffer. The memory peak should show up
-    as RSS in `bench-perf.sh`.
+    help. (2026-10-23: the stdlib has an internal `strings.rtMakeBytes(n)`
+    for its own buffers; the public builtin is still open.)
+11. **Fixed: `strings.Builder` kept every piece** (2026-10-23). It stored a
+    `[]string` of parts and joined them in `String()`; it now appends into
+    one `[]byte` whose capacity doubles and builds the string once.
+    Builder 100 MB: 1471 -> 645 ms (Go 286); the rest is the benchmark's
+    `itoa` through `fmt.Format`. In the same pass the `io` buffers moved
+    bytes with `memmove`/`memchr` instead of Zell loops (buffered write
+    1 KB 856 -> 424 ms, Go 433; buffered read 1 KB 753 -> 218 ms, Go 215;
+    scan lines 935 -> 610 ms, Go 521), and `slices.Sort<string>` became an
+    introsort in C over the string pointers with no refcount traffic
+    (sort 2M strings 1363 -> 480 ms, Go 376; a merge sort in C was 2.6 s:
+    its per-step branch waits for a cache miss on a scattered string
+    object, a partition overlaps the misses against one cached pivot).
 12. **`collections.OrderedMap` is a sorted array.** `Set` inserts in O(n)
     by shifting element by element (`std/collections/collections2.zl:650`).
     It is not a tree or B-tree, so 1M random inserts would be quadratic.
