@@ -76,6 +76,13 @@ What is comparable, and what is not:
 
 ## Results (2026-10-22, quiet machine, best of 5 alternating, Go = 1.00)
 
+> **Superseded for `json_codec` and `crypto`** by "Performance wave 2" in
+> [README.md](README.md) (2026-10-23, 16-core machine): `encoding.json` was
+> rewritten in the C runtime (typed parse of 100 MB 360 ms vs Go 1 070 ms;
+> the quadratic tokenizer and open items 1-2 below are gone) and SHA-256 /
+> AES-GCM got SHA-NI and VAES paths (parity with Go / 0.93x). The table
+> below is kept as the 4 vCPU baseline.
+
 `RUNS=5 DETAIL=1 ./scripts/bench-perf.sh <bench>`: wall, CPU (user+sys)
 and peak RSS of the whole process are from the best of 5 runs (by wall
 time, Zell and Go alternating); the phase times are that best run's own

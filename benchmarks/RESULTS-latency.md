@@ -151,6 +151,12 @@ come from a quiet run.
 
 ## defer_errors_iface
 
+> **Update 2026-10-23** ("Performance wave 2" in [README.md](README.md),
+> 16-core machine): with the inline refcount fast path and borrowed struct
+> temporaries, `iface_call` is 1.39x Go, `closure_call` 1.27x, `iface_sum`
+> 1.24x (open item 2 largely closed); `defer_call` 6.8x and `error_sentinel`
+> 5.8x remain (open items 1 and 3).
+
 Each mechanism gets its own row, and each row is a loop whose result feeds
 a checksum (µs, best of `RUNS`). `bench.sh` builds the Zell program twice:
 with error return traces (the default) and with `--no-error-trace`.

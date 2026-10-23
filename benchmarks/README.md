@@ -827,3 +827,54 @@ from a 16-core desktop, not the 4 vCPU VM of the earlier table).
 Latency, cores scaling and language-mechanism benchmarks: see [RESULTS-latency.md](RESULTS-latency.md).
 Stdlib benchmarks (`json_codec`, `encodings`, `crypto`, `file_io`, `sort_collect`): see [RESULTS-stdlib.md](RESULTS-stdlib.md).
 Framework benchmarks (web_api, orm_sqlite, logging, websocket_echo, startup): [RESULTS-framework.md](RESULTS-framework.md).
+
+## Performance wave 2 (2026-10-23, 16-core x86-64 Fedora 42, AMD Ryzen 7 8845HS, clang/LLVM 18, go 1.24.7, `--release`)
+
+Five changes landed on master the same day (`e64d51d..ff07086`): SHA-NI and
+pipelined/VAES AES-GCM in the crypto runtime, the synchronous fast path for
+async calls (section above), `encoding.json` parsing and writing in the C
+runtime (arena document, `Parse<T>` walking it directly), the scheduler
+rewrite (per-worker run queues, run-next slot, work stealing,
+`task.Channel`/`task.Mutex` in C), and the inline refcount fast path plus
+borrowed struct temporaries in the compiler. The numbers below are **one
+run per side** (`RUNS=1`, every benchmark under `timeout 120`; the whole
+re-measure took 64 s), so treat them as ±5%. "before" is the same machine
+on the morning's master (`e64d51d`), from the same scripts; the 4 vCPU
+tables above are not comparable in absolute time. Go = 1.00.
+
+| bench | phase | before | after | Zell / Go after |
+|---|---|---:|---:|---:|
+| crypto | SHA-256 1 GB | 373 MB/s | **2 507 MB/s** | 1.00 (was 6.7x) |
+| crypto | AES-256-GCM seal 1 GB | 2 013 MB/s | **7 483 MB/s** | 0.93 (was 3.5x) |
+| crypto | HKDF-SHA256 200k | 661k ops/s | **2 949k ops/s** | 0.43 (was 2.0x) |
+| crypto | TLS 1.3 handshakes | 967 ops/s | 1 080 ops/s | 2.2 (P-256/Ed25519-bound) |
+| crypto | SHA-512, ChaCha20-Poly1305, Ed25519, P-256, RSA, Argon2id | unchanged | unchanged | 1.8 / 7.8 / 8.2 (sign) / 6.5 (sign) / 1.6-2.5 / 3.9 |
+| crypto | whole program (s) | 20.3 | 17.1 | 2.76 |
+| json_codec (100 MB, `JSON_DOC_FILE`) | typed parse | not finishing (8 MB: 96.9 s) | **360 ms** (277 MB/s) | **0.34** |
+| json_codec | typed format | 4.8x (8 MB) | 169 ms | 0.64 |
+| json_codec | Value parse | 463x (8 MB) | 161 ms (619 MB/s) | **0.18** |
+| json_codec | Value lookups | 5.7x (8 MB) | 143 ms | 3.3 (extern call per `Get`/`Index`, see below) |
+| json_codec | Value format | 2.3x (8 MB) | 149 ms | 0.17 |
+| json_codec | 1M small messages | 0.37x Go throughput | 1 650k msg/s | **3.6x Go throughput** |
+| json_codec | whole program: wall, peak RSS | - | 2.20 s, 985 MB | 0.35 (Go 6.35 s, 1 347 MB) |
+| defer_errors_iface | iface_call / closure_call / iface_sum | 1.94 / 2.60 / 2.45 | - | **1.39 / 1.27 / 1.24** |
+| defer_errors_iface | defer_call | 8.45 | - | 6.79 |
+| defer_errors_iface | error_sentinel (with traces) | 5.40 | - | 5.84 (trace copy, untouched) |
+| defer_errors_iface | direct_call / generic_sum | 0.18 / 0.24 | - | 0.17 / 0.24 |
+| async suite | spawn_tasks (wall) | 1.39 (4 vCPU) | 1.86 s vs 1.49 s | 1.25 |
+| async suite | channel_pingpong (wall) | 30.4 (4 vCPU) | 0.86 s vs 0.49 s | **1.77** |
+| async suite | fanout_fanin (wall) | 4.38 (4 vCPU) | 0.89 s vs 0.39 s | 2.32 |
+| async suite | mutex_contention (wall) | 27.3 (4 vCPU) | 0.61 s vs 0.24 s | **2.60** |
+| async suite | timers (wall) | 1.39 (4 vCPU) | 89 ms vs 58 ms | 1.53 |
+| async suite | await_chain (wall) | 36.8 (4 vCPU) | 208 ms vs 19 ms | 10.9 (resume phase ~75 ns per frame) |
+| async suite | cancel_tree (wall) | 1.33 (4 vCPU) | 465 ms vs 498 ms | **0.93** |
+| async suite | async_io (wall) | 3.62 (4 vCPU) | 2.01 s vs 1.33 s | 1.51 |
+| async suite | select_many (wall) | 14.0 (4 vCPU) | 2.33 s vs 1.34 s | **1.73** |
+
+All checksums matched Go's. What remains, in order of size: `await_chain`'s
+resume phase (run-next dispatch and `task_complete` atomics), `defer` (two
+heap objects per call), sentinel errors with traces, Ed25519/P-256
+(fixed-base tables) and ChaCha20 (AVX2), `Value` lookups (one runtime call
+per `Get`/`Index`; LTO between program and runtime, or a cheaper key
+compare in `rtGet`, is the next step), `fanout_fanin`'s pool phase and
+`timers` lateness (timer wake-ups go through the global queue).
