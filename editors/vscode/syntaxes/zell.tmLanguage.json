@@ -49,6 +49,14 @@
     "declarations": {
       "patterns": [
         {
+          "comment": "type alias: `type` is contextual, a keyword only at line start before `Name =`",
+          "match": "^\\s*(type)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?==)",
+          "captures": {
+            "1": { "name": "storage.type.zell" },
+            "2": { "name": "entity.name.type.zell" }
+          }
+        },
+        {
           "match": "\\b(struct|interface|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "storage.type.zell" },
@@ -75,7 +83,17 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.zell", "match": "\\b(if|else|for|in|switch|case|default|return|break|continue|defer)\\b" },
+        {
+          "comment": "`in` is contextual: a keyword only inside a `for` header",
+          "begin": "\\b(for)\\b",
+          "beginCaptures": { "1": { "name": "keyword.control.zell" } },
+          "end": "(?=\\{)|$",
+          "patterns": [
+            { "name": "keyword.control.zell", "match": "\\bin\\b" },
+            { "include": "$self" }
+          ]
+        },
+        { "name": "keyword.control.zell", "match": "\\b(if|else|switch|case|default|return|break|continue|defer)\\b" },
         { "name": "keyword.control.error.zell", "match": "\\b(try|catch)\\b" },
         { "name": "keyword.control.async.zell", "match": "\\b(async|await)\\b" },
         { "name": "keyword.operator.new.zell", "match": "\\b(new)\\b" },
