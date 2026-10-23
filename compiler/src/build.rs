@@ -619,7 +619,7 @@ fn lower<'ctx>(program: &Program, ctx: &'ctx Context, name: &str, output: &Path,
         (true, true) => 1,
         (true, false) => 2,
     };
-    let module = match codegen::emit_with(program, ctx, name, codegen::Options { leak_check, no_error_trace: opts.no_error_trace, debug_info: opts.emits_debug_info(), optimized: opts.opt > 0, inline_rc: opts.opt >= 3 || (opts.opt > 0 && std::env::var_os("ZELL_INLINE_RC").is_some()), debug_agent: opts.debug_agent_on() }) {
+    let module = match codegen::emit_with(program, ctx, name, codegen::Options { leak_check, no_error_trace: opts.no_error_trace, debug_info: opts.emits_debug_info(), optimized: opts.opt > 0, inline_rc: std::env::var_os("ZELL_NO_INLINE_RC").is_none(), debug_agent: opts.debug_agent_on() }) {
         Ok(m) => m,
         Err(errs) => {
             for e in &errs {
@@ -793,7 +793,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
         set_sections(&part);
         let mut h = Sha256::new();
         h.update(compiler.as_bytes());
-        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple()).as_bytes());
+        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none()).as_bytes());
         h.update(format!("agent={}\0", opts.debug_agent_on()).as_bytes());
         h.update(part.print_to_string().to_bytes());
         let key = lock::hex(&h.finalize()[..8]);

@@ -327,8 +327,9 @@ scheduler's worker and timer threads start with the first task, not in
 `zell_runtime_init`, so a program that never starts a task stays
 single-threaded.
 
-**Inline fast paths (compiler-side, `codegen/rc.rs`).** At `-O3` (or with
-`ZELL_INLINE_RC=1`) compiled code does not call `zell_retain`/`zell_release`
+**Inline fast paths (compiler-side, `codegen/rc.rs`).** By default (at
+every `-O` level; a build with `ZELL_NO_INLINE_RC=1` emits the plain calls
+instead) compiled code does not call `zell_retain`/`zell_release`
 (or the `zell_ptr_*` variants) for the common cases: for a non-NULL object
 it loads the word (relaxed) and `zell_threaded`; if the latter is 0 it
 stores `word + 1` (retain, `word >= 0`) or `word - 1` (release,
@@ -337,9 +338,13 @@ biased count owned by this thread (`((uint64_t)word >> 47) & 0x16FFF ==
 zell_rc_owner`, a thread-local load), it stores the 16-bit B `+ 1` (retain,
 `B != 0xFFFF`) or `- 1` (release, `B >= 2`) at the object's address. Every
 other case calls the runtime function, which stays the reference
-behaviour. Not done at `-O2`:
-it grows large programs by up to a third and their optimisation time by
-half for a few percent on refcount-heavy loops (benchmarks/README.md).
+behaviour. The layout the inline code relies on is exactly the one above
+(`zell_rt.h`): the 64-bit word at the object's address, `B` in its low 16
+bits (little-endian: a 16-bit store at the object's address), the owner
+tag at bits 47.., `zell_threaded` and `zell_rc_owner` as declared in 3.2;
+a change to any of them is an ABI change for compiled code, not only for
+the runtime. The price is code size: it grows large programs by up to a
+third and their optimisation time by half (benchmarks/README.md).
 
 **Immortal objects** (`refcount == -1`, `ZELL_RC_IMMORTAL`) are never modified or
 freed. Use them for string literals and sentinel errors emitted as LLVM globals.

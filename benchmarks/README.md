@@ -95,9 +95,12 @@ What changed, by work item:
    single-threaded; until a second thread starts (`zell_threaded`, set by
    the platform's thread start), `zell_retain`/`zell_release` use plain
    stores instead of atomic RMW. The compiler can emit that fast path inline
-   (`codegen/rc.rs`), but only does so at `-O3` / `ZELL_INLINE_RC=1`: inline
-   it gave json_like 7% and struct_map 2%, and grew `http_server` by 30% and
-   its `--release` compile time by 70%.
+   (`codegen/rc.rs`, with the owner's half of a biased count too); this is
+   on by default since the biased fast path landed (`ZELL_NO_INLINE_RC=1`
+   at build time emits the calls): it gave json_like 7% and struct_map 2%,
+   iface_call/closure_call/error_sentinel in `defer_errors_iface` 5-25%,
+   and grew `http_server` by 30% and its `--release` compile
+   time by 70%.
 3. **Escape analysis** (`hir::ownership::stack_locals`, DESIGN.md
    "Память"): an address-taken local whose address is only read through or
    passed to non-escaping parameters (escape facts that also count runtime

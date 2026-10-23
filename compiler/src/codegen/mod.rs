@@ -99,7 +99,8 @@
 //! length word (NULL is 0). The error-trace calls of `?` run only when the
 //! error is not NULL (`trace::when_error`).
 //!
-//! **Reference counting fast paths.** With `Options::inline_rc` (`-O3`)
+//! **Reference counting fast paths.** With `Options::inline_rc` (the
+//! default; `ZELL_NO_INLINE_RC=1` at build time turns it off)
 //! `call_rt` routes `zell_retain`/`zell_release`/`zell_ptr_*` to internal
 //! `alwaysinline` helpers (`rc.rs`, `rc_inline_fn`) that update the count
 //! inline while the process is single-threaded, or the owner's 16-bit half
@@ -337,9 +338,11 @@ pub struct Options {
     /// The module will be optimised (`DW_AT_..._optimized` in the debug info).
     pub optimized: bool,
     /// Emit the reference-counting fast paths inline (`rc.rs`,
-    /// `rc_inline_fn`): `-O3`, or `ZELL_INLINE_RC=1` (they grow large
-    /// programs' code by up to a third and their optimisation time by half,
-    /// for a few percent on refcount-heavy loops; benchmarks/README.md).
+    /// `rc_inline_fn`; runtime/ABI.md 3.2). On at every `-O` level unless
+    /// the build runs with `ZELL_NO_INLINE_RC=1`, which emits the plain
+    /// runtime calls (the escape hatch; they grow large programs' code by
+    /// up to a third and their optimisation time by half, for 5-25% on
+    /// refcount-heavy loops; benchmarks/README.md).
     pub inline_rc: bool,
     /// Hooks and tables of the in-process debug agent (`--debug-agent`,
     /// [`debug_agent`], runtime/ABI.md §22).
