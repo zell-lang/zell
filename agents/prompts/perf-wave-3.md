@@ -213,3 +213,26 @@ So the "reach System.Text.Json" plan above is no longer a catch-up: Zell is
 2.5-6x ahead on the document and 1.5x on small messages. Its steps remain
 valid as further gains. Still to add for a fuller picture: an ASP.NET
 minimal-API side in `web_api` and Kestrel in `http_hello`.
+
+## WebSocket (`net.ws`) — 2026-10-23
+
+Profile (`benchmarks/websocket_echo/PROFILE.md`): framing is <0.5% of the
+time; the gap to gorilla is async machinery (16 objects, 14.5 coroutine
+frames, 5 lazy tasks per message) and syscalls (4.4/message: a speculative
+second recv, an EPOLLONESHOT re-arm per wait) plus the poller->worker
+hand-off (0.5 context switches per message vs 0.025 in Go).
+Fixes 1-3 landed (`c58bb1b`): `ws.recv` parses the frame from the read
+buffer with one await only on refill; `encodeFrame` fills one exact-size
+buffer; a short stream read waits for readiness instead of a failing recv;
+epoll registers each fd once edge-triggered (ABI.md 10.9 rewritten: on
+epoll a wait is valid only after EAGAIN or a short read; peer shutdown and
+errors stay permanently ready). CPU per message 19.6 -> **15.7 us** (Go
+11.1), syscalls 4.57 -> 2.48, objects 35 -> 21 and frames 29 -> 15 per
+round trip; Go->Zell server 448k -> 513k msg/s, Zell client->Go 458k ->
+525k; http_hello HTTP/1.1 improved too (13.5 -> 11.0 us/request).
+Left: fix 4 (poller->worker hand-off, futex wakes), the remaining ~13
+lazy tasks / 15 frames per round trip (`for msg in conn` -> `Next` ->
+`recv`, `rc.Write` -> `conn.write` -> `sock.write`) — the same "task per
+await" cost as await_chain; register fds at socket creation. Windows
+`test_net` under wine fails on a Unix-socket `access()` check
+(`test_net.c:601`) — likely pre-existing, not confirmed on the base.
