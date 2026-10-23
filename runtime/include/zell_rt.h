@@ -560,6 +560,8 @@ void zell_task_set_ctx(zell_object *ctx);      /* borrowed; retained */
 /* A task for callback-style producers; unlike zell_task_new it does not
  * become the current task (ABI.md 10.11). */
 zell_task *zell_task_new_plain(int64_t result_size, const zell_value_ops *result_ops);
+/* The immortal completed Task<void> (ABI.md 10.2): retain/release no-ops. */
+zell_task *zell_task_done(void);
 
 /* Cancellation (ABI.md 10.11). */
 void zell_task_cancel(zell_task *task);               /* cascades to descendants */

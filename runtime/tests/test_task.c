@@ -333,6 +333,104 @@ TEST(channel_async_and_strings) {
     zell_release(a); zell_release(b); zell_release(c);
 }
 
+/* ---- work stealing: one worker floods its local queue (the ring
+ * overflows to the global queue), the other workers drain it ---- */
+
+enum { FLOOD = 4000 };
+static pthread_t flood_thread[FLOOD];
+static int64_t flood_done;
+
+static void flood_job(void *arg) {
+    int64_t i = (int64_t)(intptr_t)arg;
+    flood_thread[i] = pthread_self();
+    __atomic_add_fetch(&flood_done, 1, __ATOMIC_RELEASE);
+}
+
+static void flooder(zell_task *t, void *ctx) {
+    (void)ctx;
+    for (int64_t i = 0; i < FLOOD; i++) zell_sched_post(flood_job, (void *)(intptr_t)i);
+    zell_task_complete(t, NULL);
+}
+
+TEST(work_stealing) {
+    flood_done = 0;
+    zell_task *f = zell_task_spawn(flooder, NULL);
+    zell_task_await(f);
+    zell_release(f);
+    int64_t t0 = now_ms();
+    while (__atomic_load_n(&flood_done, __ATOMIC_ACQUIRE) < FLOOD) {
+        assert(now_ms() - t0 < 10000);
+        sched_yield();
+    }
+    /* Every job ran exactly once (the counter), on more than one worker. */
+    int distinct = 1;
+    for (int64_t i = 1; i < FLOOD; i++) {
+        int seen = 0;
+        for (int64_t j = 0; j < i && !seen; j++) seen = pthread_equal(flood_thread[i], flood_thread[j]);
+        if (!seen) distinct++;
+    }
+    assert(distinct >= 2);
+}
+
+/* ---- run-next fairness: a pair of tasks completing each other in a tight
+ * loop on one worker (the continuation always lands in its run-next slot)
+ * must not starve a job queued in that worker's ring. The other two
+ * workers are kept busy, so nothing can steal the queued job. ---- */
+
+static int64_t busy_running, busy_release;
+static int64_t pp_steps, third_ran_at;
+
+static void busy_job(zell_task *t, void *ctx) {
+    (void)ctx;
+    __atomic_add_fetch(&busy_running, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&busy_release, __ATOMIC_ACQUIRE)) sched_yield();
+    zell_task_complete(t, NULL);
+}
+
+static void third_job(void *arg) {
+    (void)arg;
+    __atomic_store_n(&third_ran_at, pp_steps, __ATOMIC_RELEASE);
+}
+
+static void pp_step(void *arg) {
+    zell_task *done = arg;
+    if (++pp_steps >= 20000) {
+        zell_task_complete(done, NULL);
+        return;
+    }
+    /* complete a fresh task whose continuation is this function: it goes
+     * to this worker's run-next slot */
+    zell_task *t = zell_task_new_plain(0, NULL);
+    zell_task_add_continuation(t, pp_step, done);
+    zell_task_complete(t, NULL);
+    zell_release(t);
+}
+
+static void pp_start(void *arg) {
+    zell_sched_post(third_job, NULL);   /* into this worker's ring */
+    pp_step(arg);
+}
+
+TEST(runnext_fairness) {
+    busy_running = busy_release = 0;
+    pp_steps = 0;
+    third_ran_at = -1;
+    zell_task *b1 = zell_task_spawn(busy_job, NULL), *b2 = zell_task_spawn(busy_job, NULL);
+    int64_t t0 = now_ms();
+    while (__atomic_load_n(&busy_running, __ATOMIC_ACQUIRE) < 2) { assert(now_ms() - t0 < 5000); sched_yield(); }
+    zell_task *done = zell_task_new_plain(0, NULL);
+    zell_sched_post(pp_start, done);
+    zell_task_await(done);
+    int64_t at = __atomic_load_n(&third_ran_at, __ATOMIC_ACQUIRE);
+    assert(at >= 0 && at < 1000);   /* ran within the first streak, not after the 20000 steps */
+    __atomic_store_n(&busy_release, 1, __ATOMIC_RELEASE);
+    zell_task_await(b1);
+    zell_task_await(b2);
+    zell_release(b1);
+    zell_release(b2);
+    zell_release(done);
+}
+
 /* ---- misuse ---- */
 
 static void double_complete(void) {
@@ -417,6 +515,8 @@ int main(int argc, char **argv) {
     RUN(delay_any);
     RUN(timer_heap_order_and_fire);
     RUN(relay_handoffs);
+    RUN(work_stealing);
+    RUN(runnext_fairness);
     RUN(refcounted_result);
     RUN(mutex);
     RUN(channel_unbuffered);

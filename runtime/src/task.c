@@ -6,42 +6,100 @@
 #include "platform/platform.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 /* ======================================================================
- * Scheduler: N workers over one global FIFO queue.
+ * Scheduler: N workers, each with a local run queue (a ring of LOCALQ
+ * jobs pushed by its owner, popped by the owner and stolen in halves by
+ * idle workers), a "run next" slot for the continuation a completing task
+ * posts (it runs next on the same worker, without any queue), and one
+ * global FIFO for posts from other threads (I/O, timers, main) and ring
+ * overflow. ABI.md 10.1 describes the policy; the rules are Go's.
  * ====================================================================== */
 
-typedef struct job {
+/* One unit of work: fn(arg) run with the task context `ctx` as task `cur`
+ * (both owned references that move with the record; ABI.md 10.8, 10.11). */
+typedef struct jobrec {
     zell_resume_fn fn;
     void *arg;
-    zell_object *ctx;   /* owned: the task context the job runs with */
-    zell_task *cur;     /* owned: the current task the job runs as (10.11) */
+    zell_object *ctx;
+    zell_task *cur;
+} jobrec;
+
+/* A node of the global queue. */
+typedef struct job {
+    jobrec r;
     struct job *next;
 } job;
+
+#define LOCALQ 256                 /* ring slots per worker (a power of two) */
+#define MAX_WORKERS 1024           /* core workers + spares, ever */
+#define GLOBAL_EVERY 61            /* ticks between forced looks at the global queue */
+#define RUNNEXT_STREAK 32          /* run-next hand-offs in a row before the ring gets a turn */
+#define STEAL_PASSES 4             /* rounds over the victims; run-next only in the last */
+#define RUNNEXT_GRACE_NS 20000     /* a victim keeps its run-next this long before a thief takes it */
+
+enum { RN_EMPTY = 0, RN_FULL = 1, RN_BUSY = 2 };
+
+typedef struct worker {
+    /* The ring: the owner stores records at `tail`; the owner and thieves
+     * take them at `head` with a compare-and-swap (a record is read before
+     * the swap and only used when the swap succeeds; the owner never
+     * overwrites a slot before `head` has passed it). Record fields are
+     * accessed with relaxed atomics: a thief whose swap fails may have
+     * read a slot the owner was refilling. */
+    uint32_t head;                 /* atomic */
+    uint32_t tail;                 /* atomic, written by the owner */
+    jobrec ring[LOCALQ];
+    /* The run-next slot: RN_EMPTY, RN_FULL, or RN_BUSY while someone copies
+     * it out. Only the owner fills it. */
+    int32_t rn_state;              /* atomic */
+    jobrec runnext;
+    /* Owner-only bookkeeping. */
+    uint64_t tick;                 /* jobs taken */
+    uint64_t rn_streak;            /* consecutive jobs taken from run-next */
+    uint64_t rng;                  /* victim order */
+    int spinning;                  /* holds the pool's spinning token */
+    int64_t spin_until;            /* monotonic ns: when to give the token up and park */
+    int spare;
+    int alive;                     /* under q_mu: the slot is in use */
+} worker;
+
+static worker *workers[MAX_WORKERS];   /* slots, allocated once and reused by spares */
+static int64_t q_nslots;               /* atomic: slots ever allocated */
 
 static zell__plat_mutex q_mu = ZELL_PLAT_MUTEX_INIT;
 static zell__plat_cond q_cv = ZELL_PLAT_COND_INIT;     /* work available / stop */
 static zell__plat_cond idle_cv = ZELL_PLAT_COND_INIT;  /* drained / thread exited */
-static job *q_head, *q_tail;
+static job *q_head, *q_tail;  /* the global queue, under q_mu */
+static int64_t q_len;         /* atomic: its length (read without q_mu) */
 static int q_stopping;
 static int q_started;
-static int64_t q_active;      /* jobs currently running */
 static int64_t q_nworkers;    /* target parallelism N */
-static int64_t q_alive;       /* worker threads alive (N core + spares) */
-static int64_t q_idle;        /* workers parked waiting for work */
-static int64_t q_blocked;     /* workers blocked inside zell_task_await */
-static int64_t q_spinning;    /* workers polling for work before parking */
+static int64_t q_alive;       /* worker threads alive (N core + spares), under q_mu */
+static int64_t q_idle;        /* atomic: workers parked on q_cv */
+static int64_t q_blocked;     /* workers blocked inside zell_task_await, under q_mu */
+static int64_t q_spinning;    /* atomic: 1 while a worker polls for work before parking */
+static int64_t q_wake_pending; /* under q_mu: wake-ups sent whose spinning token is not yet taken */
 
-/* How long an out-of-work worker polls the queue before it parks on q_cv
+/* How long an out-of-work worker polls the queues before it parks on q_cv
  * (and at most one does at a time). A job posted meanwhile is taken
  * without a futex wake-up of a parked thread: hand-offs between tasks
  * (channels, mutexes, awaits) would otherwise pay a sleep/wake per job. */
 #define SPIN_NS 50000
 
+#ifdef ZELL_SCHED_STATS
+static int64_t st_wake, st_spin, st_spin_found, st_steal, st_linger, st_park, st_recheck, st_jobs_rn, st_jobs_ring, st_jobs_glob, st_rn_kick;
+#define STAT(x) __atomic_add_fetch(&st_##x, 1, __ATOMIC_RELAXED)
+#else
+#define STAT(x) ((void)0)
+#endif
+
 static _Thread_local int t_is_worker;
+static _Thread_local worker *t_w;   /* this thread's worker, NULL on other threads */
 
 /* The context of the code running on this thread (owned reference, NULL =
  * empty). Jobs carry the context they were posted with; see ABI.md 10.8. */
@@ -52,118 +110,409 @@ static _Thread_local zell_object *t_ctx;
  * Travels with jobs and continuations like t_ctx; see ABI.md 10.11. */
 static _Thread_local zell_task *t_cur;
 
-/* q_head is written under q_mu but read without it by spinning workers. */
-static job *pop_locked(void) {
+/* ---- job records ---- */
+
+static inline void rec_store(jobrec *dst, const jobrec *src) {
+    __atomic_store_n(&dst->fn, src->fn, __ATOMIC_RELAXED);
+    __atomic_store_n(&dst->arg, src->arg, __ATOMIC_RELAXED);
+    __atomic_store_n(&dst->ctx, src->ctx, __ATOMIC_RELAXED);
+    __atomic_store_n(&dst->cur, src->cur, __ATOMIC_RELAXED);
+}
+
+static inline void rec_load(jobrec *dst, const jobrec *src) {
+    dst->fn = __atomic_load_n(&src->fn, __ATOMIC_RELAXED);
+    dst->arg = __atomic_load_n(&src->arg, __ATOMIC_RELAXED);
+    dst->ctx = __atomic_load_n(&src->ctx, __ATOMIC_RELAXED);
+    dst->cur = __atomic_load_n(&src->cur, __ATOMIC_RELAXED);
+}
+
+/* ---- the global queue (q_mu held unless said otherwise) ---- */
+
+static void global_push_locked(job *first, job *last, int64_t n) {
+    last->next = NULL;
+    if (q_tail) q_tail->next = first; else q_head = first;
+    q_tail = last;
+    __atomic_add_fetch(&q_len, n, __ATOMIC_SEQ_CST);
+}
+
+static job *global_pop_locked(void) {
     job *j = q_head;
     if (j) {
-        __atomic_store_n(&q_head, j->next, __ATOMIC_RELAXED);
+        q_head = j->next;
         if (!q_head) q_tail = NULL;
+        __atomic_sub_fetch(&q_len, 1, __ATOMIC_SEQ_CST);
     }
     return j;
 }
 
-/* Polls for work for up to SPIN_NS without the lock; q_mu is held on entry
- * and on return. Returns whether work showed up. */
-static bool spin_for_work_locked(void) {
-    q_spinning++;
+static inline bool global_nonempty(void) { return __atomic_load_n(&q_len, __ATOMIC_SEQ_CST) > 0; }
+
+static job *job_node(const jobrec *r) {
+    job *j = malloc(sizeof *j);
+    if (!j) zell_panic("out of memory (job)");
+    j->r = *r;
+    j->next = NULL;
+    return j;
+}
+
+/* ---- the local ring ---- */
+
+static inline uint32_t ring_len(const worker *w) {
+    uint32_t h = __atomic_load_n(&w->head, __ATOMIC_SEQ_CST);
+    uint32_t t = __atomic_load_n(&w->tail, __ATOMIC_SEQ_CST);
+    return t - h;
+}
+
+/* Owner: appends r; false when the ring is full. */
+static bool ring_push(worker *w, const jobrec *r) {
+    uint32_t h = __atomic_load_n(&w->head, __ATOMIC_ACQUIRE);
+    uint32_t t = __atomic_load_n(&w->tail, __ATOMIC_RELAXED);
+    if (t - h >= LOCALQ) return false;
+    rec_store(&w->ring[t % LOCALQ], r);
+    /* Sequentially consistent, like a parking worker's idle count: one of
+     * the two sees the other (the wake-up protocol below). */
+    __atomic_store_n(&w->tail, t + 1, __ATOMIC_SEQ_CST);
+    return true;
+}
+
+/* Owner: appends r to a full ring by moving half of the ring and r to the
+ * global queue (Go's runqputslow). */
+static void ring_push_slow(worker *w, const jobrec *r) {
+    for (;;) {
+        if (ring_push(w, r)) return;
+        uint32_t h = __atomic_load_n(&w->head, __ATOMIC_ACQUIRE);
+        uint32_t t = __atomic_load_n(&w->tail, __ATOMIC_RELAXED);
+        uint32_t n = (t - h) / 2;
+        if (n == 0) continue;   /* thieves emptied it meanwhile: the push will succeed */
+        jobrec batch[LOCALQ / 2];
+        for (uint32_t i = 0; i < n; i++) rec_load(&batch[i], &w->ring[(h + i) % LOCALQ]);
+        if (!__atomic_compare_exchange_n(&w->head, &h, h + n, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) continue;
+        job *first = job_node(&batch[0]), *last = first;
+        for (uint32_t i = 1; i < n; i++) { last->next = job_node(&batch[i]); last = last->next; }
+        last->next = job_node(r);
+        last = last->next;
+        zell__plat_mutex_lock(&q_mu);
+        global_push_locked(first, last, (int64_t)n + 1);
+        zell__plat_mutex_unlock(&q_mu);
+        return;
+    }
+}
+
+/* Owner or thief: takes the oldest record. */
+static bool ring_pop(worker *w, jobrec *out) {
+    for (;;) {
+        uint32_t h = __atomic_load_n(&w->head, __ATOMIC_ACQUIRE);
+        uint32_t t = __atomic_load_n(&w->tail, __ATOMIC_ACQUIRE);
+        if (h == t) return false;
+        rec_load(out, &w->ring[h % LOCALQ]);
+        if (__atomic_compare_exchange_n(&w->head, &h, h + 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return true;
+    }
+}
+
+/* Thief w (its own ring empty): moves half of v's ring into its ring and
+ * returns the last stolen record in *out (Go's runqgrab). */
+static bool steal_ring(worker *w, worker *v, jobrec *out) {
+    for (;;) {
+        uint32_t h = __atomic_load_n(&v->head, __ATOMIC_ACQUIRE);
+        uint32_t t = __atomic_load_n(&v->tail, __ATOMIC_ACQUIRE);
+        uint32_t n = t - h;
+        n = n - n / 2;
+        if (n == 0) return false;
+        if (n > LOCALQ / 2) continue;   /* h and t read around a push and pops: inconsistent */
+        uint32_t wt = __atomic_load_n(&w->tail, __ATOMIC_RELAXED);
+        for (uint32_t i = 0; i < n; i++) {
+            jobrec r;
+            rec_load(&r, &v->ring[(h + i) % LOCALQ]);
+            rec_store(&w->ring[(wt + i) % LOCALQ], &r);   /* beyond w's tail: invisible yet */
+        }
+        if (!__atomic_compare_exchange_n(&v->head, &h, h + n, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) continue;
+        rec_load(out, &w->ring[(wt + n - 1) % LOCALQ]);
+        if (n > 1) __atomic_store_n(&w->tail, wt + n - 1, __ATOMIC_SEQ_CST);
+        return true;
+    }
+}
+
+/* ---- the run-next slot ---- */
+
+static bool runnext_take(worker *w, jobrec *out) {
+    int32_t s = RN_FULL;
+    if (!__atomic_compare_exchange_n(&w->rn_state, &s, RN_BUSY, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return false;
+    rec_load(out, &w->runnext);
+    __atomic_store_n(&w->rn_state, RN_EMPTY, __ATOMIC_RELEASE);
+    return true;
+}
+
+/* Owner: r runs next; a record already there goes behind the ring. */
+static void runnext_put(worker *w, const jobrec *r) {
+    for (;;) {
+        int32_t s = __atomic_load_n(&w->rn_state, __ATOMIC_ACQUIRE);
+        if (s == RN_EMPTY) break;
+        jobrec old;
+        if (s == RN_FULL && runnext_take(w, &old)) { STAT(rn_kick); ring_push_slow(w, &old); }
+        /* RN_BUSY: a thief is copying it out */
+    }
+    rec_store(&w->runnext, r);
+    __atomic_store_n(&w->rn_state, RN_FULL, __ATOMIC_SEQ_CST);
+}
+
+static inline bool runnext_full(const worker *w) { return __atomic_load_n(&w->rn_state, __ATOMIC_SEQ_CST) == RN_FULL; }
+
+/* ---- wake-ups ---- */
+
+/* Wakes one parked worker if nobody is polling for work. The woken worker
+ * inherits the spinning token (q_spinning is raised here, on its behalf),
+ * so posts made before it runs do not wake more workers (Go's wakep). */
+static void wake_one(void) {
+    if (__atomic_load_n(&q_idle, __ATOMIC_SEQ_CST) == 0 || __atomic_load_n(&q_spinning, __ATOMIC_SEQ_CST) != 0) return;
+    zell__plat_mutex_lock(&q_mu);
+    if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) - q_wake_pending > 0 && __atomic_load_n(&q_spinning, __ATOMIC_RELAXED) == 0) {
+        __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
+        q_wake_pending++;
+        STAT(wake);
+        zell__plat_cond_signal(&q_cv);
+    }
     zell__plat_mutex_unlock(&q_mu);
-    bool found = false;
-    int64_t until = zell__plat_mono_ns() + SPIN_NS;
+}
+
+/* Whether the global queue or any ring holds work (run-next slots are
+ * their owners' business: see lingering_runnext). */
+static bool queued_work(void) {
+    if (global_nonempty()) return true;
+    int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
+    for (int64_t i = 0; i < n; i++)
+        if (ring_len(workers[i]) != 0) return true;
+    return false;
+}
+
+/* A run-next slot of another worker that stays full for the grace period
+ * (its owner is busy with a long job rather than about to take it) is
+ * taken by w: returns true with the record in *out. Owners normally take
+ * their slot within nanoseconds, so this mostly waits a little and
+ * returns false. */
+static bool lingering_runnext(worker *w, jobrec *out) {
+    int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
+    for (int64_t i = 0; i < n; i++) {
+        worker *v = workers[i];
+        if (v == w || !runnext_full(v)) continue;
+        int64_t until = zell__plat_mono_ns() + RUNNEXT_GRACE_NS;
+        while (runnext_full(v) && zell__plat_mono_ns() < until) zell__plat_yield();
+        if (runnext_take(v, out)) { STAT(linger); return true; }
+    }
+    return false;
+}
+
+/* ---- finding work (the owner of w) ---- */
+
+static inline uint64_t rng_next(worker *w) {
+    uint64_t x = w->rng;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    w->rng = x;
+    return x;
+}
+
+/* Takes a batch from the global queue: the first record in *out, the rest
+ * (up to the ring's free space) into w's ring. */
+static bool global_get(worker *w, jobrec *out) {
+    if (!global_nonempty()) return false;
+    zell__plat_mutex_lock(&q_mu);
+    job *j = global_pop_locked();
+    if (!j) { zell__plat_mutex_unlock(&q_mu); return false; }
+    int64_t want = __atomic_load_n(&q_len, __ATOMIC_RELAXED) / (q_nworkers > 0 ? q_nworkers : 1);
+    int64_t room = LOCALQ - (int64_t)ring_len(w);
+    if (want > room) want = room;
+    if (want > LOCALQ / 2) want = LOCALQ / 2;
+    job *extra = NULL;
+    for (int64_t i = 0; i < want; i++) {
+        job *e = global_pop_locked();
+        if (!e) break;
+        e->next = extra;
+        extra = e;
+    }
+    zell__plat_mutex_unlock(&q_mu);
+    /* `extra` is reversed: push in FIFO order */
+    job *fwd = NULL;
+    while (extra) { job *n = extra->next; extra->next = fwd; fwd = extra; extra = n; }
+    while (fwd) { job *n = fwd->next; ring_push_slow(w, &fwd->r); free(fwd); fwd = n; }
+    *out = j->r;
+    free(j);
+    return true;
+}
+
+/* Steals from the other workers: halves of rings on every pass, a run-next
+ * only on the last pass and only if its owner has not taken it within a
+ * grace period (it usually does, within nanoseconds). */
+static bool steal_work(worker *w, jobrec *out) {
+    int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
+    if (n <= 1) return false;
+    for (int pass = 0; pass < STEAL_PASSES; pass++) {
+        bool last = pass == STEAL_PASSES - 1;
+        uint64_t start = rng_next(w) % (uint64_t)n;
+        for (int64_t i = 0; i < n; i++) {
+            worker *v = workers[(start + (uint64_t)i) % (uint64_t)n];
+            if (v != w && steal_ring(w, v, out)) { STAT(steal); return true; }
+        }
+        if (last && lingering_runnext(w, out)) return true;
+    }
+    return false;
+}
+
+static bool find_work(worker *w, jobrec *out) {
+    w->tick++;
+    if (w->tick % GLOBAL_EVERY == 0 && global_get(w, out)) { w->rn_streak = 0; return true; }
+    /* Run-next first, unless it has had the worker to itself for a while
+     * and the ring waits: then one ring job runs in between (run-next
+     * cannot be preempted here, so this is its time slice). */
+    bool ring_first = w->rn_streak >= RUNNEXT_STREAK;
+    if (!ring_first && runnext_take(w, out)) { w->rn_streak++; STAT(jobs_rn); return true; }
+    if (ring_pop(w, out)) { w->rn_streak = 0; STAT(jobs_ring); return true; }
+    if (ring_first && runnext_take(w, out)) { w->rn_streak = 1; STAT(jobs_rn); return true; }
+    if (global_get(w, out)) { w->rn_streak = 0; STAT(jobs_glob); return true; }
+    if (steal_work(w, out)) { w->rn_streak = 0; return true; }
+    return false;
+}
+
+/* Polls the global queue and the rings until w->spin_until (the spinning
+ * token is held). Returns whether work showed up somewhere: in a ring or
+ * the global queue, or a run-next slot nobody took for the grace period
+ * (then it is already taken, in *out). */
+static bool spin_for_work(worker *w, jobrec *out, bool *taken) {
+    *taken = false;
     for (int i = 1;; i++) {
-        if (__atomic_load_n(&q_head, __ATOMIC_RELAXED)) { found = true; break; }
+        if (queued_work()) return true;
         if ((i & 63) == 0) {
-            if (zell__plat_mono_ns() >= until) break;
+            if (zell__plat_mono_ns() >= w->spin_until) return false;
+            if (lingering_runnext(w, out)) { *taken = true; return true; }
             zell__plat_yield();   /* a shared machine: let the poster run */
         }
     }
-    zell__plat_mutex_lock(&q_mu);
-    q_spinning--;
-    return found;
 }
 
-static void *worker_main(void *spare_flag) {
-    int spare = spare_flag != NULL;
+/* Drops the spinning token; with work still queued somewhere, hands it to
+ * a parked worker (Go's resetspinning), so parallelism is kept up. */
+static void stop_spinning(worker *w) {
+    if (!w->spinning) return;
+    w->spinning = 0;
+    __atomic_store_n(&q_spinning, 0, __ATOMIC_SEQ_CST);
+    if (ring_len(w) != 0 || global_nonempty()) wake_one();
+}
+
+static void run_job(const jobrec *j) {
+    zell_object *saved = t_ctx;
+    zell_task *saved_cur = t_cur;
+    t_ctx = j->ctx;   /* the job's references move to the thread */
+    t_cur = j->cur;
+    j->fn(j->arg);
+    /* Restore the thread-locals before dropping the job's references:
+     * the release may free the task (or context) and run destructors
+     * (a task result's Drop) that start tasks, which must not see a
+     * dying object as their parent (that resurrected and double-freed
+     * it). */
+    zell_object *done_ctx = t_ctx;
+    zell_task *done_cur = t_cur;
+    t_ctx = saved;
+    t_cur = saved_cur;
+    zell_release(done_ctx);
+    zell_release(done_cur);
+}
+
+static void *worker_main(void *arg) {
+    worker *w = arg;
+    t_w = w;
     t_is_worker = 1;
     zell__rc_thread_eligible();     /* biased refcounts (rc.c) */
     zell__plat_thread_stack_init(); /* frame walks of the CPU profiler */
-    zell__plat_mutex_lock(&q_mu);
-    bool spun = false;   /* polled since the last job: park next time */
     for (;;) {
-        job *j = pop_locked();
-        if (!j) {
-            if (q_stopping) break;
-            /* spare threads retire once enough unblocked workers exist again */
-            if (spare && q_alive - q_blocked > q_nworkers) break;
-            /* Before sleeping, take back pages other threads freed into
-             * (and retire empty ones), so idle workers do not pin memory. */
-            if (zell__heap_needs_collect()) {
-                zell__plat_mutex_unlock(&q_mu);
-                zell__heap_collect(0);
-                zell__plat_mutex_lock(&q_mu);
-                continue;
-            }
-            /* Merge this thread's refcount queue first (rc.c): destructors
-             * may run, so not under q_mu. While parked, others merge it. */
-            if (zell__rc_pending()) {
-                zell__plat_mutex_unlock(&q_mu);
-                zell__rc_poll();
-                zell__plat_mutex_lock(&q_mu);
-                continue;
-            }
-            if (!spun && q_spinning == 0 && q_nworkers > 1) {
-                spun = true;
-                spin_for_work_locked();
-                continue;
-            }
-            spun = false;
-            q_idle++;
-            zell__rc_park(0);
-            zell__plat_cond_wait(&q_cv, &q_mu);
-            q_idle--;
+        jobrec j;
+        if (find_work(w, &j)) {
+            stop_spinning(w);
+            run_job(&j);
             continue;
         }
-        spun = false;
-        q_active++;
-        /* More work queued and nobody polling: wake a parked worker, so a
-         * burst of posts (which skip the wake-up while one worker polls)
-         * still spreads over the pool. */
-        if (q_head && q_idle > 0 && q_spinning == 0) zell__plat_cond_signal(&q_cv);
-        zell__plat_mutex_unlock(&q_mu);
-        zell__rc_unpark();   /* after a park above; no-op otherwise */
-        zell_resume_fn fn = j->fn;
-        void *arg = j->arg;
-        zell_object *saved = t_ctx;
-        zell_task *saved_cur = t_cur;
-        t_ctx = j->ctx;   /* the job's references move to the thread */
-        t_cur = j->cur;
-        free(j);
-        fn(arg);
-        /* Restore the thread-locals before dropping the job's references:
-         * the release may free the task (or context) and run destructors
-         * (a task result's Drop) that start tasks, which must not see a
-         * dying object as their parent (that resurrected and double-freed
-         * it). */
-        zell_object *done_ctx = t_ctx;
-        zell_task *done_cur = t_cur;
-        t_ctx = saved;
-        t_cur = saved_cur;
-        zell_release(done_ctx);
-        zell_release(done_cur);
+        /* Out of work. Take back pages other threads freed into (and
+         * retire empty ones), so idle workers do not pin memory; merge
+         * this thread's refcount queue (rc.c: destructors may run). */
+        if (zell__heap_needs_collect()) { zell__heap_collect(0); continue; }
+        if (zell__rc_pending()) { zell__rc_poll(); continue; }
+        /* Poll before parking, if nobody else does (the token). */
+        if (!w->spinning && q_nworkers > 1) {
+            int64_t zero = 0;
+            if (__atomic_compare_exchange_n(&q_spinning, &zero, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+                w->spinning = 1;
+                w->spin_until = zell__plat_mono_ns() + SPIN_NS;
+                STAT(spin);
+            }
+        }
+        if (w->spinning) {
+            bool taken;
+            if (spin_for_work(w, &j, &taken)) {
+                STAT(spin_found);
+                if (taken) { stop_spinning(w); run_job(&j); }
+                continue;   /* else find_work takes it; stop_spinning follows */
+            }
+        }
+        /* Park. */
         zell__plat_mutex_lock(&q_mu);
-        q_active--;
-        if (!q_head && q_active == 0) zell__plat_cond_broadcast(&idle_cv);
+        if (w->spinning) {
+            w->spinning = 0;
+            __atomic_store_n(&q_spinning, 0, __ATOMIC_SEQ_CST);
+        }
+        if (q_stopping) break;
+        /* spare threads retire once enough unblocked workers exist again */
+        if (w->spare && q_alive - q_blocked > q_nworkers) break;
+        __atomic_add_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
+        /* A poster stores its queue's tail, then reads q_idle; we raised
+         * q_idle and now read the queues: one of us sees the other. (A
+         * run-next slot is its owner's to take; one that lingers behind a
+         * long job is found by the next spinner.) */
+        if (queued_work()) {
+            STAT(recheck);
+            __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
+            zell__plat_mutex_unlock(&q_mu);
+            continue;
+        }
+        if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == q_alive) zell__plat_cond_broadcast(&idle_cv);  /* drained */
+        zell__rc_park(0);
+        STAT(park);
+        zell__plat_cond_wait(&q_cv, &q_mu);
+        __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
+        if (q_wake_pending > 0) {   /* the waker reserved the spinning token for us */
+            q_wake_pending--;
+            w->spinning = 1;
+            w->spin_until = zell__plat_mono_ns() + SPIN_NS;
+        }
+        zell__plat_mutex_unlock(&q_mu);
+        zell__rc_unpark();
     }
+    /* q_mu held */
+    w->alive = 0;
     q_alive--;
     zell__plat_cond_broadcast(&idle_cv);
     zell__plat_mutex_unlock(&q_mu);
     return NULL;
 }
 
-/* q_mu must be held. */
-static void spawn_worker_locked(int spare) {
-    if (!zell__plat_thread_start_detached(worker_main, spare ? (void *)1 : NULL))
-        zell_panic("cannot create worker thread");
+/* q_mu must be held. Returns false when no slot is left (MAX_WORKERS). */
+static bool spawn_worker_locked(int spare) {
+    int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_RELAXED);
+    worker *w = NULL;
+    for (int64_t i = 0; i < n; i++) {
+        if (!workers[i]->alive) { w = workers[i]; break; }
+    }
+    if (!w) {
+        if (n >= MAX_WORKERS) return false;
+        w = calloc(1, sizeof *w);
+        if (!w) zell_panic("out of memory (worker)");
+        w->rng = 0x9E3779B97F4A7C15ull ^ ((uint64_t)n + 1) * 0xBF58476D1CE4E5B9ull;
+        workers[n] = w;
+        __atomic_store_n(&q_nslots, n + 1, __ATOMIC_RELEASE);
+    }
+    w->alive = 1;
+    w->spare = spare;
+    w->spinning = 0;
+    w->tick = w->rn_streak = 0;
+    if (!zell__plat_thread_start_detached(worker_main, w)) zell_panic("cannot create worker thread");
     q_alive++;
+    return true;
 }
 
 static int64_t worker_count(void) {
@@ -226,43 +575,61 @@ static void sched_stop_started(void) {
         stop_io();   /* I/O waits may exist without a task ever running */
         return;
     }
-    while (q_head || q_active > 0) zell__plat_cond_wait(&idle_cv, &q_mu);  /* drain */
+    /* drain: every worker parked (their queues are then empty) and nothing global */
+    while (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) != q_alive || q_head) zell__plat_cond_wait(&idle_cv, &q_mu);
     q_stopping = 1;
     zell__plat_cond_broadcast(&q_cv);
     while (q_alive > 0) zell__plat_cond_wait(&idle_cv, &q_mu);
     zell__plat_mutex_unlock(&q_mu);
+#ifdef ZELL_SCHED_STATS
+    fprintf(stderr, "sched: wake %lld spin %lld spin_found %lld steal %lld linger %lld park %lld recheck %lld jobs rn %lld ring %lld glob %lld rn_kick %lld\n",
+            (long long)st_wake, (long long)st_spin, (long long)st_spin_found, (long long)st_steal, (long long)st_linger, (long long)st_park, (long long)st_recheck,
+            (long long)st_jobs_rn, (long long)st_jobs_ring, (long long)st_jobs_glob, (long long)st_rn_kick);
+#endif
     timers_stop();
     stop_io();
     zell__plat_mutex_lock(&q_mu);
     q_nworkers = 0;
+    q_wake_pending = 0;
+    __atomic_store_n(&q_spinning, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&q_started, 0, __ATOMIC_RELEASE);
     zell__plat_mutex_unlock(&q_mu);
 }
 
-/* Posts fn(arg) to run with context `ctx` as task `cur` (owned references, moved). */
-static void sched_post_ctx(zell_resume_fn fn, void *arg, zell_object *ctx, zell_task *cur) {
+/* Posts fn(arg) to run with context `ctx` as task `cur` (owned references,
+ * moved). From a worker, `next` puts it in the run-next slot (a completed
+ * task waking its awaiter: it runs as soon as the current job yields the
+ * thread), else at the tail of the worker's ring; from any other thread
+ * it goes to the global queue. */
+static void sched_post_ctx(zell_resume_fn fn, void *arg, zell_object *ctx, zell_task *cur, bool next) {
     if (!fn) zell_panic_nil();
     if (!__atomic_load_n(&q_started, __ATOMIC_ACQUIRE)) zell__sched_start();
-    job *j = malloc(sizeof *j);
-    if (!j) zell_panic("out of memory (job)");
-    j->fn = fn;
-    j->arg = arg;
-    j->ctx = ctx;
-    j->cur = cur;
-    j->next = NULL;
+    jobrec r = { fn, arg, ctx, cur };
+    worker *w = t_w;
+    if (w) {
+        if (next) runnext_put(w, &r);
+        else ring_push_slow(w, &r);
+        wake_one();
+        return;
+    }
+    job *j = job_node(&r);
     zell__plat_mutex_lock(&q_mu);
-    if (q_tail) q_tail->next = j; else __atomic_store_n(&q_head, j, __ATOMIC_RELAXED);
-    q_tail = j;
+    global_push_locked(j, j, 1);
     /* A polling worker takes the job without a wake-up; otherwise wake a
      * parked one (none parked: every worker is busy and will look). */
-    if (q_spinning == 0 && q_idle > 0) zell__plat_cond_signal(&q_cv);
+    if (__atomic_load_n(&q_spinning, __ATOMIC_RELAXED) == 0 && __atomic_load_n(&q_idle, __ATOMIC_RELAXED) - q_wake_pending > 0) {
+        __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
+        q_wake_pending++;
+        STAT(wake);
+        zell__plat_cond_signal(&q_cv);
+    }
     zell__plat_mutex_unlock(&q_mu);
 }
 
 void zell_sched_post(zell_resume_fn fn, void *arg) {
     zell_retain(t_ctx);
     zell_retain(t_cur);
-    sched_post_ctx(fn, arg, t_ctx, t_cur);
+    sched_post_ctx(fn, arg, t_ctx, t_cur, false);
 }
 
 int64_t zell_sched_workers(void) {
@@ -278,6 +645,7 @@ void zell_coro_resume(void *frame) {
     void (*resume)(void *) = *(void (**)(void *))frame;
     resume(frame);
 }
+
 
 /* ======================================================================
  * Tasks
@@ -296,11 +664,17 @@ typedef struct cont {
 /* A wait to wake when its task is cancelled (10.11). */
 typedef struct hook {
     void (*fn)(zell_task *w);
-    zell_task *w;              /* owned */
+    zell_task *w;              /* owned, unless weak */
     struct hook *next;
     void (*fn_data)(zell_task *w, uintptr_t data);  /* instead of fn when set */
     uintptr_t data;
+    int weak;                  /* w is the hook's own task: not retained */
 } hook;
+
+static inline void hook_free(hook *h) {
+    if (!h->weak) zell_release(h->w);
+    free(h);
+}
 
 struct zell_task {
     zell_object hdr;
@@ -356,10 +730,9 @@ static zell__plat_cond g_await_cv = ZELL_PLAT_COND_INIT;
 int64_t zell__live_tasks(void) { return __atomic_load_n(&g_live_tasks, __ATOMIC_RELAXED); }
 
 int64_t zell__sched_queue_len(void) {
-    int64_t n = 0;
-    zell__plat_mutex_lock(&q_mu);
-    for (job *j = q_head; j; j = j->next) n++;
-    zell__plat_mutex_unlock(&q_mu);
+    int64_t n = __atomic_load_n(&q_len, __ATOMIC_SEQ_CST);
+    int64_t slots = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
+    for (int64_t i = 0; i < slots; i++) n += ring_len(workers[i]) + (runnext_full(workers[i]) ? 1 : 0);
     return n;
 }
 
@@ -371,7 +744,7 @@ static void task_drop(void *obj) {
     cont *c = t->conts;
     while (c) { cont *n = c->next; zell_release(c->ctx); zell_release(c->cur); free(c); c = n; }
     hook *h = t->hooks;
-    while (h) { hook *n = h->next; zell_release(h->w); free(h); h = n; }
+    while (h) { hook *n = h->next; hook_free(h); h = n; }
     if (t->ctx_saved) zell_release(t->caller_ctx);
     if (t->dbg_id) zell__dbg_task_drop(t->dbg_id);
     if (t->parent) {
@@ -432,6 +805,38 @@ zell_task *zell_task_new_plain(int64_t result_size, const zell_value_ops *result
     return task_new_ex(result_size, result_ops, 0);
 }
 
+/* task_sync.c (ABI.md 10.6, 10.7): a plain task whose slot has room for
+ * slot_bytes (at least result_size) so a pending wait can keep its queue
+ * links and a sender its value there; ops apply at slot + ops_off. */
+zell_task *zell__task_new_slot(int64_t result_size, const zell_value_ops *ops, int64_t ops_off, int64_t slot_bytes) {
+    if (result_size < 0 || slot_bytes < result_size) zell__panicf("zell__task_new_slot: bad sizes");
+    zell_task *t = zell_object_new(&task_type, (int64_t)sizeof(zell_task) + ZELL_ROUND8(slot_bytes));
+    t->hdr.refcount |= ZELL_RC_NOBIAS;
+    __atomic_add_fetch(&g_live_tasks, 1, __ATOMIC_RELAXED);
+    t->result_size = result_size;
+    t->ops = ops;
+    t->ops_offset = ops_off;
+    return t;
+}
+
+void *zell__task_slot(zell_task *t) { return t->slot; }
+void zell__task_lock(zell_task *t) { task_lock(t); }
+void zell__task_unlock(zell_task *t) { task_unlock(t); }
+
+/* Completes a task nobody else has seen yet, whose result is already in
+ * its slot (no waiters, no continuations, not the current task). */
+void zell__task_mark_done(zell_task *t) { __atomic_store_n(&t->state, TASK_DONE, __ATOMIC_RELEASE); }
+
+/* The immortal completed Task<void>: what an operation that did not have
+ * to wait returns (Mutex.Lock of a free mutex, Delay(0), a Send that found
+ * room); awaiting it takes the is_done fast path, retain and release are
+ * no-ops. */
+static struct zell_task done_task = {
+    .hdr = { ZELL_RC_IMMORTAL, &task_type }, .state = TASK_DONE,
+};
+
+zell_task *zell_task_done(void) { return &done_task; }
+
 /* The current task stops running on this thread: its parent is current. */
 static void restore_parent(zell_task *t) {
     if (t_cur != t) return;
@@ -484,9 +889,13 @@ static bool task_complete(zell_task *t, const void *result) {
     zell_release(t);
     /* After this point `t` may be freed; use only `rev`. */
     while (c) { cont *n = c->next; c->next = rev; rev = c; c = n; }
+    /* The first continuation runs next on this worker (the common case is
+     * one awaiter); the others queue behind the ring in registration order. */
+    bool next = true;
     while (rev) {
         cont *n = rev->next;
-        sched_post_ctx(rev->fn, rev->frame, rev->ctx, rev->cur);
+        sched_post_ctx(rev->fn, rev->frame, rev->ctx, rev->cur, next);
+        next = false;
         free(rev);
         rev = n;
     }
@@ -562,11 +971,18 @@ void *zell_task_await(zell_task *t) {
     if (!t) zell_panic_nil();
     if (zell_task_is_done(t)) return t->slot;
     if (t_is_worker) {
-        /* Blocking a worker: make sure the pool keeps N runnable threads by
-         * starting a spare worker if nobody is idle (it retires later). */
+        /* Blocking a worker: its queued work must not wait with it. The
+         * run-next slot goes to the ring, where thieves find it, and a
+         * parked worker is woken to steal (the ring may hold the very job
+         * that completes t). Then keep N runnable threads by starting a
+         * spare worker if nobody is idle (it retires later). */
+        worker *w = t_w;
+        jobrec rn;
+        if (runnext_take(w, &rn)) ring_push_slow(w, &rn);
+        if (ring_len(w) != 0) wake_one();
         zell__plat_mutex_lock(&q_mu);
         q_blocked++;
-        if (q_idle == 0 && !q_stopping) spawn_worker_locked(1);
+        if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == 0 && !q_stopping) spawn_worker_locked(1);
         zell__plat_mutex_unlock(&q_mu);
     }
     int parked = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != TASK_DONE;
@@ -779,8 +1195,8 @@ static void delay_cancelled(zell_task *w) { zell_task_rt_fire(w); }
 
 /* A delay completes early when the current task is cancelled (10.11). */
 zell_task *zell_task_delay(int64_t ms) {
+    if (ms <= 0) return zell_task_done();
     zell_task *t = task_new_ex(0, NULL, 0);
-    if (ms <= 0) { zell_task_complete(t, NULL); return t; }
     timer_insert(ms, t, NULL);
     cancel_hook(delay_cancelled, t);
     return t;
@@ -1293,8 +1709,7 @@ void zell_task_cancel(zell_task *t) {
         hook *n = hs->next;
         if (hs->fn_data) hs->fn_data(hs->w, hs->data);
         else hs->fn(hs->w);
-        zell_release(hs->w);
-        free(hs);
+        hook_free(hs);
         hs = n;
     }
 }
@@ -1305,10 +1720,10 @@ bool zell_task_is_cancelled(const zell_task *t) {
 
 bool zell_task_cur_cancelled(void) { return zell_task_is_cancelled(t_cur); }
 
-/* Registers fn(w) to run when the current task is cancelled (at once if it
- * already is). Hooks of waits that completed meanwhile are pruned. */
-static void cancel_hook_ex(void (*fn)(zell_task *), void (*fn_data)(zell_task *, uintptr_t), uintptr_t data, zell_task *w) {
-    zell_task *t = t_cur;
+/* Registers fn(w) to run when task t is cancelled (at once if it already
+ * is). Hooks of waits that completed meanwhile are pruned. A weak hook
+ * (w == t, a wait that watches its own cancellation) holds no reference. */
+static void cancel_hook_on(zell_task *t, void (*fn)(zell_task *), void (*fn_data)(zell_task *, uintptr_t), uintptr_t data, zell_task *w, int weak) {
     if (!t) return;
     task_lock(t);
     if (__atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE)) {
@@ -1323,8 +1738,7 @@ static void cancel_hook_ex(void (*fn)(zell_task *), void (*fn_data)(zell_task *,
             hook *h = *pp;
             if (zell_task_is_done(h->w)) {
                 *pp = h->next;
-                zell_release(h->w);
-                free(h);
+                hook_free(h);
                 t->nhooks--;
             } else {
                 pp = &h->next;
@@ -1333,15 +1747,21 @@ static void cancel_hook_ex(void (*fn)(zell_task *), void (*fn_data)(zell_task *,
     }
     hook *h = malloc(sizeof *h);
     if (!h) zell_panic("out of memory (cancel hook)");
-    zell_retain(w);
+    if (!weak) zell_retain(w);
     h->fn = fn;
     h->fn_data = fn_data;
     h->data = data;
     h->w = w;
+    h->weak = weak;
     h->next = t->hooks;
     t->hooks = h;
     t->nhooks++;
     task_unlock(t);
+}
+
+/* The same on the current task. */
+static void cancel_hook_ex(void (*fn)(zell_task *), void (*fn_data)(zell_task *, uintptr_t), uintptr_t data, zell_task *w) {
+    cancel_hook_on(t_cur, fn, fn_data, data, w, 0);
 }
 
 static void cancel_hook(void (*fn)(zell_task *), zell_task *w) { cancel_hook_ex(fn, NULL, 0, w); }
@@ -1351,6 +1771,8 @@ void zell__cancel_hook(void (*fn)(zell_task *), zell_task *w) { cancel_hook(fn, 
 void zell__cancel_hook_data(void (*fn)(zell_task *, uintptr_t), zell_task *w, uintptr_t data) {
     cancel_hook_ex(NULL, fn, data, w);
 }
+
+void zell__cancel_hook_self(zell_task *w, void (*fn)(zell_task *)) { cancel_hook_on(w, fn, NULL, 0, w, 1); }
 
 static void signal_cancelled(zell_task *w) { zell_task_rt_fire(w); }
 

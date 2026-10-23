@@ -1072,14 +1072,49 @@ built as `*_async` variants that return a `zell_task *`.
 ### 10.1 Model
 
 - **Scheduler**: N worker threads (N = online CPUs, or the `ZELL_WORKERS`
-  environment variable) take jobs from one global FIFO queue. A job is a
-  `(fn, arg)` pair. The scheduler starts in `zell_runtime_init`, or lazily on the
-  first `zell_sched_post`.
+  environment variable). A job is a `(fn, arg)` pair plus the task context
+  and current task it runs with (10.8, 10.11). The queues are Go's:
+  - every worker owns a **local run queue**, a ring of 256 jobs that only
+    its owner pushes to (posts made from that worker: `zell_sched_post`,
+    spawns, `task.Yield`) and that the owner and thieves pop from the head
+    with a compare-and-swap; a full ring moves half of itself and the new
+    job to the global queue;
+  - a **run-next slot** per worker: the first continuation of a task
+    completed on a worker is put there (the others go behind the ring) and
+    runs as soon as the current job yields the thread, with no queue in
+    between. The slot is fair: after `RUNNEXT_STREAK` (32) consecutive
+    jobs taken from it while the ring holds work, one ring job runs in
+    between; a slot whose owner has not taken it for `RUNNEXT_GRACE_NS`
+    (20 us; a long job) is stolen;
+  - one **global FIFO** for posts from other threads (the main thread, the
+    timer thread, the I/O pollers, resolver threads) and ring overflow. A
+    worker checks it every 61 jobs even while its own queues are busy;
+  - an out-of-work worker looks in its run-next slot, its ring, the global
+    queue, then **steals** half of another worker's ring (four passes over
+    the workers in a random order; run-next slots only on the last pass,
+    after the grace period), then polls every queue for up to 50 us if no
+    other worker is polling (at most one polls at a time: the "spinning"
+    token), then parks on a condition variable. A post wakes one parked
+    worker only when nobody is polling, and the woken worker inherits the
+    token (Go's `wakep`), so a burst of posts wakes one worker per 50 us at
+    most; a worker that found work while holding the token hands it to
+    another parked worker if work is still queued. Posters and parkers
+    use a store-then-load protocol (sequentially consistent) so a post is
+    never missed by a worker about to park.
+  - A worker that blocks inside `zell_task_await` first moves its run-next
+    job to its ring and wakes a worker to steal from it; a spare worker is
+    started if nobody is idle (10.5). At most 1024 worker threads (core
+    workers plus spares) exist at once.
+  Compile the runtime with `-DZELL_SCHED_STATS` to print wake-up, spin,
+  steal and queue counters at shutdown. The scheduler starts in
+  `zell_runtime_init`, or lazily on the first `zell_sched_post`.
 - **Task** (`zell_task *`, an opaque refcounted object): a state (pending or done),
   a result slot of `result_size` bytes with optional `result_ops`, and a list of
   continuations. A task completes **exactly once**.
 - **Continuation**: `(resume_fn, frame)`. When the task completes, every registered
-  continuation is **posted to the scheduler queue** (in registration order). It is
+  continuation is **posted to the scheduler** (the first one to the completing
+  worker's run-next slot, the others to its ring in registration order; from
+  a non-worker thread, all to the global queue). It is
   never run synchronously inside `zell_task_complete` or
   `zell_task_add_continuation`. As a result, resumption never happens on the
   completer's stack, and it may happen on any worker thread.
@@ -1103,7 +1138,8 @@ built as `*_async` variants that return a `zell_task *`.
 | `void *zell_task_await(zell_task *t)` | **blocking** await: waits until `t` is done and returns the **[borrowed]** result slot. See 10.5 for where it may be used |
 | `zell_task *zell_task_spawn(zell_task_fn fn, void *ctx)` | creates a task (8-byte POD result slot) and posts `fn(task, ctx)` to the pool. `typedef void (*zell_task_fn)(zell_task *task, void *ctx)`. `fn` must call `zell_task_complete(task, ...)`, either before returning or later. The job holds its own reference only **until `fn` returns**, so to complete later `fn` must `zell_retain(task)`. Returns +1 |
 | `zell_task_spawn_ex(fn, ctx, result_size, result_ops)` | the same, with an explicit result type |
-| `zell_task *zell_task_delay(int64_t ms)` | `task.Delay(ms)`: a `Task<void>` completed by a timer thread after `ms` milliseconds (monotonic clock). `ms <= 0` returns an already-completed task. +1 |
+| `zell_task *zell_task_delay(int64_t ms)` | `task.Delay(ms)`: a `Task<void>` completed by a timer thread after `ms` milliseconds (monotonic clock). `ms <= 0` returns `zell_task_done()`. +1 |
+| `zell_task *zell_task_done(void)` | the **immortal completed `Task<void>`**: what an operation that did not have to wait returns (`Delay(0)`, `Mutex.Lock` of a free mutex). Awaiting it takes the `zell_task_is_done` fast path of 10.3; retain and release are no-ops; it is never cancelled (it is done) and must never be completed. +1 nominally |
 | `zell_task *zell_task_all(zell_task *const *tasks, int64_t n)` | `Task<void>` that completes once every task in the array has completed. `n == 0` returns a completed task. Read the individual results from the input tasks. +1 |
 | `zell_task *zell_task_any(zell_task *const *tasks, int64_t n)` | task whose 8-byte result is the `int64_t` **index** of the first input to complete. `n` must be at least 1. +1 |
 
