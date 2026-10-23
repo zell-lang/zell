@@ -674,6 +674,10 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     inserted, also across comments and blank lines; `zell fmt` keeps such
     a chain broken (one `.name` per line, indented). An explicit `;`
     still ends the statement. — `basics/leading_dot_chain`
+80. **`in` is a contextual keyword** (`DESIGN.md` "Управление потоком"):
+    the lexer emits it as an identifier; only `for a[, b] in` treats it as
+    the keyword, so variables, parameters and fields may be named `in`
+    (`for x in in` loops over a variable `in`). — `control/in_contextual`
 
 ## Ambiguities found in DESIGN.md
 

@@ -951,6 +951,10 @@ for cond { ... }                // как while
 for { ... }                     // бесконечный
 ```
 
+`in` — контекстное ключевое слово: ключевое только между переменными
+цикла и итерируемым значением в `for … in …`, в остальных местах — обычное
+имя (`var in = 1`, параметр `in io.Reader`, `for x in in`).
+
 **Протокол итерации.** `for x in v` обходит срезы, массивы, строки (по
 code point), `map`, коллекции `collections` и любой тип, который
 следует протоколу (реализация — `compiler/src/sema/iterate.rs`):
@@ -2474,6 +2478,7 @@ assignop    = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "@=" | "&=" | "|=" | "^="
 var         = "var" ident [ type ] [ "=" expr ] ;
 if          = "if" expr block [ "else" ( if | block ) ] ;
 for         = "for" [ ident [ "," ident ] "in" ( expr | range ) | expr ] block ;
+                                              (* "in" is contextual: an ordinary name elsewhere *)
 switch      = "switch" expr "{" { "case" pattern { "," pattern } ":" stmts }
               [ "default" ":" stmts ] "}" ;
 pattern     = expr | expr ".." expr | path "(" [ idents ] ")" | type ident ;

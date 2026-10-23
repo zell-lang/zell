@@ -523,9 +523,11 @@ pub fn highlight(code: &str) -> String {
                 let _ = name;
                 Some("a")
             }
+            // the contextual keyword of `for x in xs` (rarely a name in docs)
+            K::Ident(name) if name == "in" => Some("k"),
             K::Ident(name) if name.starts_with(|c: char| c.is_ascii_uppercase()) => Some("t"),
             K::Ident(_) => None,
-            K::Namespace | K::Import | K::As | K::Struct | K::Interface | K::Enum | K::Func | K::Static | K::Async | K::Await | K::Var | K::Const | K::If | K::Else | K::For | K::In | K::Switch | K::Case
+            K::Namespace | K::Import | K::As | K::Struct | K::Interface | K::Enum | K::Func | K::Static | K::Async | K::Await | K::Var | K::Const | K::If | K::Else | K::For | K::Switch | K::Case
             | K::Default | K::Return | K::Break | K::Continue | K::Defer | K::Try | K::Catch | K::New | K::Nil | K::True | K::False | K::Map | K::This => Some("k"),
             K::At => Some("a"),
             _ => None,

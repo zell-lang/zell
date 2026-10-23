@@ -1073,17 +1073,23 @@ impl Parser<'_> {
     fn for_stmt(&mut self) -> PResult<ForStmt> {
         let start = self.expect(&TokenKind::For)?;
         let is_binding = |k: &TokenKind| matches!(k, TokenKind::Ident(_) | TokenKind::Underscore);
+        // `in` is a contextual keyword: an identifier spelled `in` right
+        // after the loop variables (`for in in ins` is a loop over `ins`).
+        let is_in = |k: &TokenKind| matches!(k, TokenKind::Ident(s) if s == "in");
         let kind = if self.at(&TokenKind::LBrace) {
             ForKind::Infinite
         } else if self.at_binding()
-            && (self.peek_n(1) == &TokenKind::In
-                || (self.peek_n(1) == &TokenKind::Comma && is_binding(self.peek_n(2)) && self.peek_n(3) == &TokenKind::In))
+            && (is_in(self.peek_n(1))
+                || (self.peek_n(1) == &TokenKind::Comma && is_binding(self.peek_n(2)) && is_in(self.peek_n(3))))
         {
             let mut vars = vec![self.binding()?];
             if self.eat(&TokenKind::Comma) {
                 vars.push(self.binding()?);
             }
-            self.expect(&TokenKind::In)?;
+            if !is_in(self.peek()) {
+                return Err(self.unexpected("`in`"));
+            }
+            self.bump();
             let iter = self.with_struct_lit(false, |p| p.range_expr())?;
             ForKind::In { vars, iter }
         } else {
