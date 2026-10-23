@@ -516,6 +516,7 @@ static void *worker_main(void *arg) {
         }
         if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == q_alive) zell__plat_cond_broadcast(&idle_cv);  /* drained */
         zell__rc_park(0);
+        if (zell__cycles_park) zell__cycles_park();   /* weak: the collector is linked */
         STAT(park);
         zell__plat_cond_wait(&q_cv, &q_mu);
         __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);

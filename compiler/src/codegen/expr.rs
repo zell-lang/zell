@@ -335,13 +335,20 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExprKind::StructLit { struct_id, fields } => {
                 let st = self.struct_llty(*struct_id);
                 let mut agg: BasicValueEnum = st.const_zero().into();
-                let d = self.depth();
+                // Each value is held while the later fields are evaluated
+                // (an early exit releases it), then moved into the
+                // aggregate. Only those holds are consumed: temporaries the
+                // field expressions created (an owned argument to a call
+                // in them) stay until the end of the statement.
+                let mut holds = Vec::with_capacity(fields.len());
                 for (idx, fe) in fields {
                     let v = self.expr_owned(fe)?;
-                    self.hold_raw(fe.ty, v);
+                    holds.push(self.hold_raw(fe.ty, v));
                     agg = self.b.build_insert_value(agg.into_struct_value(), v, *idx, "").unwrap().into_struct_value().into();
                 }
-                self.forget_from(d);
+                for h in holds {
+                    self.unhold(h);
+                }
                 Ok(Val::owned(agg))
             }
             ExprKind::SliceLit(elems) => self.slice_lit(e.ty, elems),
@@ -365,13 +372,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExprKind::Tuple(es) => {
                 let tt = self.llty(e.ty).into_struct_type();
                 let mut agg: BasicValueEnum = tt.get_undef().into();
-                let d = self.depth();
+                let mut holds = Vec::with_capacity(es.len());
                 for (i, x) in es.iter().enumerate() {
                     let v = self.expr_owned(x)?;
-                    self.hold_raw(x.ty, v);
+                    holds.push(self.hold_raw(x.ty, v));
                     agg = self.b.build_insert_value(agg.into_struct_value(), v, i as u32, "").unwrap().into_struct_value().into();
                 }
-                self.forget_from(d);
+                for h in holds {
+                    self.unhold(h);
+                }
                 Ok(Val::owned(agg))
             }
             ExprKind::EnumLit { enum_id, variant, args } => {
@@ -386,14 +395,16 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.b.build_store(tp, self.ctx.i32_type().const_int(*variant as u64, false)).unwrap();
                 let pp = self.b.build_struct_gep(et, p, 1, "").unwrap();
                 let vt = self.variant_llty(*enum_id, *variant);
-                let d = self.depth();
+                let mut holds = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
                     let v = self.expr_owned(a)?;
-                    self.hold_raw(a.ty, v);
+                    holds.push(self.hold_raw(a.ty, v));
                     let fp = self.b.build_struct_gep(vt, pp, i as u32, "").unwrap();
                     self.b.build_store(fp, v).unwrap();
                 }
-                self.forget_from(d);
+                for h in holds {
+                    self.unhold(h);
+                }
                 Ok(Val::owned(self.b.build_load(et, p, "").unwrap()))
             }
             ExprKind::ToInterface { value } => self.to_interface(value, e.ty),
@@ -616,16 +627,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let ops = self.value_ops(et);
         self.call_rt("zell_slice_new_ops", &[out.into(), size.into(), n.into(), n.into(), ops.into()]);
         let elt = self.llty(et);
-        let d = self.depth();
+        // The slice is held while the elements are evaluated (an early exit
+        // releases it with the elements stored so far) and consumed at the
+        // end; temporaries the element expressions created (the receiver of
+        // `-f()`, an owned argument) stay until the end of the statement.
         let whole = self.b.build_load(self.slice_ty(), out, "").unwrap();
-        self.hold_raw(ty, whole);
+        let h = self.hold_raw(ty, whole);
         for (i, x) in elems.iter().enumerate() {
             let v = self.expr_owned(x)?;
             let data = self.b.build_load(self.ptr_ty(), out, "data").unwrap().into_pointer_value();
             let p = unsafe { self.b.build_in_bounds_gep(elt, data, &[self.i64_ty().const_int(i as u64, false)], "") }.unwrap();
             self.b.build_store(p, v).unwrap();
         }
-        self.forget_from(d);
+        self.unhold(h);
         Ok(Val::owned(self.b.build_load(self.slice_ty(), out, "").unwrap()))
     }
 
