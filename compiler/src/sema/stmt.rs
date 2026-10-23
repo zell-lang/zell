@@ -927,6 +927,18 @@ impl<'a> Sema<'a> {
         if matches!(e.kind, ExprKind::Const(_) | ExprKind::FuncRef(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::AttrConst { .. }) {
             return e;
         }
+        if let ExprKind::AddrOf(inner) = &e.kind {
+            if field_path_through_deref(inner) {
+                // `&p.f.g` (e.g. the receiver `&this.mu` of a method on a
+                // value field): the address has no object of its own, so
+                // keep the pointer `p` and re-take the field address at
+                // call time; `p` pins the object, as Go's evaluated
+                // receiver would.
+                let ExprKind::AddrOf(inner) = e.kind else { unreachable!() };
+                let inner = self.spill_field_path(*inner, caps, out, open);
+                return mk(ExprKind::AddrOf(Box::new(inner)), e.ty, e.span);
+            }
+        }
         let (ty, span) = (e.ty, e.span);
         if open {
             let l = self.declare_local("$defer", ty, LocalKind::DeferArg, span);
@@ -937,6 +949,35 @@ impl<'a> Sema<'a> {
         out.push(Stmt { kind: StmtKind::Let { local: l, init: Some(e) }, span });
         caps.push((l, ty));
         mk(ExprKind::Upvalue((caps.len() - 1) as u32), ty, span)
+    }
+}
+
+/// `p.f.g` as a place: a chain of struct fields ending in `*p` where `p`
+/// is a pointer with an object of its own (not itself interior).
+fn field_path_through_deref(e: &hir::Expr) -> bool {
+    match &e.kind {
+        ExprKind::Field { base, .. } => matches!(base.kind, ExprKind::Field { .. } | ExprKind::Deref(_)) && field_path_through_deref(base),
+        ExprKind::Deref(p) => !crate::hir::ownership::is_interior_addr(p),
+        _ => false,
+    }
+}
+
+impl<'a> Sema<'a> {
+    /// Rebuilds a [`field_path_through_deref`] place with its pointer
+    /// spilled (see [`spill`](Self::spill)).
+    fn spill_field_path(&mut self, e: hir::Expr, caps: &mut Vec<(LocalId, TypeId)>, out: &mut Vec<Stmt>, open: bool) -> hir::Expr {
+        let (ty, span) = (e.ty, e.span);
+        match e.kind {
+            ExprKind::Field { base, index } => {
+                let base = self.spill_field_path(*base, caps, out, open);
+                mk(ExprKind::Field { base: Box::new(base), index }, ty, span)
+            }
+            ExprKind::Deref(p) => {
+                let p = self.spill(*p, caps, out, open);
+                mk(ExprKind::Deref(Box::new(p)), ty, span)
+            }
+            _ => unreachable!("not a field path"),
+        }
     }
 }
 

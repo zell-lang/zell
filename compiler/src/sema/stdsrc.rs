@@ -163,6 +163,7 @@ pub(crate) const MODULES: &[(&str, &str, &str)] = &[
     ("time", "time.zl", include_str!("stdlib_src/time.zl")),
     ("io", "io.zl", include_str!("stdlib_src/io.zl")),
     ("os", "os.zl", include_str!("stdlib_src/os.zl")),
+    ("strings", "strings.zl", include_str!("stdlib_src/strings.zl")),
 ];
 
 /// What registering a module needs of it: the names, kinds and type

@@ -1,0 +1,32 @@
+// status: passing
+// run-flags: --leak-check
+namespace spec.stdlib5.os_environ
+
+import io
+
+// os.Environ: "KEY=value" strings of the current environment, including
+// variables set with os.Setenv after start.
+
+func count(env []string, prefix string) int {
+    var n = 0
+    for kv in env {
+        if strings.HasPrefix(kv, prefix) {
+            n += 1
+        }
+    }
+    return n
+}
+
+func main() void! {
+    os.Setenv("ZELL_SPEC_ENVIRON", "a=b c")?
+    var env = os.Environ()
+    println(len(env) > 0)
+    println(count(env, "ZELL_SPEC_ENVIRON=a=b c"))
+    for kv in env {
+        if !strings.Contains(kv, "=") {
+            println("no = in", kv)
+        }
+    }
+    os.Setenv("ZELL_SPEC_ENVIRON", "")?
+    println(count(os.Environ(), "ZELL_SPEC_ENVIRON="))
+}

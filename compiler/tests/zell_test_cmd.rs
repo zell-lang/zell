@@ -106,3 +106,40 @@ fn parallel_tests_overlap_and_run_after_sequential_ones() {
     let b = out.find("=== RUN   TestParallelB").expect("TestParallelB ran");
     assert!(div < a && a < b, "{out}");
 }
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let p = e.unwrap().path();
+        let dst = to.join(p.file_name().unwrap());
+        if p.is_dir() {
+            copy_dir(&p, &dst);
+        } else {
+            std::fs::copy(&p, &dst).unwrap();
+        }
+    }
+}
+
+/// A package with a path dependency (`tests/fixtures/testpkg`, copied so
+/// the lock file is written outside the repository): the dependency is
+/// built, its `*_test.zl` (a second `Database`) is not, `async @test`
+/// functions are awaited, and the renamed `main` is not linted as unused.
+#[test]
+fn package_with_dependency_and_async_tests() {
+    let lib = repo().join("runtime/libzell_rt.a");
+    if !lib.is_file() {
+        let st = Command::new("make").arg("-C").arg(repo().join("runtime")).status().expect("cannot run make");
+        assert!(st.success(), "make -C runtime failed");
+    }
+    let tmp = std::env::temp_dir().join(format!("zell-testpkg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    copy_dir(&repo().join("compiler/tests/fixtures/testpkg"), &tmp);
+    let out = Command::new(env!("CARGO_BIN_EXE_zell")).arg("test").arg(tmp.join("app")).arg("-v").env("ZELL_NO_BACKTRACE", "1").output().expect("cannot run zell");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    for want in ["--- PASS: TestNine (", "--- PASS: TestAsyncNine (", "    got 9, want 10\n--- FAIL: TestAsyncFails (", "--- PASS: asyncPlain (", "FAIL\t3 passed, 1 failed, 0 skipped ("] {
+        assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}{stderr}");
+    }
+    assert!(!stderr.contains("zellUserMain__"), "{stderr}");
+}

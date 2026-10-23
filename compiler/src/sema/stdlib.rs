@@ -817,6 +817,7 @@ pub const FUNCS: &[StdFunc] = &[
     f!("os", "Args", "", "[]string", "zell_os_args"),
     f!("os", "Getenv", "string", "string", "zell_os_getenv"),
     f!("os", "Setenv", "string, string", "void!", "zell_os_setenv"),
+    f!("os", "Environ", "", "[]string", "zell_os_environ"),
     f!("os", "Exit", "int", "void", "zell_os_exit"),
     f!("os", "Hostname", "", "string!", "zell_os_hostname"),
     f!("os", "Pid", "", "int", "zell_os_pid"),

@@ -1,6 +1,6 @@
 env: production
 dev: false
-500 application/problem+json Internal Server Error database is down false
+500 application/problem+json Internal Server Error internal error false
 env: development
 dev: true
 500 application/problem+json Internal Server Error database is down true

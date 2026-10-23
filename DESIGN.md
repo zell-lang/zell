@@ -83,6 +83,11 @@ struct UserService {
   `error`) не перекрывается одноимённым членом пространства stdlib,
   импортированного целиком (атрибут `@delete` из `web`): вне атрибутов
   оно остаётся встроенной функцией.
+- Имя встроенного атрибута (`json`, `yaml`, `toml`, `xml`, `csv`, …) в
+  голове составного пути (`json.Value`) при `import encoding.json`
+  означает импортированное пространство `encoding.json`, а не структуру
+  значения атрибута (у неё нет членов); само имя (`@json(...)`,
+  `Attribute<json>()`) остаётся атрибутом.
 - Неиспользуемый импорт — ошибка компиляции (`unused import`), как в Go.
 - Точка входа — функция `main`, указанная при сборке (по умолчанию ищется в
   корневом пространстве имён проекта). `main` не принимает параметров и
@@ -800,6 +805,10 @@ try Connect(addr) catch err {
   значению).
 - `errors.As(err, &target)` — есть ли в цепочке ошибка типа `target`;
   если да, записывает её.
+- Пользовательская ошибка с методом `Unwrap() error` — тоже звено
+  цепочки (как в Go): `Is`/`As`/`Unwrap` идут к её причине. `Unwrap()`
+  вызывается один раз, когда значение становится `error`; текст
+  ошибки — только её `Message()` (причина к нему не дописывается).
 - `panic(msg)` — для невосстановимых ситуаций (баг, нарушение инварианта);
   не используется для ожидаемых ошибок.
 
@@ -829,6 +838,9 @@ try Connect(addr) catch err {
   запись в обёртку, `try ... else` отбрасывает её, результат `async`-функции
   забирает её с собой перед публикацией задачи. Чужая трасса не меняется
   никогда.
+- `errors.Trace` печатает файл записи относительно текущего рабочего
+  каталога, если он под ним (абсолютные пути зависимостей, сборка из
+  другого каталога), иначе — как его видел компилятор.
 
 ```zell
 try ReadConfig("app.toml") catch err {
@@ -995,7 +1007,9 @@ switch res {
   вычисляются сразу. Отложенный вызов функции с `T!` — ошибка компиляции
   (результат нужно обработать): ошибку обрабатывают в отложенном замыкании,
   `defer func() { try Close() catch err { ... } }()`. `defer await f()`
-  запрещён.
+  запрещён. Получатель-поле (`defer this.mu.Unlock()` у значения
+  `task.Mutex` в поле): сохраняется указатель `this`, адрес поля берётся
+  при вызове — тот же адрес, что вычислил бы Go, без внутреннего указателя.
 
 ## Асинхронность
 
@@ -1054,7 +1068,9 @@ async func main() {
   ждёт её завершения (runtime/ABI.md §10.11).
 - Методы интерфейсов не бывают `async`: асинхронный метод интерфейса
   объявляется как возвращающий `Task<T>` и реализуется вызовом `async`
-  функции (так устроен `http.Handler`).
+  функции (так устроен `http.Handler`). `async func X()` в интерфейсе —
+  ошибка компиляции с подсказкой `func X() Task<T>`; `async`-метод
+  структуры интерфейс не реализует (его вызов даёт задачу, а не `T`).
 - Асинхронные лямбды: `async func(n int) int { ... }` и
   `async (n int) => ...`; вызов возвращает `Task<T>`.
 - Реализация в LLVM: через LLVM coroutines (`llvm.coro.*`), каждая `async`
@@ -1762,11 +1778,11 @@ func Handle(words []string) int {
 |--------------|------------|-------------|
 | `io` | `println`, `print`, `ReadFile`, `WriteFile`, потоки stdin/stdout/stderr, `Reader`/`Writer` | ✓ `println`, `print`, `ReadFile`, `WriteFile`, `ReadLine`, `ReadAll`, `ReadLines`, `WriteLines`, `Eprint`, `Eprintln`; интерфейсы `Reader`/`Writer`/`Closer`/`Seeker`/`ReadWriter`/… (`Read(buf) int!`, 0 — конец), `AsyncReader`/`AsyncWriter` (их реализует `net.Conn`), `Copy`/`CopyN`/`ReadFull`/`ReadN`/`ReadAllFrom`, `StringReader`/`BytesReader`/`BytesWriter`, `LimitReader`/`MultiReader`/`MultiWriter`/`TeeReader`/`Pipe`/`BoundedPipe(max)` (ограниченный буфер: `Writer.Send` ждёт места, `Write` — ошибка «pipe full»)/`Discard`, `BufferedReader`/`BufferedWriter`, `Scanner`, `Lines`/`Words`, `io.EOF` |
 | `fmt` | `Format("{0} {1}", a, b)`, `Sprintf`, форматирование чисел и дат | ✓ `Format`, `Sprintf` (глаголы Go: `%v %d %s %f %.2f %5d %-4d %03d %x %q %c %t %e %%`); даты — `time.Format` |
-| `strings` | `Split`, `Join`, `Trim`, `Contains`, `Replace`, `ToUpper`, `ToInt`, `Builder` | ✓ всё (`Builder{}` с `Write`, `String`, `Len`, `Reset`), плюс `ToLower`, `HasPrefix`/`HasSuffix`, `Index`/`LastIndex`, `Repeat`, `ToFloat`, `Fields`, `Count`, `TrimPrefix`/`TrimSuffix`/`TrimLeft`/`TrimRight`, `SplitN`, `EqualFold`, `Reverse`, `PadLeft`/`PadRight`, `Runes`/`FromRunes`, `Bytes`/`FromBytes`, `Compare`, `Title` |
+| `strings` | `Split`, `Join`, `Trim`, `Contains`, `ContainsAny`, `IndexAny`, `Replace` (каждое вхождение; `ReplaceAll` — синоним), `ToUpper`, `ToInt`, `Builder` | ✓ всё (`Builder{}` с `Write`, `String`, `Len`, `Reset`), плюс `ToLower`, `HasPrefix`/`HasSuffix`, `Index`/`LastIndex`, `Repeat`, `ToFloat`, `Fields`, `Count`, `TrimPrefix`/`TrimSuffix`/`TrimLeft`/`TrimRight`, `SplitN`, `EqualFold`, `Reverse`, `PadLeft`/`PadRight`, `Runes`/`FromRunes`, `Bytes`/`FromBytes`, `Compare`, `Title` |
 | `math` | `Sqrt`, `Abs`, `Min`, `Max`, `Pow`, `Floor`, тригонометрия, константы | ✓ `Sqrt`, `Abs`, `Min`, `Max`, `Pow`, `Floor`, `Ceil`, `Round`, `Trunc`, `Mod`, `Hypot`, `Sin`/`Cos`/`Tan`/`Atan2`, `Log`/`Log2`/`Log10`/`Exp`, `IsNaN`, `IsInf`, `Inf`, `NaN`, `Pi`, `E`; для `int` (перегрузки нет) — `IMin`, `IMax`, `IAbs`; целые константы `MaxInt`, `MinInt`, `MaxInt32`, `MinInt32`, `MaxUint32`, `MaxUint` |
 | `collections` | `List<T>`, `Map<K,V>`, `Set<T>`, `Queue<T>`, `Stack<T>` (см. «Generics») | ✓, плюс `LinkedList<T>`, `Deque<T>`, `Ring<T>(cap)`, `Heap<T: Ordered>`, `PriorityQueue<T>(less)` (FIFO при равенстве), `OrderedMap<K: Ordered, V>` (`Min/Max/Floor/Ceiling/Range`), `LRU<K, V>(cap)`, `BitSet` (`stdlib_src/collections2.zl`; `for` по ним — через `Items()`/`Keys()`) |
 | `task` | `All`, `Any`, `Delay`, `Spawn`, `Channel<T>`, `Mutex`, `WaitGroup`, `Scope`, `WithTimeout`, `WithDeadline`, `NewCancel`, `CheckCancelled`, `OnCancel`, `ErrCancelled`, `Context` | ✓ всё: `All`, `Any`, `Delay(ms)`, `Yield()`, `Spawn(f func() Task<T>) Task<T>`, `Channel<T>(cap)` (`Send(v) Task<void>`, `Recv() Task<T!>`, `Close`, `Len`, `Cap`, `IsClosed`), `Mutex` (`Lock() Task<void>`, `TryLock`, `Unlock`), `WaitGroup` (`Add`, `Done`, `Count`, `Wait() Task<void>`), `Timeout(t, ms) Task<bool>`, `Go(f func() Task<void>)`; значения контекста `Key<T>()`, `Get(key) *T`, `With(key, value, f)`, `CurrentContext() Context`, `RunWith(ctx, f)`, `SpawnWith(ctx, f)`; отмена `NewCancel() CancelHandle` (`Context`, `Cancel()`, `IsCancelled()`), `WithTimeout(ms, f)`, `CheckCancelled() void!`, `IsCancelled()`, `ErrCancelled`; `Any` отменяет проигравших. Нет: `Scope`, `WithDeadline`, `OnCancel`, отмены остальных в `All` |
-| `os` | аргументы, переменные окружения, `Exit`, запуск процессов, сигналы | ✓ `Args`, `Getenv`, `Setenv`, `Exit`, `Hostname`, `Pid`, `Cwd`, `Chdir`; файлы `Open`/`Create`/`OpenFile(path, O_* флаги, perm)` → `File` (`Read`/`ReadAt`/`Write`/`Seek`/`Close`/`Sync`/`Truncate`/`Stat`, реализует интерфейсы `io`), `Stat`/`Lstat` → `FileInfo`, `ReadDir` → `[]DirEntry`, `Chmod`, `Stdin/Stdout/Stderr()`; `os.signal` (`Wait`, `WaitAny`, `Notify`, `Catch`, `Ignore`, `Reset`, `Raise`); `os.user`; процессы — `process` |
+| `os` | аргументы, переменные окружения, `Exit`, запуск процессов, сигналы | ✓ `Args`, `Getenv`, `Setenv`, `Environ`, `Exit`, `Hostname`, `Pid`, `Cwd`, `Chdir`; файлы `Open`/`Create`/`OpenFile(path, O_* флаги, perm)` → `File` (`Read`/`ReadAt`/`Write`/`Seek`/`Close`/`Sync`/`Truncate`/`Stat`, реализует интерфейсы `io`), `Stat`/`Lstat` → `FileInfo`, `ReadDir` → `[]DirEntry`, `Chmod`, `Stdin/Stdout/Stderr()`; `os.signal` (`Wait`, `WaitAny`, `Notify`, `Catch`, `Ignore`, `Reset`, `Raise`); `os.user`; процессы — `process` |
 | `fs` | файлы и каталоги: `Exists`, `ReadDir`, `Mkdir`, `Remove`, `Stat`, пути | ✓ `Exists`, `IsDir`, `ReadDir`, `Mkdir`, `MkdirAll`, `Remove`, `RemoveAll`, `Rename`, `Copy`, `AppendFile`, `Size`, `ModTime` (вместо `Stat`), пути `Join`, `Base`, `Dir`, `Ext`, `Abs`, `TempDir`; `fs.ErrNotFound` — ошибка-константа, которую оборачивают все ошибки «файл не найден» (`errors.Is(err, fs.ErrNotFound)`) |
 | `time` | `Now`, `Duration`, `Sleep`, `Timer`, форматирование и парсинг дат | ✓ функциями над `int` (Unix-миллисекунды, UTC): `Now`, `NowNanos`, `Sleep`, `Since`, `Format`/`Parse` (strftime-раскладка), `Year`…`Second`, `Weekday`; типы (`stdlib_src/time.zl`): `Duration` (нс; `Seconds()`, `String()` как в Go `1h2m3.5s`, `ParseDuration`, конструкторы `time.Seconds(n)`… вместо констант), `Time` (`Time.Now()`/`Current()`, `Unix`, `Date`, `Add`/`Sub`/`AddDate`, `Before`/`After`/`Equal`, `Format` по эталону Go и `Strftime`, `ParseTime`/`ParseInLocation`, `Truncate`/`Round`, `In`/`UTC`/`Local`, `Zone`, `ISOWeek`), `Location` (`UTC()`, `Local()`, `LoadLocation` из `/usr/share/zoneinfo` с POSIX-правилами после последнего перехода, `FixedZone`), раскладки `RFC3339`…, `Instant` (монотонные часы), async `NewTicker`/`NewTimer`/`After`. Имена Go, занятые int-функциями: `Since` → `Elapsed`, `Sleep` → `SleepFor`, `Parse` → `ParseTime`, `t.Month()` — `int` |
 | `errors` | `Wrap`, `Unwrap`, `Is`, `As`, `New` | ✓ всё |
@@ -2334,8 +2350,9 @@ zell test ./src              # тесты (@test func TestX(t *testing.T)): --fi
 ```
 
 - `zell test [path]` находит функции `@test` (`func TestX(t *testing.T)`,
-  `func X()` без параметров, бенчмарки `func BenchX(b *testing.B)` — с
-  `--bench`), генерирует драйвер, вызывающий `testing.Main`, и
+  `func X()` без параметров, они же `async` — `func(*testing.T) Task<void>`,
+  раннер их ожидает (`testing.Case.RunAsync`); бенчмарки
+  `func BenchX(b *testing.B)` — с `--bench`), генерирует драйвер, вызывающий `testing.Main`, и
   запускает его; собственные `main` переименовываются в памяти. Каждый
   тест выполняется в отдельном процессе (тестовый бинарник перезапускает
   себя с `--run-one`), поэтому `t.Fatal`, `t.Skip` и паника завершают только

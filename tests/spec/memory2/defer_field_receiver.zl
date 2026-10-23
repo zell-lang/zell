@@ -1,0 +1,53 @@
+// status: passing
+namespace spec.memory2.defer_field_receiver
+
+import io
+
+// `defer this.mu.Unlock()` on a value `task.Mutex` field: the receiver
+// `&this.mu` is an interior pointer, so the deferred call keeps `this` and
+// takes the field address when it runs (Go evaluates the same address).
+
+struct Gauge {
+    n int
+
+    func Bump() {
+        this.n = this.n + 1
+    }
+}
+
+struct Inner {
+    g Gauge
+}
+
+struct Counter {
+    mu task.Mutex
+    inner Inner
+    n int
+
+    func Inc() {
+        this.mu.Lock()
+        defer this.mu.Unlock()
+        this.n = this.n + 1
+    }
+
+    // A nested value field, deferred inside a loop (the thunk path).
+    func BumpAll(k int) {
+        for _ in 0..k {
+            defer this.inner.g.Bump()
+        }
+        println("deferred", k)
+    }
+}
+
+func main() {
+    var c = &Counter{}
+    c.Inc()
+    c.Inc()
+    println(c.n)
+    c.BumpAll(3)
+    println(c.inner.g.n)
+    // The mutex was released by every deferred Unlock.
+    c.mu.Lock()
+    println("locked again")
+    c.mu.Unlock()
+}

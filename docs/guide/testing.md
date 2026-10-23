@@ -108,6 +108,34 @@ func abs(x int) int {
 }
 ```
 
+## Async tests
+
+A test can be `async` (`func(t *testing.T) Task<void>`, or `async` with
+no parameters); the runner awaits it, so it can `await` timers, channels
+and network calls directly.
+
+```zell
+// zell test
+namespace guide.testing.async
+
+async func fetchAnswer() int {
+    await task.Delay(1)
+    return 42
+}
+
+@test
+async func TestFetch(t *testing.T) {
+    var n = await fetchAnswer()
+    testing.Equal(t, n, 42)
+}
+```
+
+## Packages and dependencies
+
+In a package `zell test` resolves the dependency graph like `zell build`
+(dev-dependencies included) and compiles the package's own `*_test.zl`
+files; the test files of its dependencies are never compiled into it.
+
 ## Benchmarks
 
 A benchmark takes a `*testing.B` and runs the measured code `b.N` times;

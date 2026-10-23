@@ -1,0 +1,4 @@
+[package]
+name = "testdep"
+version = "0.1.0"
+namespace = "testdep"

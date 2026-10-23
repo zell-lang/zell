@@ -1,0 +1,14 @@
+namespace testdep
+
+// A test-only type: compiled when testing this package, never into a
+// dependent (testapp declares its own Database).
+struct Database {
+    Name string
+}
+
+@test
+func TestTriple(t *testing.T) {
+    var db = Database{Name: "x"}
+    testing.Equal(t, db.Name, "x")
+    testing.Equal(t, Triple(2), 6)
+}

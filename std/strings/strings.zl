@@ -1,0 +1,28 @@
+// strings functions written in Zell (the rest of strings are runtime
+// externs, std/strings/strings_extern.zl; Builder is in builder.zl).
+namespace strings
+
+// IndexAny returns the byte index of the first rune of s that is any of
+// the runes of chars, or -1 when there is none (or chars is empty).
+func IndexAny(s string, chars string) int {
+    var best = -1
+    for r in Runes(chars) {
+        var i = Index(s, FromRunes([r]))
+        if i >= 0 && (best < 0 || i < best) {
+            best = i
+        }
+    }
+    return best
+}
+
+// ContainsAny reports whether s contains any of the runes of chars.
+func ContainsAny(s string, chars string) bool {
+    return IndexAny(s, chars) >= 0
+}
+
+// ReplaceAll returns a copy of s with every non-overlapping instance of
+// old replaced by repl; the same as Replace, which also replaces every
+// instance (Go's strings.ReplaceAll).
+func ReplaceAll(s string, old string, repl string) string {
+    return Replace(s, old, repl)
+}

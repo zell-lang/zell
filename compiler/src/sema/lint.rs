@@ -458,7 +458,8 @@ impl Cx<'_> {
     /// Unused private functions and their unused parameters.
     fn unused(&mut self, id: FuncId, f: &Function) {
         let FuncKind::Free = f.kind else { return };
-        if f.exported || !f.attrs.is_empty() || f.name == "main" || f.name == "init" || f.name.contains(['<', '[', '$', '#']) {
+        // `zellUserMain__`: the `main` that `zell test` renames (testrun.rs).
+        if f.exported || !f.attrs.is_empty() || f.name == "main" || f.name == "init" || f.name == "zellUserMain__" || f.name.contains(['<', '[', '$', '#']) {
             return;
         }
         if !self.refs.contains(&id.0) {

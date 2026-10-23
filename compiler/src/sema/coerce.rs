@@ -62,14 +62,27 @@ impl<'a> Sema<'a> {
                 Some((f, _)) => {
                     let sig = &self.sigs[f.0 as usize];
                     if sig.params != m.params || sig.ret != m.ret || sig.is_async {
-                        let have = self.sig_string(&sig.params, sig.ret);
-                        let want = self.sig_string(&m.params, m.ret);
-                        problems.push(format!("method {} has type {have}, want {want}", m.name));
+                        problems.push(self.method_mismatch(&m, sig));
                     }
                 }
             }
         }
         problems
+    }
+
+    /// The problem text for a method whose signature does not match the
+    /// interface method `m`: an `async` method never matches (interface
+    /// methods return `Task<T>` explicitly, DESIGN.md "Асинхронность").
+    fn method_mismatch(&self, m: &MethodSig, sig: &Sig) -> String {
+        let have = self.sig_string(&sig.params, sig.ret);
+        let want = self.sig_string(&m.params, m.ret);
+        if sig.is_async {
+            return format!(
+                "method {} is async (calling it yields a task), want {want}: interface methods are not async; implement it as a plain method returning Task<T> that calls an async function",
+                m.name
+            );
+        }
+        format!("method {} has type {have}, want {want}", m.name)
     }
 
     /// [`missing_methods`](Self::missing_methods) for enum `eid` (its
@@ -86,9 +99,7 @@ impl<'a> Sema<'a> {
                 Some(f) => {
                     let sig = &self.sigs[f.0 as usize];
                     if sig.params != m.params || sig.ret != m.ret || sig.is_async {
-                        let have = self.sig_string(&sig.params, sig.ret);
-                        let want = self.sig_string(&m.params, m.ret);
-                        problems.push(format!("method {} has type {have}, want {want}", m.name));
+                        problems.push(self.method_mismatch(&m, sig));
                     }
                 }
             }

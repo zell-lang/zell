@@ -577,6 +577,34 @@ pub fn build_sources(files: Vec<crate::span::SourceFile>, output: &Path, opts: &
     emit_plain(&program, "test", output.to_path_buf(), &opts)
 }
 
+/// `zell test` in a project: like [`build_sources`], but `files` (the
+/// target package's sources, then generated ones from `generated_from`
+/// on) are checked together with the package's dependency closure,
+/// dev-dependencies included, the way `zell build` resolves it. Without a
+/// manifest it is [`build_sources`].
+pub fn build_test_sources(files: Vec<crate::span::SourceFile>, generated_from: usize, output: &Path, opts: &BuildOptions) -> Result<PathBuf, String> {
+    use_target(opts, true)?;
+    let (project, targets) = match plan(opts)? {
+        Plan::Plain(_) => return build_sources(files, output, opts),
+        Plan::Project(p, t) => (p, t),
+    };
+    sync_lock(&project, opts)?;
+    let target = *targets.first().ok_or("no package to test")?;
+    let mut diags = Diagnostics::new();
+    let own = package::TargetSources { files, generated_from };
+    let checked = crate::sema::debug_agent::with(opts.debug_agent_on(), || package::check_with(&project, target, true, &mut diags, Some(own)))?;
+    if !diags.is_empty() {
+        eprint!("{}", diags.render_all_files(&checked.files));
+    }
+    let program = match checked.program {
+        Some(p) if !diags.has_errors() => p,
+        _ => return Err("compilation failed".into()),
+    };
+    let mut opts = opts.clone();
+    opts.emit = Emit::Exe;
+    emit_plain(&program, "test", output.to_path_buf(), &opts)
+}
+
 /// Code generation, optimisation and linking of a checked plain program.
 fn emit_plain(program: &Program, name: &str, output: PathBuf, opts: &BuildOptions) -> Result<PathBuf, String> {
     if program.entry.is_none() && opts.emit == Emit::Exe {

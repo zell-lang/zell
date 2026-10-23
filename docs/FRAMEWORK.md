@@ -340,9 +340,12 @@ async func main() {
   типа (`return web.NotFound()` в `web.Result<User>!`). Значения пишутся
   JSON по умолчанию, XML (`Accept: application/xml`) или YAML, строки —
   `text/plain`. Ошибка `T!` из обработчика → Problem Details (RFC 9457)
-  с сообщением в `detail`, статусом из `web.Error(404, "...")`
-  (`HttpError`), а при `ZELL_ENV=development` — с `trace` =
-  `errors.Trace(err)`; 404/405 — тоже Problem Details.
+  со статусом и сообщением в `detail` из `web.Error(404, "...")`
+  (`HttpError`); у любой другой ошибки (500) `detail` — общее
+  `"internal error"`, а настоящее сообщение уходит только в лог (утечка
+  SQL, путей, хостов клиенту); при `ZELL_ENV=development` — настоящее
+  сообщение и `trace` = `errors.Trace(err)`; 404/405 — тоже Problem
+  Details.
 - ✓ **OpenAPI 3.1**: `app.MapOpenApi("/openapi.json")` — документ из
   метаданных, которые генерирует компилятор вместе с таблицей маршрутов
   (параметры, тела и ответы со схемами `json.Schema<T>()`, теги по
@@ -674,6 +677,9 @@ using (log.Context.Push("RequestId", reqId)) { ... }   // или через asyn
   `Verbose`, `Debug`, `Information`/`Info`, `Warning`/`Warn`, `Error`,
   `Fatal`, каждый принимает ошибку первым аргументом (`Error(err, ...)`
   добавляет свойства `ErrorMessage` и `ErrorTrace` = `errors.Trace(err)`).
+  Текстовые синки в `{Exception}` пишут сообщение и одну строку — где
+  ошибка создана; всю трассу возврата — только у событий `Debug` и
+  `Verbose` (свойство `ErrorTrace` в JSON её хранит всегда).
 - Конфигурация: `log.New()`, `MinimumLevel`, `MinimumLevelOverride(prefix,
   lvl)` (по категории, самый длинный префикс), `MinimumLevelControlledBy(
   log.NewLevelSwitch(lvl))` (смена уровня на ходу), `Clock(f)` (тестовые

@@ -1,0 +1,16 @@
+// status: passing
+// run-flags: --leak-check
+namespace spec.stdlib5.strings_any
+
+import io
+
+// strings.ContainsAny / IndexAny (byte index of the first rune of s found
+// in chars) and ReplaceAll (every instance, like Replace).
+
+func main() {
+    println(strings.ContainsAny("failure", "ui"), strings.ContainsAny("foo", ""), strings.ContainsAny("", "a"))
+    println(strings.IndexAny("golang", "ny"), strings.IndexAny("chicken", "xyz"))
+    println(strings.IndexAny("héllo wörld", "öw"), strings.IndexAny("añb", "b"))
+    println(strings.ReplaceAll("oink oink oink", "oink", "moo"))
+    println(strings.ReplaceAll("aaaa", "aa", "b"))
+}

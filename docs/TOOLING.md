@@ -533,7 +533,8 @@ trivia лексера → документ → принтер с алгорит�
 тесты запускались кнопкой из редактора.
 
 Реализовано (`compiler/src/testrun.rs`, `testing`): `@test func
-TestX(t *testing.T)` (и `@test func X()`), бенчмарки `@bench func BenchX(b
+TestX(t *testing.T)` (и `@test func X()`; обе формы могут быть `async`,
+раннер ждёт задачу через `testing.Case.RunAsync`), бенчмарки `@bench func BenchX(b
 *testing.B)` (или `@test` с `*testing.B`) для `zell test --bench`. Каждый
 тест идёт в своём дочернем процессе; тест, в теле которого есть оператор
 `t.Parallel()` (находится при обнаружении тестов), выполняется параллельно с

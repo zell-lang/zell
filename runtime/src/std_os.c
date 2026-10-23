@@ -38,6 +38,18 @@ void zell_os_setenv(const zell_string *name, const zell_string *value, zell_erro
     if (e) set_err(err, "setenv", n, e);
 }
 
+void zell_os_environ(zell_slice *out) {
+    zell_slice_new_ops(out, 8, 0, 8, &zell_ops_ref);
+    char **env = zell__plat_environ();
+    if (!env) return;
+    for (char **e = env; *e; e++) {
+        zell_string *s = zell_string_from_cstr(*e);
+        zell_slice_append(out, 8, &zell_ops_ref, &s);
+        zell_release(s);
+    }
+    zell__plat_free_strv(env);
+}
+
 void zell_os_exit(int64_t code) { zell_exit((int32_t)code); }
 
 zell_string *zell_os_hostname(zell_error **err) {

@@ -464,11 +464,34 @@ impl<'a> Sema<'a> {
         None
     }
 
+    /// `json.Value` in a file with `import encoding.json`: a builtin
+    /// attribute name (`json`, `yaml`, `toml`, ...) as the head of a
+    /// qualified path is the imported namespace of that last segment, not
+    /// the attribute's value struct (which has no members to qualify).
+    fn attr_name_namespace(&mut self, segs: &[&ast::Ident]) -> Option<NsIdx> {
+        let n = segs[0].name.as_str();
+        if segs.len() < 2 || !super::reflect::ATTR_STRUCTS.contains(&n) || self.nss[self.cur_ns].members.contains_key(n) {
+            return None;
+        }
+        let suffix = format!(".{n}");
+        let (i, ns) = self.file_scopes[self.cur_file].imports.iter().enumerate().find_map(|(i, e)| match e {
+            ImportEntry::Glob(ns) if self.nss[*ns].path.ends_with(&suffix) => Some((i, *ns)),
+            _ => None,
+        })?;
+        if let Some(u) = self.file_scopes[self.cur_file].import_uses.get_mut(i) {
+            u.1 = true;
+        }
+        Some(ns)
+    }
+
     /// Resolves as many leading segments of `segs` as name declarations
     /// (namespaces, types, static methods, variants); returns the result and
     /// the number of segments consumed. `None` if the head is unknown.
     pub(crate) fn resolve_segments(&mut self, segs: &[&ast::Ident], report: bool) -> Option<(PathRes, usize)> {
-        let mut cur = self.lookup_global(segs[0], report)?;
+        let mut cur = match self.attr_name_namespace(segs) {
+            Some(ns) => PathRes::Member(Member::Ns(ns)),
+            None => self.lookup_global(segs[0], report)?,
+        };
         self.ide_res(segs[0], cur);
         let mut i = 1;
         while i < segs.len() {
@@ -735,8 +758,23 @@ impl<'a> Sema<'a> {
                 if self.interfaces[iid].span != Span::DUMMY {
                     self.ide_def(index::SymKey::IfaceMethod(iid as u32, ms.len() as u32), &m.name, m.span, Some(index::SymKey::Interface(iid as u32)));
                 }
-                let params = m.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
+                let params: Vec<TypeId> = m.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
                 let ret = m.ret.as_ref().map(|r| self.resolve_type(r)).unwrap_or(self.tt.void);
+                if m.is_async {
+                    // DESIGN.md "Асинхронность": interface methods are never
+                    // `async`; the asynchronous shape is `func X() Task<T>`.
+                    let ps: Vec<String> = params.iter().map(|&t| self.tn(t)).collect();
+                    self.err(
+                        format!(
+                            "interface method {} cannot be async: declare it as `func {}({}) Task<{}>` and implement it with a method that returns the task of an async function",
+                            m.name.name,
+                            m.name.name,
+                            ps.join(", "),
+                            self.tn(ret)
+                        ),
+                        m.span,
+                    );
+                }
                 let default = if m.body.is_some() { self.iface_defaults.get(&(iid as u32, m.name.name.clone())).copied() } else { None };
                 ms.push(hir::MethodSig { name: m.name.name.clone(), params, ret, default });
             }

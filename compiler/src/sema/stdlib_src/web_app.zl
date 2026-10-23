@@ -1078,12 +1078,22 @@ func Error(status int, detail string) HttpError {
 // 500 and the message; in development mode with errors.Trace.
 func writeError(c *Context, err error) {
     var status = 500
+    var known = false
     switch err {
         case HttpError h:
             status = h.Status
+            known = true
     }
-    var p = problemFor(status, err.Message())
-    if c.App != nil && c.App.IsDevelopment() {
+    var dev = c.App != nil && c.App.IsDevelopment()
+    // An error that is not a web.Error may carry internals (SQL, paths,
+    // hosts): outside development the client gets a generic detail and
+    // the message goes only to the log below.
+    var detail = "internal error"
+    if known || dev {
+        detail = err.Message()
+    }
+    var p = problemFor(status, detail)
+    if dev {
         p.Trace = errors.Trace(err)
     }
     c.Response.Headers = nil

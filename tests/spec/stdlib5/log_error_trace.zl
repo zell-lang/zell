@@ -1,0 +1,25 @@
+// status: passing
+// run-flags: --leak-check
+namespace spec.stdlib5.log_error_trace
+
+
+// {Exception} of the text sinks: the error message and its creation site
+// on one line; the whole return trace only for Debug/Verbose events. The
+// structured ErrorTrace property keeps the whole trace.
+
+func open() int! {
+    return error("not found")
+}
+
+func load() int! {
+    return open()?
+}
+
+func main() {
+    var opts = log.ConsoleOptions{Template: "{Level:u3} {Message:lj}{NewLine}{Exception}", Stdout: true}
+    var lg = log.New().MinimumLevel(log.Level.Verbose).WriteTo.Console(opts).CreateLogger()
+    try load() catch err {
+        lg.Error(err, "load failed")
+        lg.Debug(err, "load failed")
+    }
+}

@@ -1,0 +1,41 @@
+// test: cli.App.Out receives help and version text (nil: stdout), App.Errors the errors (nil: stderr)
+// status: passing
+// run-flags: --leak-check
+namespace spec.stdlib2.cli_out
+
+import io
+
+func app(out *bytes.Buffer, errs *bytes.Buffer) cli.App {
+    return cli.App{
+        Name: "tool",
+        Version: "1.2.3",
+        Help: "a tool",
+        Out: out,
+        Errors: errs,
+        Commands: [
+            cli.Command{Name: "find", Help: "find a thing", Run: func(c *cli.Context) void! {
+                println("found")
+            }},
+            cli.Command{Name: "fail", Help: "plain failure", Run: func(c *cli.Context) void! {
+                return error("boom")
+            }},
+        ],
+    }
+}
+
+func run(args []string) {
+    var out = new bytes.Buffer{}
+    var errs = new bytes.Buffer{}
+    var code = app(out, errs).Run(args)
+    println(args[1], "->", code)
+    println("out:", strings.Contains(out.String(), "find a thing"), strings.Trim(strings.Split(out.String(), "\n")[0]))
+    println("errors:", strings.Trim(errs.String()))
+}
+
+func main() {
+    run(["tool", "--help"])
+    run(["tool", "--version"])
+    run(["tool", "find"])
+    run(["tool", "nope"])
+    run(["tool", "fail"])
+}

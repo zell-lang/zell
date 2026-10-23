@@ -1,0 +1,6 @@
+namespace testdep
+
+// Triple is what the dependent package tests through.
+func Triple(n int) int {
+    return n * 3
+}

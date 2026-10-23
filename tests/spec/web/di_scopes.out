@@ -13,5 +13,5 @@ GET /ctx
   drop RequestState 100
   200 true
 GET /missing
-  500 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"web: no service registered for *spec.web.di_scopes.Missing","instance":"/missing"}
+  500 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"internal error","instance":"/missing"}
 lifetime: Scoped true false

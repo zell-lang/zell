@@ -334,12 +334,29 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         Ok(f)
     }
 
+    /// Whether struct `sid` has an instance method `Unwrap() error`.
+    fn has_unwrap(&self, sid: u32) -> bool {
+        let Some((fid, _)) = self.resolve_method(sid, "Unwrap") else { return false };
+        let f = &self.prog.funcs[fid.0 as usize];
+        f.params.len() == 1 && !f.is_async && matches!(self.ty(f.ret), Type::Error)
+    }
+
     /// Boxes struct value `v` (owned) as a typed error (+1).
     fn box_error(&mut self, st: TypeId, sid: u32, v: BasicValueEnum<'ctx>) -> R<BasicValueEnum<'ctx>> {
         let thunk = self.message_thunk(sid)?;
         let obj = self.new_box(st, v);
         let ti = self.type_info(st);
         let e = self.call_rt_v("zell_error_new_typed", &[ti.into(), obj.into(), thunk.as_global_value().as_pointer_value().into()]);
+        if self.has_unwrap(sid) {
+            // DESIGN.md "Ошибки": a user `Unwrap() error` links the boxed
+            // error to its cause for errors.Is/As/Unwrap (ABI.md 7: the
+            // `inner` of a typed error; its Message() is the whole text).
+            let m = self.method_entry(sid, "Unwrap")?;
+            let p = self.payload(obj);
+            let cause = self.b.build_call(m, &[p.into()], "").unwrap().try_as_basic_value().left().unwrap();
+            let slot = self.byte_gep(e.into_pointer_value(), 24);
+            self.b.build_store(slot, cause).unwrap();
+        }
         self.call_rt("zell_release", &[obj.into()]);
         Ok(e)
     }

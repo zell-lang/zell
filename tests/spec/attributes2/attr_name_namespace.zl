@@ -1,0 +1,24 @@
+// status: passing
+namespace spec.attributes2.attr_name_namespace
+
+import io
+import encoding.json
+import encoding.yaml
+
+// With `import encoding.json`, `json.X` is the namespace even though `json`
+// is also the builtin attribute (`@json(name:)`, `Attribute<json>()`).
+
+struct User {
+    @json(name: "user_name")
+    Name string
+}
+
+func main() {
+    var v json.Value = try json.ParseValue("{\"a\": 1}") catch err { return }
+    println(v.IsObject())
+    println(json.Format(User{Name: "x"}))
+    var y yaml.Value = try yaml.ParseValue("a: 1") catch err { return }
+    println(y.IsMap())
+    var f = reflect.TypeOf<User>().Fields[0]
+    println(f.Attribute<json>().name)
+}

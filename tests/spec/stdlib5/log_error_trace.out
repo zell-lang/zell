@@ -1,0 +1,8 @@
+ERR load failed
+not found
+  created at   tests/spec/stdlib5/log_error_trace.zl:11  open
+DBG load failed
+not found
+  created at   tests/spec/stdlib5/log_error_trace.zl:11  open
+  returned via tests/spec/stdlib5/log_error_trace.zl:15  load
+  returned via tests/spec/stdlib5/log_error_trace.zl:21  main
