@@ -114,7 +114,13 @@
 //! `T!` as `T` plus a trailing `zell_error **err` (`void!`: only the
 //! out-error). Errors record a return trace (ABI.md §7.4, [`trace`]):
 //! creation sites and every `?` / catching `try` pass a static
-//! `zell_error_site` to the runtime. A `?` inside a block `try` branches
+//! `zell_error_site` to the runtime. A shared error (a sentinel) keeps its
+//! trace in a thread-local pending record while it propagates; the end of
+//! the propagation settles it: `try ... catch err` calls `zell_error_caught`
+//! with `keep` = "the handler can observe the trace" (any use of `err`
+//! other than `Message()` / `errors.Is`), `try ... else` and a catch without
+//! a binding call `zell_error_discarded`, and an async result is settled
+//! before `zell_task_complete`. A `?` inside a block `try` branches
 //! to its `catch` ([`TryTarget`]) instead of returning.
 //!
 //! **Functions.** Every function has a single exit block: `return` stores

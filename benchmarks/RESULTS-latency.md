@@ -228,14 +228,18 @@ The quiet run (tables above) confirms items 1-3.
    is `readonly` already) when the element cannot be overwritten during the
    call (no stores to the slice, or a callee without side effects on it).
    The smoke run hinted at about 4x Go for `iface_call` and `iface_sum`.
-3. **Sentinel errors with traces allocate per failing return.** `return
-   ErrOdd` and every `?` go through `zell_error_returned`. Because the
-   constant is always shared, copy-on-write (DESIGN.md "Трасса ошибки")
-   copies it on the first `return`, so every failing call allocates even
-   though the error is a constant. With `--no-error-trace` the row is
-   close to Go. Options: a trace record kept beside the error value (in
-   the `T!` result slot) instead of inside the shared object, or one
-   allocation per error for its whole path with no copy on later `?`.
+3. **Sentinel errors with traces** (largely closed). `return ErrOdd` used
+   to copy the shared constant on the first `return` (copy-on-write), so
+   every failing call allocated. The trace of a shared error now lives in
+   a thread-local pending record while it propagates and is attached only
+   where the propagation ends and the handler can observe it (DESIGN.md
+   "Трасса ошибки", ABI.md 7.4 `zell_error_caught`): `error_sentinel`
+   went from 5.7x to 2.6x Go (`error_new` 1.9x to 1.55x) with no
+   allocation on the sentinel path. What remains is the four runtime
+   calls per failure (`created`, two `?`, the catch), about 4 ns each
+   against Go's 9 ns per failure; closing the rest means fewer or inlined
+   calls (for example folding the `return Sentinel` site into the first
+   `?`).
 4. **Memory per small object is about 2x Go's.** The same 3.2M-object
    heap (latency_p99 self-check, full size) has Zell `diag.rtHeapInUse` at
    436 MB and Go `HeapAlloc` after a GC at 203 MB. Peak RSS is 814 MB vs
