@@ -52,14 +52,16 @@ collected (`t_post_batch`) and pushed in one lock round trip
 protocol means a big batch ramps the idle workers up one by one; waking
 `min(n, idle)` at once would need the single-spinner token reworked.
 
-**Open bug found on the way (scheduler, first thing to do in item 9):**
-`make tsan TSAN_TESTS=test_task` hangs on master — twice in different
-channel tests (`channel_unbuffered`, then `channel_fan_in_10k`, 17 tests
-in), the main thread blocked in `zell_chan_recv`, all workers parked. No
-timers are involved, so it is a lost wake-up in `task_sync.c`/`task.c`
-that TSan's slowdown exposes; the plain `test_task` passes 15/15. The
-scheduler agent reported tsan clean on its branch before the merge with
-the async fast path, so bisect between `4447c41`/`e29b20a` and `0c69ae4`.
+**TSan hang in the channel tests — FIXED 2026-10-23 (`7093729`).** Not a
+lost wake-up: every thread blocking in `zell_task_await` waited on one
+process-wide condvar and `task_complete` broadcast to all of them; with
+10k producers blocking on a full channel (~1000 spare worker threads)
+each receive woke ~1000 threads that found their task still pending — a
+thundering herd TSan stretched into an apparent hang. Each waiter now has
+its own condvar linked on the task (invariant documented at `awaiter`);
+regression test `await_wakes_one_thread`. Left: one spare worker per
+blocking await (up to MAX_WORKERS=1024 threads) is what made the herd
+possible; cap spares or park blocked senders differently.
 
 ### 3. Open-coded `defer` (45-60 min, compiler `hir/` + `codegen/`)
 `defer_call` 6.8x Go: every `defer c.Inc()` allocates a bound-method value
