@@ -21,10 +21,15 @@ namespace log
 // Severity of an event, from the most verbose to the most severe.
 enum Level { Verbose, Debug, Information, Warning, Error, Fatal }
 
-// One log event. Properties hold the template properties (in template
+// One log event. The properties are the template properties (in template
 // order), then the logger's context and enricher properties; Keys() lists
-// them in that order. Message is the rendered template with strings
-// written as they are (Serilog's `{Message:lj}`).
+// them in that order, Get/Has/Set access them by name. Properties (the
+// same values as a map) and Message (the rendered template with strings
+// written as they are, Serilog's `{Message:lj}`) are filled in before the
+// event reaches a filter, a custom enricher or a custom sink; the built-in
+// sinks render the template themselves and leave them empty when nothing
+// else looks at the event (`Pipeline.open`), which is what keeps a JSON
+// record at a handful of allocations.
 struct Event {
     Timestamp  int
     Level      Level
@@ -33,45 +38,119 @@ struct Event {
     Properties map[string]any
     Error      error
     Category   string
+    // Template property names and values (keys/vals start as the
+    // compiler's names/values; `own` says vals is a private copy).
     keys       []string
+    vals       []any
+    own        bool
+    // Properties added later (context, enrichers, Set).
+    extra      []prop
     parts      []string
     names      []string
     formats    []string
     values     []any
 
+    // The number of properties.
+    func count() int {
+        return len(this.keys) + len(this.extra)
+    }
+
+    // The name of property i (0 <= i < count()).
+    func nameAt(i int) string {
+        if i < len(this.keys) {
+            return this.keys[i]
+        }
+        return this.extra[i - len(this.keys)].name
+    }
+
+    // The value of property i.
+    func valueAt(i int) any {
+        if i < len(this.keys) {
+            return this.vals[i]
+        }
+        return this.extra[i - len(this.keys)].value
+    }
+
+    // The index of property name, or -1.
+    func indexOf(name string) int {
+        for i, k in this.keys {
+            if k == name {
+                return i
+            }
+        }
+        for i, p in this.extra {
+            if p.name == name {
+                return len(this.keys) + i
+            }
+        }
+        return -1
+    }
+
     // Property names in insertion order.
     func Keys() []string {
         var out []string = []
-        for k in this.keys {
-            out = append(out, k)
+        for i in 0..this.count() {
+            out = append(out, this.nameAt(i))
         }
         return out
     }
 
     // Has reports whether the event has property name.
     func Has(name string) bool {
-        for k in this.keys {
-            if k == name {
-                return true
-            }
-        }
-        return false
+        return this.indexOf(name) >= 0
     }
 
     // Get returns property name, or nil.
     func Get(name string) any {
-        return this.Properties[name]
+        var i = this.indexOf(name)
+        if i < 0 {
+            return nil
+        }
+        return this.valueAt(i)
     }
 
     // Sets a property (replacing an existing value).
     func Set(name string, value any) {
+        var i = this.indexOf(name)
+        if i < 0 {
+            this.extra = append(this.extra, prop{name: name, value: value})
+        } else if i < len(this.keys) {
+            if !this.own {
+                var copy []any = []
+                for v in this.vals {
+                    copy = append(copy, v)
+                }
+                this.vals = copy
+                this.own = true
+            }
+            this.vals[i] = value
+        } else {
+            this.extra[i - len(this.keys)].value = value
+        }
+        if this.Properties != nil {
+            this.Properties[name] = value
+        }
+    }
+
+    // Fills Properties and Message for code outside the built-in sinks.
+    func materialize() {
         if this.Properties == nil {
             this.Properties = map[string]any{}
         }
-        if !this.Has(name) {
-            this.keys = append(this.keys, name)
+        for i in 0..this.count() {
+            this.Properties[this.nameAt(i)] = this.valueAt(i)
         }
-        this.Properties[name] = value
+        if this.Message == "" && len(this.parts) > 0 {
+            this.Message = this.Render(true)
+        }
+    }
+
+    // The message as `{Message:lj}` renders it (Message once rendered).
+    func text() string {
+        if this.Message != "" || len(this.parts) == 0 {
+            return this.Message
+        }
+        return this.Render(true)
     }
 
     // Adds a property unless it is already set.
@@ -241,8 +320,45 @@ struct Configuration {
         for f in st.filters {
             p.filters = append(p.filters, f)
         }
+        p.open = len(st.filters) > 0
+        for e in st.enrichers {
+            if !builtinEnricher(e) {
+                p.open = true
+            }
+        }
+        for s in st.sinks {
+            if !builtinSink(s) {
+                p.open = true
+            }
+        }
         return p
     }
+}
+
+// Whether e is one of this module's enrichers (they use the Event API only).
+func builtinEnricher(e Enricher) bool {
+    switch e {
+        case *propertyEnricher p:
+            return p != nil
+        case *contextEnricher c:
+            return c != nil
+    }
+    return false
+}
+
+// Whether s is one of this module's sinks (they render events themselves).
+func builtinSink(s Sink) bool {
+    switch s {
+        case *ConsoleSink c:
+            return c != nil
+        case *FileSink f:
+            return f != nil
+        case *JsonSink j:
+            return j != nil
+        case *AsyncSink a:
+            return builtinSink(a.inner)
+    }
+    return false
 }
 
 func wrap(st *cfgState) Configuration {
@@ -371,6 +487,9 @@ struct Pipeline {
     clock     func() int
     category  string
     props     []prop
+    // Whether a filter, a custom enricher or a custom sink sees the
+    // events (then Write fills Event.Properties and Event.Message).
+    open      bool
 
     // IsEnabled reports whether events of level pass the minimum level (or the level switch).
     func IsEnabled(level Level) bool {
@@ -390,6 +509,9 @@ struct Pipeline {
         }
         if e.Category == "" {
             e.Category = this.category
+        }
+        if this.open {
+            e.materialize()
         }
         if e.Category != "" {
             e.AddIfAbsent("SourceContext", e.Category)
@@ -421,6 +543,7 @@ struct Pipeline {
             filters: this.filters,
             clock: this.clock,
             category: this.category,
+            open: this.open,
         }
         for x in this.props {
             p.props = append(p.props, x)
@@ -599,9 +722,27 @@ func emit(
         formats: formats,
         values: values,
     }
-    e.Properties = map[string]any{}
-    for i, n in names {
-        e.AddIfAbsent(n, values[i])
+    e.keys = names
+    e.vals = values
+    var dup = false
+    for i in 0..len(names) {
+        for j in 0..i {
+            if names[j] == names[i] {
+                dup = true
+            }
+        }
+    }
+    if dup {
+        // A repeated placeholder keeps its first value (Serilog).
+        e.keys = []
+        e.vals = []
+        e.own = true
+        for i, n in names {
+            if !e.Has(n) {
+                e.keys = append(e.keys, n)
+                e.vals = append(e.vals, values[i])
+            }
+        }
     }
     if err != nil {
         e.Set("ErrorMessage", err.Message())
@@ -610,7 +751,6 @@ func emit(
             e.Set("ErrorTrace", tr)
         }
     }
-    e.Message = e.Render(true)
     lg.Write(e)
     return true
 }
@@ -789,8 +929,24 @@ struct propertyEnricher {
 
 struct contextEnricher {
     func Enrich(e *Event) {
-        for p in Context.Properties() {
-            e.AddIfAbsent(p.name, p.value)
+        // The context slot {"": *ctxFrame} directly: task.CurrentContext()
+        // would also take a handle of the current task (an allocation).
+        var slot = task.rtGetCtx()
+        var f *task.ctxFrame = nil
+        if slot != nil {
+            switch slot[""] {
+                case *task.ctxFrame top:
+                    f = top
+            }
+        }
+        for f != nil {
+            if f.key == -101 {
+                switch f.val {
+                    case *prop p:
+                        e.AddIfAbsent(p.name, p.value)
+                }
+            }
+            f = f.next
         }
         var sp = diag.CurrentSpan()
         if sp != nil {
@@ -837,39 +993,254 @@ func applyAlign(s string, spec string) string {
 }
 
 func quote(s string) string {
-    var b = strings.Builder{}
-    b.Write("\"")
-    var start = 0
-    for i in 0..len(s) {
-        var c = s[i..i + 1]
-        var esc = ""
-        if c == "\"" {
-            esc = "\\\""
-        } else if c == "\\" {
-            esc = "\\\\"
-        } else if c == "\n" {
-            esc = "\\n"
-        } else if c == "\r" {
-            esc = "\\r"
-        } else if c == "\t" {
-            esc = "\\t"
-        } else if s[i] < 32 {
-            esc = fmt.Sprintf("\\u%04x", int(s[i]))
+    var b = lineBuf{}
+    b.quote(s)
+    return b.str()
+}
+
+// The JSON escape of byte c (a quote, a backslash or a control character).
+func escapeOf(c int) string {
+    switch c {
+        case 34:
+            return "\\\""
+        case 92:
+            return "\\\\"
+        case 10:
+            return "\\n"
+        case 13:
+            return "\\r"
+        case 9:
+            return "\\t"
+    }
+    return fmt.Sprintf("\\u%04x", c)
+}
+
+// The text of a decimal digit (a literal: no allocation).
+func digitText(d int) string {
+    switch d {
+        case 0:
+            return "0"
+        case 1:
+            return "1"
+        case 2:
+            return "2"
+        case 3:
+            return "3"
+        case 4:
+            return "4"
+        case 5:
+            return "5"
+        case 6:
+            return "6"
+        case 7:
+            return "7"
+        case 8:
+            return "8"
+    }
+    return "9"
+}
+
+// lineBuf assembles one output line from string pieces (literals and
+// borrowed substrings, so a piece costs no allocation) and joins them
+// once in str(); a sink reuses its buffer under its lock, so a record
+// allocates the joined line only. lastMs/lastTs cache the CLEF timestamp
+// of the last record (many records share a millisecond).
+struct lineBuf {
+    parts  []string
+    lastMs int
+    lastTs string
+    // texts[i]: the text of template value i written by message() when it
+    // is a finite float (json() reuses it instead of formatting again).
+    texts  []string
+
+    func add(s string) {
+        this.parts = append(this.parts, s)
+    }
+
+    // Empties the buffer, keeping its capacity.
+    func reset() {
+        this.parts = this.parts[..0]
+        this.texts = this.texts[..0]
+    }
+
+    func str() string {
+        return strings.Join(this.parts, "")
+    }
+
+    // Adds s as a JSON string (quoted, escaped).
+    func quote(s string) {
+        this.add("\"")
+        this.escape(s)
+        this.add("\"")
+    }
+
+    // Adds s JSON-escaped, without quotes: runs of plain bytes are added
+    // as substrings, only the escapes are separate pieces.
+    func escape(s string) {
+        var start = 0
+        for i in 0..len(s) {
+            var c = int(s[i])
+            if c == 34 || c == 92 || c < 32 {
+                if i > start {
+                    this.add(s[start..i])
+                }
+                this.add(escapeOf(c))
+                start = i + 1
+            }
         }
-        if esc != "" {
-            b.Write(s[start..i])
-            b.Write(esc)
-            start = i + 1
+        if start == 0 {
+            this.add(s)
+        } else if start < len(s) {
+            this.add(s[start..])
         }
     }
-    b.Write(s[start..])
-    b.Write("\"")
-    return b.String()
+
+    // Adds n in decimal, digit by digit (literals: no allocation).
+    func addInt(n int) {
+        var v = n
+        if v < 0 {
+            this.add("-")
+            if v == -9223372036854775807 - 1 {
+                this.add("9223372036854775808")
+                return
+            }
+            v = -v
+        }
+        var p = 1
+        for v / p >= 10 {
+            p *= 10
+        }
+        for p > 0 {
+            this.add(digitText(v / p))
+            v = v % p
+            p /= 10
+        }
+    }
+
+    // Adds x as fmt prints it (Go's %v).
+    func addFloat(x float) {
+        this.add(strconv.FormatFloat(x, 'g', -1))
+    }
+
+    // The CLEF timestamp of ms (cached per millisecond).
+    func clefTime(ms int) string {
+        if this.lastTs == "" || ms != this.lastMs {
+            this.lastMs = ms
+            this.lastTs = time.Format(ms, "%Y-%m-%dT%H:%M:%S.%LZ")
+        }
+        return this.lastTs
+    }
+
+    // Adds the message of e: literal parts and values, strings quoted
+    // unless `literal`; `json` escapes every piece (the message is the
+    // body of a JSON string).
+    func message(e *Event, literal bool, json bool) {
+        if len(e.parts) == 0 {
+            if json {
+                this.escape(e.Message)
+            } else {
+                this.add(e.Message)
+            }
+            return
+        }
+        for i, p in e.parts {
+            if json {
+                this.escape(p)
+            } else {
+                this.add(p)
+            }
+            if i < len(e.names) {
+                var f = e.formats[i]
+                if f == "" {
+                    var t = ""
+                    switch e.values[i] {
+                        case float x:
+                            if !math.IsNaN(x) && !math.IsInf(x, 0) {
+                                t = strconv.FormatFloat(x, 'g', -1)
+                                this.add(t)
+                            }
+                    }
+                    this.texts = append(this.texts, t)
+                    if t == "" {
+                        this.value(e.values[i], literal, json)
+                    }
+                } else {
+                    this.texts = append(this.texts, "")
+                    var s = applyAlign(renderValue(e.values[i], formatOf(f), !literal), f)
+                    if json {
+                        this.escape(s)
+                    } else {
+                        this.add(s)
+                    }
+                }
+            }
+        }
+    }
+
+    // Adds v as renderValue(v, "", !literal) would, escaped when `json`.
+    func value(v any, literal bool, json bool) {
+        switch v {
+            case string s:
+                if !literal {
+                    if json {
+                        this.escape(quote(s))
+                    } else {
+                        this.quote(s)
+                    }
+                    return
+                }
+                if json {
+                    this.escape(s)
+                } else {
+                    this.add(s)
+                }
+                return
+            case int n:
+                this.addInt(n)
+                return
+            case float x:
+                this.addFloat(x)
+                return
+        }
+        var s = renderValue(v, "", !literal)
+        if json {
+            this.escape(s)
+        } else {
+            this.add(s)
+        }
+    }
+
+    // Adds the JSON of a property value (jsonValue).
+    func json(v any) {
+        switch v {
+            case string s:
+                this.quote(s)
+                return
+            case int n:
+                this.addInt(n)
+                return
+            case float x:
+                if math.IsNaN(x) || math.IsInf(x, 0) {
+                    this.quote(fmt.Format("{0}", x))
+                } else {
+                    this.addFloat(x)
+                }
+                return
+            case bool t:
+                if t {
+                    this.add("true")
+                } else {
+                    this.add("false")
+                }
+                return
+        }
+        this.add(jsonValue(v))
+    }
 }
 
 func fmtInt(n int, f string) string {
     if f == "" {
-        return fmt.Format("{0}", n)
+        return strconv.Itoa(n)
     }
     var c = f[0..1]
     var rest = f[1..]
@@ -899,7 +1270,7 @@ func fmtInt(n int, f string) string {
 // (rounded); anything else is ignored.
 func fmtFloat(x float, f string) string {
     if f == "" {
-        return fmt.Format("{0}", x)
+        return strconv.FormatFloat(x, 'g', -1)
     }
     var c = f[0..1]
     if c == "0" || c == "#" {
@@ -1000,12 +1371,12 @@ func jsonValue(v any) string {
         case string s:
             return quote(s)
         case int n:
-            return fmt.Format("{0}", n)
+            return strconv.Itoa(n)
         case float x:
             if math.IsNaN(x) || math.IsInf(x, 0) {
                 return quote(fmt.Format("{0}", x))
             }
-            return fmt.Format("{0}", x)
+            return strconv.FormatFloat(x, 'g', -1)
         case bool t:
             if t {
                 return "true"
@@ -1163,6 +1534,8 @@ struct segment {
     name   string
     format string
     align  string
+    // {Timestamp}: the strftime layout of format (converted once).
+    layout string
 }
 
 // Splits an output template ("{Timestamp:HH:mm:ss} [{Level:u3}] {Message:lj}{NewLine}").
@@ -1206,7 +1579,15 @@ func parseOutput(t string) []segment {
                 align = "," + name[comma + 1..]
                 name = name[..comma]
             }
-            out = append(out, segment{name: name, format: format, align: align})
+            var seg = segment{name: name, format: format, align: align}
+            if name == "Timestamp" {
+                var layout = format
+                if layout == "" {
+                    layout = "yyyy-MM-dd HH:mm:ss.fff zzz"
+                }
+                seg.layout = timeLayout(layout)
+            }
+            out = append(out, seg)
             i += end + 1
             continue
         }
@@ -1253,21 +1634,21 @@ func exceptionText(e *Event) string {
 func propertiesText(e *Event, f string) string {
     var b = strings.Builder{}
     b.Write("{")
-    for i, k in e.keys {
+    for i in 0..e.count() {
         if i > 0 {
             b.Write(",")
         }
-        b.Write(" " + k + ": " + renderValue(e.Properties[k], "", true))
+        b.Write(" " + e.nameAt(i) + ": " + renderValue(e.valueAt(i), "", true))
     }
     b.Write(" }")
     if f == "j" {
         var j = strings.Builder{}
         j.Write("{")
-        for i, k in e.keys {
+        for i in 0..e.count() {
             if i > 0 {
                 j.Write(",")
             }
-            j.Write(quote(k) + ":" + jsonValue(e.Properties[k]))
+            j.Write(quote(e.nameAt(i)) + ":" + jsonValue(e.valueAt(i)))
         }
         j.Write("}")
         return j.String()
@@ -1277,66 +1658,98 @@ func propertiesText(e *Event, f string) string {
 
 // Renders e with an output template.
 func renderOutput(segs []segment, e *Event, colors bool) string {
-    var b = strings.Builder{}
+    var b = lineBuf{}
+    writeOutput(&b, segs, e, colors)
+    return b.str()
+}
+
+// The text of a non-literal segment of an output template (the message
+// is written by writeOutput directly unless aligned).
+func segmentText(s segment, e *Event, colors bool) string {
+    if s.name == "Timestamp" {
+        return time.Format(e.Timestamp, s.layout)
+    } else if s.name == "Level" {
+        var v = levelText(e.Level, s.format)
+        if colors {
+            v = levelColor(e.Level) + v + "\u{1b}[0m"
+        }
+        return v
+    } else if s.name == "Message" {
+        if s.format == "lj" || s.format == "l" {
+            return e.text()
+        }
+        return e.Render(false)
+    } else if s.name == "NewLine" {
+        return "\n"
+    } else if s.name == "Exception" {
+        return exceptionText(e)
+    } else if s.name == "Properties" {
+        return propertiesText(e, s.format)
+    } else if s.name == "Category" || (s.name == "SourceContext" && !e.Has("SourceContext")) {
+        return e.Category
+    } else if e.Has(s.name) {
+        return renderValue(e.Get(s.name), s.format, s.format != "l" && s.format != "lj")
+    }
+    return ""
+}
+
+// Writes e rendered with an output template into b.
+func writeOutput(b *lineBuf, segs []segment, e *Event, colors bool) {
     for s in segs {
         if s.name == "" {
-            b.Write(s.text)
-            continue
-        }
-        var v = ""
-        if s.name == "Timestamp" {
-            v = formatTime(e.Timestamp, s.format)
-        } else if s.name == "Level" {
-            v = levelText(e.Level, s.format)
-            if colors {
-                v = levelColor(e.Level) + v + "\u{1b}[0m"
-            }
+            b.add(s.text)
+        } else if s.align != "" {
+            b.add(applyAlign(segmentText(s, e, colors), s.align))
         } else if s.name == "Message" {
-            if s.format == "lj" || s.format == "l" {
-                v = e.Message
-            } else {
-                v = e.Render(false)
-            }
-        } else if s.name == "NewLine" {
-            v = "\n"
-        } else if s.name == "Exception" {
-            v = exceptionText(e)
-        } else if s.name == "Properties" {
-            v = propertiesText(e, s.format)
-        } else if s.name == "Category" || (s.name == "SourceContext" && !e.Has("SourceContext")) {
-            v = e.Category
-        } else if e.Has(s.name) {
-            v = renderValue(e.Properties[s.name], s.format, s.format != "l" && s.format != "lj")
+            b.message(e, s.format == "lj" || s.format == "l", false)
+        } else {
+            b.add(segmentText(s, e, colors))
         }
-        b.Write(applyAlign(v, s.align))
     }
-    return b.String()
 }
 
 // One compact JSON (CLEF) line.
 func clef(e *Event) string {
-    var b = strings.Builder{}
-    b.Write("{\"@t\":" + quote(formatTime(e.Timestamp, "yyyy-MM-ddTHH:mm:ss.fffZ")))
-    b.Write(",\"@mt\":" + quote(e.Template))
-    b.Write(",\"@m\":" + quote(e.Message))
+    var b = lineBuf{}
+    writeClef(&b, e)
+    return b.str()
+}
+
+// Writes the CLEF record of e into b.
+func writeClef(b *lineBuf, e *Event) {
+    b.add("{\"@t\":\"")
+    b.add(b.clefTime(e.Timestamp))
+    b.add("\",\"@mt\":")
+    b.quote(e.Template)
+    b.add(",\"@m\":\"")
+    b.message(e, true, true)
+    b.add("\"")
     if e.Level != Level.Information {
-        b.Write(",\"@l\":" + quote(levelName(e.Level)))
+        b.add(",\"@l\":")
+        b.quote(levelName(e.Level))
     }
     if e.Error != nil {
-        b.Write(",\"@x\":" + quote(exceptionText(e)))
+        b.add(",\"@x\":")
+        b.quote(exceptionText(e))
     }
-    for k in e.keys {
+    for i in 0..e.count() {
+        var k = e.nameAt(i)
         if k == "ErrorMessage" || k == "ErrorTrace" {
             continue
         }
-        var name = k
+        b.add(",\"")
         if strings.HasPrefix(k, "@") {
-            name = "@" + k
+            b.add("@")
         }
-        b.Write("," + quote(name) + ":" + jsonValue(e.Properties[k]))
+        b.escape(k)
+        b.add("\":")
+        if !e.own && i < len(b.texts) && b.texts[i] != "" {
+            b.add(b.texts[i])
+        } else {
+            b.json(e.valueAt(i))
+        }
     }
-    b.Write("}\n")
-    return b.String()
+    b.add("}\n")
 }
 
 // ---- sinks ----------------------------------------------------------------
@@ -1353,13 +1766,19 @@ struct ConsoleOptions {
 
 // ConsoleSink writes rendered text lines to stderr or stdout.
 struct ConsoleSink {
+    guard  int
+    buf    *lineBuf
     segs   []segment
     stdout bool
     colors bool
 
     // Emit renders e with the output template and writes it.
     func Emit(e *Event) {
-        var s = renderOutput(this.segs, e, this.colors)
+        task.rtLock(&this.guard)
+        this.buf.reset()
+        writeOutput(this.buf, this.segs, e, this.colors)
+        var s = this.buf.str()
+        task.rtUnlock(&this.guard)
         if this.stdout {
             io.print(s)
         } else {
@@ -1379,7 +1798,7 @@ func NewConsoleSink(opts ConsoleOptions) *ConsoleSink {
     if t == "" {
         t = "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}"
     }
-    return new ConsoleSink{segs: parseOutput(t), stdout: opts.Stdout, colors: opts.Colors}
+    return new ConsoleSink{buf: new lineBuf{}, segs: parseOutput(t), stdout: opts.Stdout, colors: opts.Colors}
 }
 
 // How a file sink starts new files.
@@ -1403,6 +1822,7 @@ struct FileOptions {
 // FileSink appends events to a file, rolling to new files by interval or size.
 struct FileSink {
     guard   int
+    buf     *lineBuf
     base    string
     opts    FileOptions
     segs    []segment
@@ -1490,13 +1910,14 @@ struct FileSink {
 
     // Emit appends e as one line (text or CLEF JSON).
     func Emit(e *Event) {
-        var line = ""
-        if this.opts.Json {
-            line = clef(e)
-        } else {
-            line = renderOutput(this.segs, e, false)
-        }
         task.rtLock(&this.guard)
+        this.buf.reset()
+        if this.opts.Json {
+            writeClef(this.buf, e)
+        } else {
+            writeOutput(this.buf, this.segs, e, false)
+        }
+        var line = this.buf.str()
         var period = this.periodOf(e.Timestamp)
         if this.fd < 0 || period != this.period {
             if period != this.period {
@@ -1539,7 +1960,7 @@ func NewFileSink(path string, opts FileOptions) *FileSink {
     if t == "" {
         t = "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}"
     }
-    return new FileSink{base: path, opts: opts, segs: parseOutput(t), fd: -1}
+    return new FileSink{buf: new lineBuf{}, base: path, opts: opts, segs: parseOutput(t), fd: -1}
 }
 
 // JsonOptions configures NewJsonSink.
@@ -1552,6 +1973,8 @@ struct JsonOptions {
 
 // JsonSink writes compact JSON (CLEF) lines to a file or the console.
 struct JsonSink {
+    guard  int
+    buf    *lineBuf
     file   *FileSink
     stdout bool
 
@@ -1561,7 +1984,11 @@ struct JsonSink {
             this.file.Emit(e)
             return
         }
-        var s = clef(e)
+        task.rtLock(&this.guard)
+        this.buf.reset()
+        writeClef(this.buf, e)
+        var s = this.buf.str()
+        task.rtUnlock(&this.guard)
         if this.stdout {
             io.print(s)
         } else {
@@ -1580,7 +2007,7 @@ struct JsonSink {
 
 // NewJsonSink returns a JSON sink with opts.
 func NewJsonSink(opts JsonOptions) *JsonSink {
-    var s = new JsonSink{stdout: opts.Stdout}
+    var s = new JsonSink{buf: new lineBuf{}, stdout: opts.Stdout}
     if opts.Path != "" {
         s.file = NewFileSink(opts.Path, FileOptions{Json: true})
     }
@@ -1591,6 +2018,7 @@ func NewJsonSink(opts JsonOptions) *JsonSink {
 // never blocks the caller while the queue has room); Close drains it.
 struct AsyncSink {
     ch     task.Channel<*Event>
+    inner  Sink
     done   Task<void>
     closed bool
 
@@ -1626,5 +2054,5 @@ func NewAsyncSink(inner Sink, capacity int) *AsyncSink {
         n = 1024
     }
     var ch = task.Channel<*Event>(n)
-    return new AsyncSink{ch: ch, done: pump(ch, inner)}
+    return new AsyncSink{ch: ch, inner: inner, done: pump(ch, inner)}
 }
