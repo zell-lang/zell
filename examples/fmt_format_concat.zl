@@ -1,0 +1,20 @@
+namespace examples.fmt_format_concat
+
+import io
+
+// fmt.Format with one {0} and literal text on one side is lowered to a
+// single string concatenation; the result is the same as the general path.
+
+func main() {
+    var n = 42
+    var f = 2.5
+    var s = "zell"
+    println(fmt.Format("p-{0}", n))
+    println(fmt.Format("{0}.txt", s))
+    println(fmt.Format("id={0}", f))
+    println(fmt.Format("ok:{0}", true))
+    println(fmt.Format("{0}", n))
+    println(fmt.Format("<{0}>", n))
+    println(fmt.Format("{0}{0}", n))
+    println(fmt.Format("a{b}-{0}", n))
+}
