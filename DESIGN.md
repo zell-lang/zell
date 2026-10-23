@@ -2347,8 +2347,9 @@ zell test ./src              # тесты (@test func TestX(t *testing.T)): --fi
 ```
 
 - `zell test [path]` находит функции `@test` (`func TestX(t *testing.T)`,
-  `func X()` без параметров, бенчмарки `func BenchX(b *testing.B)` — с
-  `--bench`), генерирует драйвер, вызывающий `testing.Main`, и
+  `func X()` без параметров, они же `async` — `func(*testing.T) Task<void>`,
+  раннер их ожидает (`testing.Case.RunAsync`); бенчмарки
+  `func BenchX(b *testing.B)` — с `--bench`), генерирует драйвер, вызывающий `testing.Main`, и
   запускает его; собственные `main` переименовываются в памяти. Каждый
   тест выполняется в отдельном процессе (тестовый бинарник перезапускает
   себя с `--run-one`), поэтому `t.Fatal`, `t.Skip` и паника завершают только

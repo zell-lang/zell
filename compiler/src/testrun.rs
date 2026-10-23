@@ -40,6 +40,10 @@ enum Kind {
     Plain,
     Test,
     Bench,
+    /// `async func TestX()`: awaited through `Case.RunAsync`.
+    AsyncPlain,
+    /// `async func TestX(t *testing.T)` (`func(*testing.T) Task<void>`).
+    AsyncTest,
 }
 
 const DRIVER_NS: &str = "zell_test_driver__";
@@ -160,7 +164,13 @@ pub fn run(args: &[String]) -> i32 {
                 },
                 _ => continue,
             };
-            let parallel = kind == Kind::Test && calls_parallel(func);
+            let kind = match (kind, func.is_async) {
+                (Kind::Plain, true) => Kind::AsyncPlain,
+                (Kind::Test, true) => Kind::AsyncTest,
+                (_, true) => continue,
+                (k, false) => k,
+            };
+            let parallel = matches!(kind, Kind::Test | Kind::AsyncTest) && calls_parallel(func);
             tests.entry(ns.clone()).or_default().push((func.name.name.clone(), kind, parallel));
         }
         // the driver's main is the entry point
@@ -197,6 +207,8 @@ pub fn run(args: &[String]) -> i32 {
                 Kind::Test => format!("testing.Case{{Name: \"{name}\", Run: {name}}}"),
                 Kind::Plain => format!("testing.Case{{Name: \"{name}\", Run: func(t *testing.T) {{\n        {name}()\n    }}}}"),
                 Kind::Bench => format!("testing.Case{{Name: \"{name}\", Bench: {name}}}"),
+                Kind::AsyncTest => format!("testing.Case{{Name: \"{name}\", RunAsync: {name}, Parallel: {parallel}}}"),
+                Kind::AsyncPlain => format!("testing.Case{{Name: \"{name}\", RunAsync: async func(t *testing.T) {{\n        await {name}()\n    }}}}"),
             };
             gen.push_str(&format!("    out = append(out, {case})\n"));
         }

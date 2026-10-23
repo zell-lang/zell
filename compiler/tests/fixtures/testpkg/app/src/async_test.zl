@@ -1,0 +1,28 @@
+namespace testapp
+
+async func slowNine() int {
+    await task.Delay(1)
+    return Nine()
+}
+
+// An async test: func(*testing.T) Task<void>, awaited by the runner.
+@test
+async func TestAsyncNine(t *testing.T) {
+    var n = await slowNine()
+    testing.Equal(t, n, 9)
+}
+
+@test
+async func TestAsyncFails(t *testing.T) {
+    var n = await slowNine()
+    testing.Equal(t, n, 10)
+}
+
+// Without the handle.
+@test
+async func asyncPlain() {
+    var n = await slowNine()
+    if n != 9 {
+        panic("not nine")
+    }
+}

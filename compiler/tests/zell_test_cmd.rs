@@ -122,10 +122,10 @@ fn copy_dir(from: &Path, to: &Path) {
 
 /// A package with a path dependency (`tests/fixtures/testpkg`, copied so
 /// the lock file is written outside the repository): the dependency is
-/// built, its `*_test.zl` (a second `Database`) is not, and the renamed
-/// `main` is not linted as unused.
+/// built, its `*_test.zl` (a second `Database`) is not, `async @test`
+/// functions are awaited, and the renamed `main` is not linted as unused.
 #[test]
-fn package_with_dependency() {
+fn package_with_dependency_and_async_tests() {
     let lib = repo().join("runtime/libzell_rt.a");
     if !lib.is_file() {
         let st = Command::new("make").arg("-C").arg(repo().join("runtime")).status().expect("cannot run make");
@@ -137,8 +137,8 @@ fn package_with_dependency() {
     let out = Command::new(env!("CARGO_BIN_EXE_zell")).arg("test").arg(tmp.join("app")).arg("-v").env("ZELL_NO_BACKTRACE", "1").output().expect("cannot run zell");
     let _ = std::fs::remove_dir_all(&tmp);
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
-    for want in ["--- PASS: TestNine (", "ok  \t1 passed, 0 failed, 0 skipped ("] {
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    for want in ["--- PASS: TestNine (", "--- PASS: TestAsyncNine (", "    got 9, want 10\n--- FAIL: TestAsyncFails (", "--- PASS: asyncPlain (", "FAIL\t3 passed, 1 failed, 0 skipped ("] {
         assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}{stderr}");
     }
     assert!(!stderr.contains("zellUserMain__"), "{stderr}");

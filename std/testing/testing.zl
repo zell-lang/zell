@@ -42,6 +42,9 @@ struct Case {
     Name  string
     Run   func(*T)
     Bench func(*B)
+    // An `async @test` (func(t *testing.T) Task<void>): awaited by the
+    // child process that runs the test.
+    RunAsync func(*T) Task<void>
     // The test calls t.Parallel() (found by `zell test`).
     Parallel bool
 }
@@ -548,8 +551,8 @@ func matches(filter string, name string) bool {
     return false
 }
 
-func runChild(c Case, o options) int {
-    if c.Run == nil {
+async func runChild(c Case, o options) int {
+    if c.Run == nil && c.RunAsync == nil {
         io.Eprintln("testing: " + c.Name + " is not a test")
         return 1
     }
@@ -560,8 +563,13 @@ func runChild(c Case, o options) int {
         probeName: o.probeName,
         probe: o.probe,
     }
-    var run = c.Run
-    run(t)
+    if c.RunAsync != nil {
+        var arun = c.RunAsync
+        await arun(t)
+    } else {
+        var run = c.Run
+        run(t)
+    }
     if t.failed {
         return 1
     }
@@ -673,7 +681,7 @@ async func Main(cases []Case) int {
     if o.runOne != "" {
         for c in cases {
             if c.Name == o.runOne {
-                return runChild(c, o)
+                return await runChild(c, o)
             }
         }
         io.Eprintln("testing: no test " + o.runOne)
@@ -700,9 +708,10 @@ async func Main(cases []Case) int {
         if !matches(o.filter, c.Name) {
             continue
         }
-        if c.Run != nil && !c.Parallel {
+        var isTest = c.Run != nil || c.RunAsync != nil
+        if isTest && !c.Parallel {
             tests = append(tests, c)
-        } else if c.Run != nil {
+        } else if isTest {
             parallel = append(parallel, c)
         } else if c.Bench != nil {
             benches = append(benches, c)
