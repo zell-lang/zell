@@ -609,6 +609,27 @@ impl<'a> Sema<'a> {
                     let v = self.print_arg(&args[1]);
                     return self.stringify(v);
                 }
+                // Literal text on one side of a single "{0}" is one string concatenation
+                // (one allocation) instead of a placeholder scan plus an argument slice.
+                if args.len() == 2 {
+                    if let ast::ExprKind::Str(s) = &args[0].kind {
+                        if s.matches("{0}").count() == 1 {
+                            let (pre, post) = s.split_once("{0}").unwrap();
+                            if !pre.contains('{') && !post.contains('{') && (pre.is_empty() != post.is_empty()) {
+                                let v = self.print_arg(&args[1]);
+                                let v = self.stringify(v);
+                                let string = self.tt.string;
+                                let lit = |t: &str| mk(ExprKind::Const(hir::ConstValue::Str(t.to_string())), string, span);
+                                let (lhs, rhs) = if post.is_empty() { (lit(pre), v) } else { (v, lit(post)) };
+                                return mk(
+                                    ExprKind::Binary { op: hir::BinOp::StrConcat, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                                    string,
+                                    span,
+                                );
+                            }
+                        }
+                    }
+                }
                 let tmpl = self.expr_to(&args[0], self.tt.string, Ctx::Arg(0, "fmt.Format".into()));
                 let mut parts = Vec::new();
                 for a in &args[1..] {

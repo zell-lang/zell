@@ -15,37 +15,45 @@ struct executor {
     // Runs the nodes; 1 = {{break}}, 2 = {{continue}} reached.
     func run(list []int, dot Value, flow int) int! {
         for idx in list {
-            var n = this.t.nodes[idx]
-            if n.kind == 1 {
-                this.out.Write(n.text)
-            } else if n.kind == 2 {
-                var p = this.t.pipes[n.pipe]
-                var v = this.pipe(n.pipe, dot)?
-                if len(p.vars) == 0 {
-                    this.emit(n, v)?
+            var kind = this.t.nodes[idx].kind
+            if kind == 1 {
+                this.out.Write(this.t.nodes[idx].text)
+            } else if kind == 2 {
+                var pi = this.t.nodes[idx].pipe
+                var v = Value{}
+                if this.t.pipes[pi].simple {
+                    v = this.field(dot, this.t.pipes[pi].cmds[0].args[0].fields[0], this.t.pipes[pi].line)?
+                } else {
+                    v = this.pipe(pi, dot)?
                 }
-            } else if n.kind == 3 || n.kind == 5 {
+                if len(this.t.pipes[pi].vars) == 0 {
+                    this.emit(this.t.nodes[idx].esc, v)
+                }
+            } else if kind == 3 || kind == 5 {
                 var mark = len(this.names)
-                var v = this.pipe(n.pipe, dot)?
+                var v = this.pipe(this.t.nodes[idx].pipe, dot)?
                 var r = 0
                 if truth(v) {
-                    var d = dot
-                    if n.kind == 5 {
-                        d = v
+                    if kind == 5 {
+                        r = this.run(this.t.nodes[idx].list, v, flow)?
+                    } else {
+                        r = this.run(this.t.nodes[idx].list, dot, flow)?
                     }
-                    r = this.run(n.list, d, flow)?
-                } else if n.hasElse {
-                    r = this.run(n.elseList, dot, flow)?
+                } else if this.t.nodes[idx].hasElse {
+                    r = this.run(this.t.nodes[idx].elseList, dot, flow)?
                 }
-                this.names = this.names[..mark]
-                this.vals = this.vals[..mark]
+                if len(this.names) > mark {
+                    this.names = this.names[..mark]
+                    this.vals = this.vals[..mark]
+                }
                 if r != 0 {
                     return r
                 }
-            } else if n.kind == 4 {
-                var r = this.rangeNode(n, dot)?
+            } else if kind == 4 {
+                var r = this.rangeNode(idx, dot)?
                 _ = r
-            } else if n.kind == 6 {
+            } else if kind == 6 {
+                var n = this.t.nodes[idx]
                 var target = this.t.defs[n.name]
                 if target == 0 {
                     return this.fail(n.line, "no such template " + encoding.json.Quote(n.name))
@@ -66,47 +74,51 @@ struct executor {
                 this.depth -= 1
                 this.names = saveN
                 this.vals = saveV
-            } else if n.kind == 8 {
+            } else if kind == 8 {
                 return 1
-            } else if n.kind == 9 {
+            } else if kind == 9 {
                 return 2
             }
         }
         return 0
     }
 
-    func rangeNode(n tnode, dot Value) int! {
+    func rangeNode(idx int, dot Value) int! {
+        var n = this.t.nodes[idx]
         var p = this.t.pipes[n.pipe]
         var mark = len(this.names)
         // evaluate without binding; range binds per element
-        var v = this.cmds(p, dot)?
+        var v = this.cmds(n.pipe, dot)?
         var count = 0
         if v.kind == 5 || v.kind == 6 || v.kind == 7 || v.kind == 2 {
             var n2 = len(v.items)
             if v.kind == 2 {
                 n2 = v.i
             }
+            var nv = len(p.vars)
             for i in 0..n2 {
                 var elem = Value{}
-                var key = Value{kind: 2, i: i}
                 if v.kind == 2 {
                     elem = Value{kind: 2, i: i}
                 } else {
                     elem = v.items[i]
+                }
+                if nv == 1 {
+                    this.bind(p.vars[0], elem)
+                } else if nv == 2 {
+                    var key = Value{kind: 2, i: i}
                     if v.kind == 6 || v.kind == 7 {
                         key = Value{kind: 4, s: v.keys[i]}
                     }
-                }
-                if len(p.vars) == 1 {
-                    this.bind(p.vars[0], elem)
-                } else if len(p.vars) == 2 {
                     this.bind(p.vars[0], key)
                     this.bind(p.vars[1], elem)
                 }
                 count += 1
                 var r = this.run(n.list, elem, 1)?
-                this.names = this.names[..mark]
-                this.vals = this.vals[..mark]
+                if len(this.names) > mark {
+                    this.names = this.names[..mark]
+                    this.vals = this.vals[..mark]
+                }
                 if r == 1 {
                     break
                 }
@@ -127,9 +139,13 @@ struct executor {
         this.vals = append(this.vals, v)
     }
 
-    func emit(n tnode, v Value) void! {
+    func emit(esc int, v Value) {
         if this.t.html {
-            this.out.Write(escapeFor(n.esc, v))
+            this.out.Write(escapeFor(esc, v))
+            return
+        }
+        if v.kind == 2 {
+            this.out.Write(strconv.Itoa(v.i))
             return
         }
         this.out.Write(show(v))
@@ -137,9 +153,9 @@ struct executor {
 
     // A pipeline; declarations and assignments bind its value.
     func pipe(pi int, dot Value) Value! {
-        var p = this.t.pipes[pi]
-        var v = this.cmds(p, dot)?
-        if len(p.vars) > 0 {
+        var v = this.cmds(pi, dot)?
+        if len(this.t.pipes[pi].vars) > 0 {
+            var p = this.t.pipes[pi]
             if p.assign {
                 var k = len(this.names) - 1
                 for k >= 0 {
@@ -156,11 +172,16 @@ struct executor {
         return v
     }
 
-    func cmds(p tpipe, dot Value) Value! {
+    func cmds(pi int, dot Value) Value! {
+        var nc = len(this.t.pipes[pi].cmds)
+        var line = this.t.pipes[pi].line
+        if nc == 1 && len(this.t.pipes[pi].cmds[0].args) == 1 && this.t.pipes[pi].cmds[0].args[0].kind != 4 {
+            return this.arg(this.t.pipes[pi].cmds[0].args[0], dot, line)?
+        }
         var last = Value{}
         var have = false
-        for c in p.cmds {
-            last = this.command(c, dot, last, have, p.line)?
+        for ci in 0..nc {
+            last = this.command(this.t.pipes[pi].cmds[ci], dot, last, have, line)?
             have = true
         }
         return last
@@ -218,6 +239,9 @@ struct executor {
     }
 
     func arg(a targ, dot Value, line int) Value! {
+        if a.kind == 1 && len(a.fields) == 1 {
+            return this.field(dot, a.fields[0], line)?
+        }
         var base = Value{}
         if a.kind == 1 {
             base = dot

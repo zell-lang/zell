@@ -386,6 +386,8 @@ struct tpipe {
     assign bool
     cmds   []tcmd
     line   int
+    // exactly one command with one argument: a one-element field chain on dot
+    simple bool
 }
 
 struct tcmd {
@@ -829,6 +831,10 @@ struct tparser {
             for n in p.vars {
                 this.vars = append(this.vars, n)
             }
+        }
+        if len(p.vars) == 0 && len(p.cmds) == 1 && len(p.cmds[0].args) == 1 {
+            var a0 = p.cmds[0].args[0]
+            p.simple = a0.kind == 1 && len(a0.fields) == 1
         }
         this.t.pipes = append(this.t.pipes, p)
         return len(this.t.pipes) - 1
