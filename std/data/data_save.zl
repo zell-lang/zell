@@ -9,9 +9,22 @@ namespace data
 // transaction (or the caller's ctx.Transaction). Concurrency tokens are
 // part of the WHERE of UPDATE/DELETE: no row affected is a conflict.
 
-// Rows per multi-row INSERT.
-func batchSize() int {
-    return 100
+// Bound parameters per statement: SQLite's SQLITE_MAX_VARIABLE_NUMBER
+// (32766 since 3.32), PostgreSQL's 16-bit parameter count.
+func paramLimit(st *ctxState) int {
+    if st.pg() {
+        return 65535
+    }
+    return 32766
+}
+
+// Rows per multi-row INSERT of ncols columns: as many as the parameter
+// limit allows (one statement for a whole AddRange, like database/sql).
+func batchSize(st *ctxState, ncols int) int {
+    if ncols <= 0 {
+        return 1000
+    }
+    return paramLimit(st) / ncols
 }
 
 // The columns an insert of e writes: all but generated ones and defaulted
@@ -293,7 +306,7 @@ async func saveAll(st *ctxState) int! {
         var vals = e.values()
         var cols = insertCols(e, vals)
         var ret = returnCols(e, vals)
-        if len(batch) > 0 && (batch[0].meta != e.meta || !sameInts(cols, bcols) || !sameInts(ret, bret) || len(batch) >= batchSize()) {
+        if len(batch) > 0 && (batch[0].meta != e.meta || !sameInts(cols, bcols) || !sameInts(ret, bret) || len(batch) >= batchSize(st, len(bcols))) {
             await insertBatch(st, batch, batchVals, bcols, bret)?
             batch = []
             batchVals = []
@@ -379,6 +392,7 @@ async func saveChanges(st *ctxState) int! {
             if e.key != "" && st.ids[e.key] == e {
                 delete(st.ids, e.key)
             }
+            st.untrack(e)
             e.state = 4
             st.orphans = append(st.orphans, e.unlink)
             continue

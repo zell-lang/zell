@@ -246,7 +246,7 @@ struct core {
     func source(w *sqlw) {
         if this.paged() || this.distinct {
             w.raw(" FROM (")
-            this.selectSql(w, entityCols(this.meta))
+            this.selectSql(w, entityCols(this.st, this.meta))
             w.raw(") AS t0")
         } else {
             this.from(w)
@@ -288,8 +288,8 @@ func newCore(st *ctxState, m *EntityMeta) core {
     return core{st: st, meta: m, joins: [], wheres: [], orders: [], groups: [], havings: [], skip: 0, take: -1, distinct: false}
 }
 
-func entityCols(m *EntityMeta) Frag {
-    var cols = columnList(m, "t0")
+func entityCols(st *ctxState, m *EntityMeta) Frag {
+    var cols = st.cols(m)
     return Frag{pg: cols, lite: cols, args: []}
 }
 
@@ -474,12 +474,12 @@ struct Query<T> {
 
     func writeSelect(w *sqlw) {
         if !this.joined() {
-            this.c.selectSql(w, entityCols(this.c.meta))
+            this.c.selectSql(w, entityCols(this.c.st, this.c.meta))
             return
         }
         var m = this.c.meta
         w.raw("SELECT ")
-        w.raw(columnList(m, "t0"))
+        w.raw(this.c.st.cols(m))
         for inc in this.includes {
             w.raw(", " + inc.cols)
         }
@@ -489,7 +489,7 @@ struct Query<T> {
         }
         if this.c.paged() || this.c.distinct {
             w.raw(" FROM (")
-            this.c.selectSql(w, entityCols(m))
+            this.c.selectSql(w, entityCols(this.c.st, m))
             w.raw(") AS t0")
             for inc in this.includes {
                 w.frag(inc.join)
@@ -563,7 +563,7 @@ async func query_scalar<T, R>(q Query<T>, pg string, lite string, args []any, em
 
 async func query_all<T>(q Query<T>, pg string, lite string, args []any) bool! {
     var q2 = q.where_("NOT (" + pg + ")", "NOT (" + lite + ")", args)
-    return !await q2.c.exists(entityCols(q2.c.meta))?
+    return !await q2.c.exists(entityCols(q2.c.st, q2.c.meta))?
 }
 
 async func query_update<T>(q Query<T>, pg string, lite string, args []any) int! {
@@ -586,14 +586,18 @@ async func query_ExecuteDelete<T>(q Query<T>) int! {
 async func query_ToList<T>(q Query<T>) []*T! {
     var w = q.c.writer()
     q.writeSelect(&w)
-    var rows = await q.c.st.all(w.text(), w.args)?
+    var rs = await q.c.st.rows(w.text(), w.args)?
+    defer rs.Close()
     var out []*T = []
     var st = q.c.st
     if q.joined() {
         var m = q.c.meta
         var byKey = map[string]*T{}
         var seen = map[string]bool{}
-        for vals in rows {
+        // rows are mapped as they arrive: the driver reuses its row
+        // buffer, and materialize/attach copy what they keep
+        for await rs.Next()? {
+            var vals = rs.Values()
             var pk = keyText(vals[m.Key])
             var p = byKey[pk]
             if p == nil {
@@ -619,8 +623,8 @@ async func query_ToList<T>(q Query<T>) []*T! {
         }
         return out
     }
-    for vals in rows {
-        out = append(out, materialize(st, q.ent, vals, 0, q.tracking)?)
+    for await rs.Next()? {
+        out = append(out, materialize(st, q.ent, rs.Values(), 0, q.tracking)?)
     }
     if len(q.includes) > 0 && len(out) > 0 {
         for inc in q.includes {
@@ -630,20 +634,41 @@ async func query_ToList<T>(q Query<T>) []*T! {
     return out
 }
 
+// The first entity of q with LIMIT 1, or nil: a query with Include goes
+// through ToList (joined rows), a plain one maps the single row directly.
+async func query_firstRow<T>(q Query<T>) *T! {
+    if len(q.includes) > 0 {
+        var xs = await q.Take(1).ToList()?
+        if len(xs) == 0 {
+            return nil
+        }
+        return xs[0]
+    }
+    var q1 = q
+    q1.c.take = 1
+    var w = q1.c.writer()
+    q1.writeSelect(&w)
+    var rs = await q1.c.st.rows(w.text(), w.args)?
+    defer rs.Close()
+    var p *T = nil
+    for await rs.Next()? {
+        if p == nil {
+            p = materialize(q1.c.st, q1.ent, rs.Values(), 0, q1.tracking)?
+        }
+    }
+    return p
+}
+
 async func query_First<T>(q Query<T>) *T! {
-    var xs = await q.Take(1).ToList()?
-    if len(xs) == 0 {
+    var p = await query_firstRow(q)?
+    if p == nil {
         return NoElementsError{What: "First " + q.c.meta.Entity}
     }
-    return xs[0]
+    return p
 }
 
 async func query_FirstOrDefault<T>(q Query<T>) *T! {
-    var xs = await q.Take(1).ToList()?
-    if len(xs) == 0 {
-        return nil
-    }
-    return xs[0]
+    return await query_firstRow(q)?
 }
 
 async func query_Single<T>(q Query<T>) *T! {
@@ -669,11 +694,11 @@ async func query_SingleOrDefault<T>(q Query<T>) *T! {
 }
 
 async func query_Count<T>(q Query<T>) int! {
-    return await q.c.count(entityCols(q.c.meta))?
+    return await q.c.count(entityCols(q.c.st, q.c.meta))?
 }
 
 async func query_Any<T>(q Query<T>) bool! {
-    return await q.c.exists(entityCols(q.c.meta))?
+    return await q.c.exists(entityCols(q.c.st, q.c.meta))?
 }
 
 // The rows of a projection (Select, Join, GroupBy(...).Select).
