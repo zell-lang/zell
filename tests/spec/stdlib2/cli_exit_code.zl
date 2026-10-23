@@ -1,0 +1,48 @@
+// test: cli.App.Run returns the ExitCode() of a command error that implements cli.ExitCoder (still printing its message), 1 for other errors, 2 for usage errors
+// status: passing
+// run-flags: --leak-check
+namespace spec.stdlib2.cli_exit_code
+
+import io
+
+struct NotFound {
+    Name string
+    func Message() string { return "not found: " + this.Name }
+    func ExitCode() int { return 3 }
+}
+
+struct Busy {
+    func Message() string { return "busy" }
+    func ExitCode() int { return 75 }
+}
+
+func app(errs *bytes.Buffer) cli.App {
+    return cli.App{
+        Name: "tool",
+        Errors: errs,
+        Commands: [
+            cli.Command{Name: "find", Run: func(c *cli.Context) void! {
+                return NotFound{Name: "x"}
+            }},
+            cli.Command{Name: "busy", Run: func(c *cli.Context) void! {
+                return &Busy{}
+            }},
+            cli.Command{Name: "fail", Run: func(c *cli.Context) void! {
+                return error("boom")
+            }},
+            cli.Command{Name: "ok", Run: func(c *cli.Context) void! {
+                println("ran")
+            }},
+        ],
+    }
+}
+
+func main() {
+    for cmd in ["find", "busy", "fail", "ok", "nope"] {
+        var errs = new bytes.Buffer{}
+        var code = app(errs).Run(["tool", cmd])
+        println(cmd, code, strings.Trim(strings.Split(errs.String(), "\n")[0]))
+    }
+    var e cli.ExitCoder = NotFound{}
+    println(e.ExitCode())
+}

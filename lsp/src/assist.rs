@@ -54,7 +54,7 @@ impl<'a> Walker<'a, '_> {
                     }
                 }
                 ast::Decl::Const(c) => self.expr(&c.value),
-                ast::Decl::Interface(_) | ast::Decl::Error(_) => {}
+                ast::Decl::Interface(_) | ast::Decl::TypeAlias(_) | ast::Decl::Error(_) => {}
             }
         }
     }

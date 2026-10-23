@@ -241,14 +241,21 @@ impl Parser<'_> {
         }
     }
 
-    /// A field name in a struct declaration or an attribute argument: an
-    /// identifier, or the keyword `default`.
+    /// A field name in a struct declaration, a struct literal or an
+    /// attribute argument: an identifier or any keyword (`enum`, `default`).
     fn field_decl_name(&mut self) -> PResult<Ident> {
-        if self.at(&TokenKind::Default) {
+        if is_keyword(self.peek()) {
+            let name = self.peek().text().to_string();
             let span = self.bump().span;
-            return Ok(Ident { name: "default".into(), span });
+            return Ok(Ident { name, span });
         }
         self.ident()
+    }
+
+    /// At `name:` where `name` is an identifier or a keyword (named
+    /// attribute arguments, struct literal fields).
+    fn at_field_name_colon(&self) -> bool {
+        (matches!(self.peek(), TokenKind::Ident(_)) || is_keyword(self.peek())) && self.peek_n(1) == &TokenKind::Colon
     }
 
     /// An identifier or `_`.
@@ -400,6 +407,14 @@ impl Parser<'_> {
             }
             TokenKind::Var => Decl::Var(self.var_decl()?),
             TokenKind::Const => Decl::Const(self.const_decl()?),
+            // `type` is a contextual keyword: only in `type Name = T`.
+            TokenKind::Ident(s) if s == "type" && matches!(self.peek_n(1), TokenKind::Ident(_)) && self.peek_n(2) == &TokenKind::Assign => {
+                let start = self.bump().span;
+                let name = self.ident()?;
+                self.bump(); // `=`
+                let ty = self.parse_type()?;
+                Decl::TypeAlias(TypeAliasDecl { attrs: Vec::new(), name, ty, span: self.span_from(start) })
+            }
             TokenKind::Static => {
                 return Err(self.error_at(self.span(), "`static` is only allowed on methods inside a struct"))
             }
@@ -414,6 +429,7 @@ impl Parser<'_> {
                 Decl::Func(d) => (d.attrs, d.span) = (attrs, span),
                 Decl::Var(d) => (d.attrs, d.span) = (attrs, span),
                 Decl::Const(d) => (d.attrs, d.span) = (attrs, span),
+                Decl::TypeAlias(d) => (d.attrs, d.span) = (attrs, span),
                 Decl::Error(_) => {}
             }
         }
@@ -432,8 +448,8 @@ impl Parser<'_> {
                 self.with_struct_lit(true, |p| {
                     while !p.at(&TokenKind::RParen) && !p.at_eof() {
                         let arg_start = p.span();
-                        // (`default:` is a parameter name too: `@cli.flag(default: "x")`.)
-                        let name = if matches!(p.peek(), TokenKind::Ident(_) | TokenKind::Default) && p.peek_n(1) == &TokenKind::Colon {
+                        // Keywords name parameters too: `@cli.flag(default: "x")`, `@Conf(enum: "a,b")`.
+                        let name = if p.at_field_name_colon() {
                             let name = p.field_decl_name()?;
                             p.bump(); // `:`
                             Some(name)
@@ -499,8 +515,14 @@ impl Parser<'_> {
                 TokenKind::Ident(_) if p.peek_n(1) == &TokenKind::Comma || starts_type(p.peek_n(1)) => {
                     fields.extend(p.fields(attrs)?)
                 }
-                // A field named `default` (attribute structs: `@flag(default: ...)`).
-                TokenKind::Default if starts_type(p.peek_n(1)) => fields.extend(p.fields(attrs)?),
+                // A field named by a keyword (`default`, `enum`; attribute
+                // structs: `@flag(default: ...)`); not one that starts a method.
+                k if is_keyword(k)
+                    && !matches!(k, TokenKind::Func | TokenKind::Static | TokenKind::Async)
+                    && (p.peek_n(1) == &TokenKind::Comma || starts_type(p.peek_n(1))) =>
+                {
+                    fields.extend(p.fields(attrs)?)
+                }
                 TokenKind::Ident(_) | TokenKind::Star => {
                     if let Some(span) = attr_span {
                         p.diags.warning("attributes on embedded types are ignored", span);
@@ -552,6 +574,20 @@ impl Parser<'_> {
             .collect())
     }
 
+    /// At a declaration keyword used as a field name (`enum string`), not
+    /// at a nested declaration (`struct T {`, `enum E<T>`), which means the
+    /// enclosing body lacks its `}`.
+    fn keyword_field_ahead(&self) -> bool {
+        match self.peek_n(1) {
+            TokenKind::Comma => true,
+            TokenKind::Ident(_) => {
+                !matches!(self.peek_n(2), TokenKind::LBrace | TokenKind::Lt)
+                    && !matches!(self.peek_n(2), TokenKind::Ident(s) if s == "implements")
+            }
+            k => starts_type(k),
+        }
+    }
+
     /// Parses members until the closing `}` (consumed), with recovery.
     fn member_list(&mut self, mut member: impl FnMut(&mut Self) -> PResult<()>) -> PResult<()> {
         loop {
@@ -559,7 +595,9 @@ impl Parser<'_> {
             if self.at(&TokenKind::RBrace) || self.at_eof() {
                 break;
             }
-            if matches!(self.peek(), TokenKind::Struct | TokenKind::Interface | TokenKind::Enum | TokenKind::Import | TokenKind::Namespace) {
+            if matches!(self.peek(), TokenKind::Struct | TokenKind::Interface | TokenKind::Enum | TokenKind::Import | TokenKind::Namespace)
+                && !self.keyword_field_ahead()
+            {
                 // A nested declaration: this body lacks its `}`.
                 break;
             }
@@ -770,7 +808,12 @@ impl Parser<'_> {
             self.expect(&TokenKind::RParen)?;
             names
         } else {
-            vec![self.binding()?]
+            // `var v, ok = m[k]` is `var (v, ok) = m[k]` (Go's spelling).
+            let mut names = vec![self.binding()?];
+            while self.eat(&TokenKind::Comma) {
+                names.push(self.binding()?);
+            }
+            names
         };
         let ty = if starts_type(self.peek()) { Some(self.parse_type()?) } else { None };
         let init = if self.eat(&TokenKind::Assign) {
@@ -1073,17 +1116,23 @@ impl Parser<'_> {
     fn for_stmt(&mut self) -> PResult<ForStmt> {
         let start = self.expect(&TokenKind::For)?;
         let is_binding = |k: &TokenKind| matches!(k, TokenKind::Ident(_) | TokenKind::Underscore);
+        // `in` is a contextual keyword: an identifier spelled `in` right
+        // after the loop variables (`for in in ins` is a loop over `ins`).
+        let is_in = |k: &TokenKind| matches!(k, TokenKind::Ident(s) if s == "in");
         let kind = if self.at(&TokenKind::LBrace) {
             ForKind::Infinite
         } else if self.at_binding()
-            && (self.peek_n(1) == &TokenKind::In
-                || (self.peek_n(1) == &TokenKind::Comma && is_binding(self.peek_n(2)) && self.peek_n(3) == &TokenKind::In))
+            && (is_in(self.peek_n(1))
+                || (self.peek_n(1) == &TokenKind::Comma && is_binding(self.peek_n(2)) && is_in(self.peek_n(3))))
         {
             let mut vars = vec![self.binding()?];
             if self.eat(&TokenKind::Comma) {
                 vars.push(self.binding()?);
             }
-            self.expect(&TokenKind::In)?;
+            if !is_in(self.peek()) {
+                return Err(self.unexpected("`in`"));
+            }
+            self.bump();
             let iter = self.with_struct_lit(false, |p| p.range_expr())?;
             ForKind::In { vars, iter }
         } else {
@@ -1331,7 +1380,7 @@ impl Parser<'_> {
             let kind = match self.peek() {
                 TokenKind::Dot => {
                     let dot = self.bump().span;
-                    let name = if self.silent || self.field_name_ahead() {
+                    let name = if self.silent || self.field_name_ahead(dot.end) {
                         self.field_name()?
                     } else {
                         // `x.` being typed: an empty name right after the dot.
@@ -1415,13 +1464,16 @@ impl Parser<'_> {
     }
 
     /// Can [`Parser::field_name`] succeed at the current token?
-    fn field_name_ahead(&self) -> bool {
+    fn field_name_ahead(&self, dot_end: u32) -> bool {
         match self.peek() {
             TokenKind::Ident(_) | TokenKind::Int(_) => true,
-            // Statement keywords are never member names: `c.` typed at a
-            // line end before `var d = 2` recovers as an empty Field
-            // (`c.` + newline + `Inc()` still joins, as in Go).
-            TokenKind::Var | TokenKind::Const | TokenKind::If | TokenKind::For | TokenKind::Switch | TokenKind::Return | TokenKind::Defer | TokenKind::Break | TokenKind::Continue => false,
+            // Statement keywords are member names (fields named by keywords)
+            // only right after the dot: `c.` typed at a line end before
+            // `var d = 2` recovers as an empty Field (`c.` + newline +
+            // `Inc()` still joins, as in Go).
+            TokenKind::Var | TokenKind::Const | TokenKind::If | TokenKind::For | TokenKind::Switch | TokenKind::Return | TokenKind::Defer | TokenKind::Break | TokenKind::Continue => {
+                self.span().start == dot_end
+            }
             k => k.text().chars().all(|c| c.is_ascii_lowercase()),
         }
     }
@@ -1445,8 +1497,8 @@ impl Parser<'_> {
             p.recovering_list(
                 &TokenKind::RParen,
                 |p| {
-                    if p.attr_args && matches!(p.peek(), TokenKind::Ident(_)) && p.peek_n(1) == &TokenKind::Colon {
-                        let name = p.ident()?;
+                    if p.attr_args && p.at_field_name_colon() {
+                        let name = p.field_decl_name()?;
                         p.bump(); // `:`
                         let value = p.parse_expr()?;
                         let span = name.span.to(value.span);
@@ -1469,7 +1521,7 @@ impl Parser<'_> {
                 if p.at(&TokenKind::RBrace) || p.at_eof() {
                     break;
                 }
-                let name = p.ident()?;
+                let name = if p.at_field_name_colon() { p.field_decl_name()? } else { p.ident()? };
                 p.expect(&TokenKind::Colon)?;
                 let value = p.parse_expr()?;
                 fields.push(FieldInit { span: name.span.to(value.span), name, value });
@@ -1701,6 +1753,11 @@ impl Parser<'_> {
 // =========================================================================
 // Token classification
 // =========================================================================
+
+/// Is this token a keyword (spelled like an identifier)?
+fn is_keyword(kind: &TokenKind) -> bool {
+    !matches!(kind, TokenKind::Ident(_) | TokenKind::Underscore) && TokenKind::keyword(kind.text()).is_some()
+}
 
 /// Can this token begin a type?
 fn starts_type(kind: &TokenKind) -> bool {

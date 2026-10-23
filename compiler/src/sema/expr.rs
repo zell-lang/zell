@@ -230,7 +230,7 @@ impl<'a> Sema<'a> {
                 self.err(format!("{name} is a namespace, not a value"), span);
                 self.invalid(span)
             }
-            PathRes::Member(Member::Struct(_) | Member::Interface(_) | Member::Enum(_)) | PathRes::BuiltinType(_) => {
+            PathRes::Member(Member::Struct(_) | Member::Interface(_) | Member::Enum(_) | Member::Alias(_)) | PathRes::BuiltinType(_) => {
                 self.err(format!("{name} is a type, not a value"), span);
                 self.invalid(span)
             }

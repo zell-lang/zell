@@ -297,6 +297,10 @@ impl<'a> Fmt<'a> {
             Decl::Func(f) => self.func(f),
             Decl::Var(v) => self.var(v),
             Decl::Const(c) => self.const_(c),
+            Decl::TypeAlias(a) => {
+                let kw = self.after_attrs(&a.attrs, a.span.start);
+                concat(vec![self.attrs(&a.attrs, kw), text(format!("type {} = ", a.name.name)), self.ty(&a.ty)])
+            }
             Decl::Error(s) => text(self.slice(*s)),
         }
     }
@@ -914,6 +918,31 @@ impl<'a> Fmt<'a> {
         }
     }
 
+    /// `base.name`. A chain broken before the dot in the source (a line
+    /// starting with `.` continues the previous one) stays broken: the
+    /// `.name` goes on its own line, indented, after the comments between.
+    fn field(&mut self, base: &Expr, name: &Ident) -> Doc {
+        let b = self.expr(base);
+        let i = self.lexed.token_at(name.span.start);
+        let dot = if i > 0 { self.lexed.tokens[i - 1].span.start } else { name.span.start };
+        if !self.newline_between(base.span.end, dot) {
+            return concat(vec![b, text(format!(".{}", name.name))]);
+        }
+        let mut tail = Vec::new();
+        let trail = self.take_trailing(base.span.end, dot).map_or(Doc::Nil, Doc::Suffix);
+        while let Some(c) = self.comments.get(self.next) {
+            if c.start >= dot {
+                break;
+            }
+            tail.push(Doc::Hard);
+            tail.push(text(c.text.clone()));
+            self.next += 1;
+        }
+        tail.push(Doc::Hard);
+        tail.push(text(format!(".{}", name.name)));
+        concat(vec![b, trail, indent(concat(tail))])
+    }
+
     fn expr_inner(&mut self, e: &Expr) -> Doc {
         match &e.kind {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Char(_) => text(self.slice(e.span)),
@@ -921,7 +950,7 @@ impl<'a> Fmt<'a> {
             ExprKind::Nil => text("nil"),
             ExprKind::This => text("this"),
             ExprKind::Ident(i) => text(i.name.clone()),
-            ExprKind::Field { base, name } => concat(vec![self.expr(base), text(format!(".{}", name.name))]),
+            ExprKind::Field { base, name } => self.field(base, name),
             ExprKind::Call { callee, args } => self.call(callee, args, e.span),
             ExprKind::Index { base, index } => concat(vec![self.expr(base), text("["), self.expr(index), text("]")]),
             ExprKind::Unary { op, expr } => {

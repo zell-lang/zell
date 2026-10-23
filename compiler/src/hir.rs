@@ -824,6 +824,9 @@ pub enum Builtin {
     LenArray,
     /// `len(map[K]V)`.
     LenMap,
+    /// Comma-ok lookup `var (v, ok) = m[k]`: `args = [map, key]`, the type
+    /// is `(V, bool)`; `v` (owned) is the zero value when `ok` is false.
+    MapLookup,
     /// `append(s, x)` -> new slice header (`ty` is `[]T`).
     Append,
     /// `delete(m, k)`.

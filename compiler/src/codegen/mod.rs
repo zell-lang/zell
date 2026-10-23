@@ -57,7 +57,10 @@
 //! interface}, args)`. Enum values are boxed like struct values; their slots
 //! are thunks loading the enum from `data` (enum methods take the value).
 //! `case I x:` on an `any` looks the vtable up with `iface.conv.N(typeid)`
-//! (NULL = no match) and unwraps a stored `*S` when `boxed = 0`. Storing a
+//! (NULL = no match) and unwraps a stored `*S` when `boxed = 0`; on an
+//! `error` the same lookup takes the user type at +32 (every struct boxed
+//! into an error is a candidate) and binds `{payload of the box at +40,
+//! vtable}`. Storing a
 //! struct in an `error` boxes it and calls `zell_error_new_typed` with a
 //! `Message()` thunk; when the struct has `Unwrap() error`, its result
 //! (+1) is stored into the new error's `inner` (+24). `error` method 0 is

@@ -303,7 +303,10 @@ pub(crate) fn absolute_tokens(a: &Analysis, file: usize) -> Vec<AbsToken> {
                 let s = a.index.symbol(*id);
                 // Only trust spans whose text matches the symbol (namespaces aside).
                 (s.name == *name || matches!(s.key, SymKey::Ns(_))).then(|| token_class(s, *decl))
-            }),
+            })
+            // `in` of `for x in xs` is a contextual keyword (an identifier
+            // token); a variable named `in` resolves above.
+            .or_else(|| (name == "in").then_some((T_KEYWORD, 0))),
             TokenKind::Int(_) | TokenKind::Float(_) => Some((T_NUMBER, 0)),
             TokenKind::Str(_) | TokenKind::Char(_) => Some((T_STRING, 0)),
             k if is_keyword(k) => Some((T_KEYWORD, 0)),

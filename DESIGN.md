@@ -45,6 +45,27 @@ struct UserService {
 }
 ```
 
+### Точки с запятой
+
+`;` между инструкциями не пишут: как в Go, лексер вставляет его в конце
+строки, если последний токен строки может завершать инструкцию
+(идентификатор, литерал, `return`, `break`, `continue`, `nil`, `true`,
+`false`, `this`, `_`, `)`, `]`, `}`, `?`, `!`, `>` закрывающих
+аргументов типа). Отличия от Go:
+
+- внутри `( )` и `[ ]` точки с запятой не вставляются — списки аргументов
+  и литералы срезов переносятся без запятой в конце строки;
+- строка, первый токен которой — `.`, продолжает предыдущую: `;` перед ней
+  не вставляется (комментарии и пустые строки между ними не мешают), так
+  что цепочку вызовов можно переносить перед точкой.
+
+```zell
+var names = users
+    .Where((u) => u.Active)
+    .Select((u) => u.Name)
+    .ToList()
+```
+
 ### Правила импорта
 
 `import X` делает содержимое пространства имён `X` доступным по коротким
@@ -118,6 +139,13 @@ var count int        // без инициализатора: нулевое зн
 - Множественное присваивание существующим переменным:
   `a, b = b, a` (сначала вычисляются все значения справа) и
   `(q, r) = DivMod(17, 5)` для кортежного результата (`_` отбрасывает).
+- Кортежный результат раскладывается в новые переменные:
+  `var (q, r) = DivMod(17, 5)` или, как в Go, без скобок
+  `var q, r = DivMod(17, 5)` (явный тип не пишется).
+- Поиск в map с проверкой наличия (comma-ok, как в Go):
+  `var v, ok = m[k]` (или `var (v, ok) = m[k]`, `v, ok = m[k]`) — `ok`
+  типа `bool`, при отсутствии ключа `v` — нулевое значение. Простое
+  `m[k]` по-прежнему даёт только значение. Оператора `in` для map нет.
 - `s[i]` строки — байт (`byte`) по смещению `i`, выход за границы — паника;
   `for i, ch in s` перебирает кодовые точки.
 
@@ -136,6 +164,32 @@ var count int        // без инициализатора: нулевое зн
 обратных кавычках `` `...` `` — без обработки escape, многострочные (для
 regex, путей Windows, SQL). Строки — неизменяемые, UTF-8. Срезы и map — как в Go (ссылочная семантика
 на общий буфер). Подсрез записывается диапазоном: `s[1..3]`, `s[..2]`, `s[2..]`.
+
+### Псевдонимы типов
+
+`type Name = Type` на верхнем уровне вводит прозрачный псевдоним: новое
+имя того же типа, а не новый номинальный тип. `Name` и `Type` взаимозаменяемы
+везде — в присваиваниях, сигнатурах (метод с псевдонимом в сигнатуре
+реализует интерфейс с исходным типом и наоборот), наборах методов,
+литералах (`P{X: 1}` для `type P = Point`), статических методах и
+вариантах (`Shade.Green`), преобразованиях (`Celsius(36)` для
+`type Celsius = float`); `reflect.TypeOf<Name>()` возвращает исходный тип.
+
+```zell
+type Handler = func(Request) Response!
+type Ints = []int
+type P = geo.Point
+```
+
+- Видимость — как у других объявлений (с заглавной буквы — экспорт);
+  псевдоним может ссылаться на другой псевдоним, цикл (`type A = []A`,
+  `type A = B` + `type B = A`) — ошибка «invalid recursive type alias».
+- `type` — контекстное ключевое слово: только в `type Name =` на верхнем
+  уровне; в остальных местах это обычное имя (`var type = "x"`).
+- Обобщённые псевдонимы (`type Pair<T> = (T, T)`) и локальные (внутри
+  функции) не поддерживаются; атрибуты на псевдониме — ошибка (кроме
+  `@cfg`). В исходниках stdlib на Zell (`sema/stdlib_src`) псевдонимы
+  пока не поддерживаются.
 
 ## Функции
 
@@ -242,15 +296,24 @@ struct User {
   `dir/имя`. У `var` с `@embed` нет инициализатора.
 - Атрибут-структуры могут объявляться и в stdlib на Zell
   (`@binary(endian: "big")` из `encoding.binary`, `@cli.flag(...)` из
-  `cli`): они пишутся через пространство имён, как обычные. Ключевое
-  слово `default` допустимо как имя поля и аргумента
-  (`@cli.flag(default: "8080")`).
+  `cli`): они пишутся через пространство имён, как обычные.
+- Ключевые слова допустимы как имена аргументов атрибута и полей
+  структур (`@cli.flag(default: "8080")`, `@Conf(enum: "a,b")`): аргумент
+  `enum:` задаёт поле `enum`. Исключения — `func`, `static`, `async`
+  (начинают метод) и `_`. Такое поле читается как обычно (`c.enum`;
+  ключевые слова инструкций — `c.for`, `c.var` — только вплотную к точке)
+  и инициализируется литералом `Conf{enum: "x"}`.
 - Каждый применённый атрибут — константное значение своей структуры
   (аргументы и значения полей по умолчанию), вшитое в таблицы рефлексии;
   у встроенных это структуры `reflect` (`json`, `deprecated`, ...).
   Читается через `Attribute<A>()` / `Attributes<A>()` (раздел «Рефлексия»).
 - Библиотечные: `@json`, `@log(skip: true)` (поле не попадает в `{@X}` логгера), `@xml`, `@db(column: "...")`, `@validate(...)`.
 - Неизвестный атрибут — ошибка компиляции (в отличие от строковых тегов Go).
+- Видимость атрибута — обычная видимость его структуры: атрибут для других
+  пакетов называется с заглавной буквы и пишется через пространство имён
+  (`@zconf.Conf(...)`); атрибут со строчной буквы (`@range`) — приватный
+  для своего пространства имён. Встроенные и stdlib-атрибуты (`@json`, `@cli.flag`)
+  строчные по историческим причинам и доступны везде.
 
 ### Свои атрибуты
 
@@ -925,6 +988,10 @@ for cond { ... }                // как while
 for { ... }                     // бесконечный
 ```
 
+`in` — контекстное ключевое слово: ключевое только между переменными
+цикла и итерируемым значением в `for … in …`, в остальных местах — обычное
+имя (`var in = 1`, параметр `in io.Reader`, `for x in in`).
+
 **Протокол итерации.** `for x in v` обходит срезы, массивы, строки (по
 code point), `map`, коллекции `collections` и любой тип, который
 следует протоколу (реализация — `compiler/src/sema/iterate.rs`):
@@ -994,6 +1061,13 @@ switch res {
 }
 ```
 
+- Проверка типа (`case T x:`) работает над интерфейсом, `any` и `error`.
+  Для структуры `T` динамический тип должен совпасть точно; для
+  интерфейса `I` — реализовать `I` (привязка `x` — значение `I`). Над
+  `error` проверяется тип самой ошибки (структуры, упакованной в `error`),
+  а не цепочки обёрток (для неё — `errors.As`): `case ExitCoder e:`
+  срабатывает для любой структуры-ошибки с методом `ExitCode() int`.
+  Выбирается первый подходящий `case`.
 - `switch` по enum без `default`, перечисляющий все варианты, и полный
   `switch` по типу над `sealed`-интерфейсом — завершающие операторы
   (`return` после них не нужен), как в `Eval` из `docs/PATTERNS.md`.
@@ -2419,9 +2493,11 @@ async func main() {
 ```
 file        = { attribute } "namespace" path { import } { decl } ;   (* @cfg(...) here excludes the file *)
 import      = "import" path [ "as" ident ] ;
-decl        = { attribute } ( struct | interface | enum | func | externfunc | var | const ) ;
+decl        = { attribute } ( struct | interface | enum | func | externfunc | var | const | typealias ) ;
+typealias   = "type" ident "=" type ;         (* transparent alias; "type" is contextual *)
 attribute   = "@" path [ "(" [ attrarg { "," attrarg } ] ")" ] ;
-attrarg     = [ ident ":" ] expr ;           (* in attribute arguments a call takes attrargs: @cfg(not(os: "windows")) *)
+attrarg     = [ name ":" ] expr ;            (* in attribute arguments a call takes attrargs: @cfg(not(os: "windows")) *)
+name        = ident | keyword ;              (* field and attribute argument names: @Conf(enum: "a") *)
 cfg         = "@cfg" "(" cond { "," cond } ")" ;
 cond        = ( "os" | "arch" | "feature" ) ":" string | ( "not" | "any" | "all" ) "(" cond { "," cond } ")" ;
 struct      = "struct" ident [ generics ] [ "implements" type { "," type } ] "{" { field | method } "}" ;
@@ -2431,7 +2507,7 @@ interface   = [ "sealed" ] "interface" ident "{" { type | ifacemethod } "}" ;   
 ifacemethod = { attribute } [ "async" ] "func" ident "(" [ params ] ")" [ type ] [ block ] ;  (* block: default method *)
 enum        = "enum" ident [ generics ] [ "implements" type { "," type } ] "{" variant { ( "," | newline ) variant } { method } "}" ;
 variant     = { attribute } ident [ "(" params ")" ] ;
-field       = { attribute } ident type [ "=" expr ] ;
+field       = { attribute } name type [ "=" expr ] ;   (* name: not "func", "static", "async" *)
 method      = [ "static" ] func ;
 func        = [ "async" ] "func" ident [ generics ] "(" [ params ] ")" [ type ] block ;
 externfunc  = "extern" "func" ident "(" [ params ] ")" [ type ] ;   (* только в std/**/*_extern.zl *)
@@ -2445,9 +2521,11 @@ stmt        = var | const | if | for | switch | trystmt | "return" [ exprs ]
             | "break" | "continue" | "defer" expr | exprs [ assignop exprs ] ;
 assignop    = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "@=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
                                               (* a, b = b, a ; (q, r) = f() *)
-var         = "var" ident [ type ] [ "=" expr ] ;
+var         = "var" ( ident { "," ident } | "(" ident { "," ident } ")" ) [ type ] [ "=" expr ] ;
+                                              (* several names: tuple destructuring; var v, ok = m[k] is the comma-ok lookup *)
 if          = "if" expr block [ "else" ( if | block ) ] ;
 for         = "for" [ ident [ "," ident ] "in" ( expr | range ) | expr ] block ;
+                                              (* "in" is contextual: an ordinary name elsewhere *)
 switch      = "switch" expr "{" { "case" pattern { "," pattern } ":" stmts }
               [ "default" ":" stmts ] "}" ;
 pattern     = expr | expr ".." expr | path "(" [ idents ] ")" | type ident ;

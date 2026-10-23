@@ -21,7 +21,7 @@
     STRUCT='struct' INTERFACE='interface' ENUM='enum'
     FUNC='func' STATIC='static' ASYNC='async' AWAIT='await'
     VAR='var' CONST='const'
-    IF='if' ELSE='else' FOR='for' IN='in'
+    IF='if' ELSE='else' FOR='for'
     SWITCH='switch' CASE='case' DEFAULT='default'
     RETURN='return' BREAK='break' CONTINUE='continue' DEFER='defer'
     TRY='try' CATCH='catch' NEW='new'
@@ -54,7 +54,9 @@
 
   // Statement terminators: the lexer layer inserts SEMI at a newline after
   // IDENTIFIER, literals, RETURN, BREAK, CONTINUE, NIL, TRUE, FALSE, THIS,
-  // UNDERSCORE, RPAREN, RBRACE, RBRACKET, QUESTION, BANG (Go-style).
+  // UNDERSCORE, RPAREN, RBRACE, RBRACKET, QUESTION, BANG, GT, SHR (Go-style),
+  // never directly inside ( ) or [ ], and not when the next line's first
+  // token is DOT (a line starting with `.` continues the previous one).
   // `eos` below accepts either an explicit or an inserted SEMI.
 }
 
@@ -69,20 +71,24 @@ namespace_decl ::= NAMESPACE qualified_name eos
 import_decl ::= IMPORT qualified_name (AS IDENTIFIER)? eos
 qualified_name ::= name_segment (DOT name_segment)*
 // keywords are allowed as path segments (`examples.async`, `@default`)
-name_segment ::= IDENTIFIER | NAMESPACE | IMPORT | AS | STRUCT | INTERFACE | ENUM | FUNC | STATIC | ASYNC | AWAIT | VAR | CONST | IF | ELSE | FOR | IN | SWITCH | CASE | DEFAULT | RETURN | BREAK | CONTINUE | DEFER | TRY | CATCH | NEW | NIL | TRUE | FALSE | MAP | THIS
+name_segment ::= IDENTIFIER | NAMESPACE | IMPORT | AS | STRUCT | INTERFACE | ENUM | FUNC | STATIC | ASYNC | AWAIT | VAR | CONST | IF | ELSE | FOR | SWITCH | CASE | DEFAULT | RETURN | BREAK | CONTINUE | DEFER | TRY | CATCH | NEW | NIL | TRUE | FALSE | MAP | THIS
 
 // A declaration ending in `}` gets an automatic SEMI at the newline after it.
-top_level_decl ::= attribute* ((struct_decl | interface_decl | enum_decl | func_decl) eos? | extern_func_decl eos | var_decl eos | const_decl eos)
+top_level_decl ::= attribute* ((struct_decl | interface_decl | enum_decl | func_decl) eos? | extern_func_decl eos | var_decl eos | const_decl eos | type_alias_decl eos)
 // `extern` is a contextual keyword (an IDENTIFIER spelled "extern"): a runtime
 // (C) function without a body, only in the generated std/**/*_extern.zl files.
 extern_func_decl ::= IDENTIFIER func_signature
+// `type Name = T`: a transparent type alias. `type` is a contextual keyword
+// (an IDENTIFIER spelled "type"), only at the top level before `Name =`.
+type_alias_decl ::= IDENTIFIER IDENTIFIER ASSIGN type
 
 // `@json("name")`, `@reflect`, `@deprecated(reason: "...")`, `@allowCycle`;
 // an attribute on its own line is followed by an automatic SEMI.
 attribute ::= AT qualified_name attribute_args? eos?
 attribute_args ::= LPAREN (attribute_arg (COMMA attribute_arg)*)? RPAREN
-// `default` may name an argument (and a field): `@cli.flag(default: "8080")`.
-attribute_arg ::= ((IDENTIFIER | DEFAULT) COLON)? expr
+// Keywords may name an argument (and a field): `@cli.flag(default: "8080")`,
+// `@Conf(enum: "a,b")`.
+attribute_arg ::= (field_name COLON)? expr
 
 // ---------------------------------------------------------------------------
 // Declarations
@@ -94,7 +100,10 @@ struct_decl ::= STRUCT (IDENTIFIER | DEFAULT) generic_params? implements_clause?
 implements_clause ::= IDENTIFIER type (COMMA type)*
 struct_member ::= attribute* (method_decl | field_decl | embed_decl) eos?
 // `Port int = 8080`: a default value (attribute structs, options).
-field_decl ::= (IDENTIFIER | DEFAULT) type (ASSIGN expr)?
+// A field may be named by a keyword (`enum string`, `default string`),
+// except FUNC, STATIC and ASYNC, which start a method.
+field_decl ::= field_name type (ASSIGN expr)?
+field_name ::= IDENTIFIER | NAMESPACE | IMPORT | AS | STRUCT | INTERFACE | ENUM | AWAIT | VAR | CONST | IF | ELSE | FOR | SWITCH | CASE | DEFAULT | RETURN | BREAK | CONTINUE | DEFER | TRY | CATCH | NEW | NIL | TRUE | FALSE | MAP | THIS
 embed_decl ::= type
 method_decl ::= STATIC? func_decl
 
@@ -117,7 +126,9 @@ param_group ::= attribute* IDENTIFIER (COMMA IDENTIFIER)* type
 generic_params ::= LT generic_param (COMMA generic_param)* GT
 generic_param ::= IDENTIFIER (COLON type)?
 
-var_decl ::= VAR (IDENTIFIER | var_tuple) type? (ASSIGN expr)?
+// `var (q, r) = f()` and `var q, r = f()` destructure a tuple; with a map
+// index, `var v, ok = m[k]` is the comma-ok lookup (DESIGN.md "Переменные").
+var_decl ::= VAR (var_name (COMMA var_name)* | var_tuple) type? (ASSIGN expr)?
 var_tuple ::= LPAREN var_name (COMMA var_name)* RPAREN
 var_name ::= IDENTIFIER | UNDERSCORE
 const_decl ::= CONST IDENTIFIER type? ASSIGN expr
@@ -152,7 +163,9 @@ if_stmt ::= IF expr block (ELSE (if_stmt | block))?
 
 for_stmt ::= FOR for_header? block
 for_header ::= for_in | expr
-for_in ::= var_name (COMMA var_name)? IN (range_expr | expr)
+// `in` is a contextual keyword (an IDENTIFIER spelled "in"), only here;
+// elsewhere it is an ordinary name (`var in = 1`, a parameter `in`).
+for_in ::= var_name (COMMA var_name)? IDENTIFIER (range_expr | expr)
 // `0..10`, `s[1..]`, `s[..3]`; only valid as a for iterator, index or case pattern
 range_expr ::= expr? DOTDOT expr?
 
@@ -214,7 +227,7 @@ postfix ::= DOT name_segment
           | generic_args
 // `name: value` arguments only inside attribute arguments (`@cfg(not(os: "windows"))`).
 arg_list ::= call_arg (COMMA call_arg)* COMMA?
-call_arg ::= (IDENTIFIER COLON)? expr
+call_arg ::= (field_name COLON)? expr
 
 // `_` is the discard target (`_ = f()`) and a wildcard in patterns (`Shape.Rect(w, _)`)
 primary_expr ::= lambda_expr | literal | THIS | NIL | UNDERSCORE
@@ -226,7 +239,7 @@ literal ::= INT_LITERAL | FLOAT_LITERAL | STRING_LITERAL | RAW_STRING_LITERAL | 
 
 // `Point{X: 1}`; not allowed directly in if/for/switch headers (Go rule)
 struct_literal ::= qualified_name generic_args? LBRACE (field_init (COMMA field_init)* COMMA?)? RBRACE
-field_init ::= IDENTIFIER COLON expr
+field_init ::= field_name COLON expr
 slice_literal ::= LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET
 map_literal ::= map_type LBRACE (map_entry (COMMA map_entry)* COMMA?)? RBRACE
 map_entry ::= expr COLON expr

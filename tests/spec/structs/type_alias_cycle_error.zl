@@ -1,0 +1,11 @@
+// error: invalid recursive type alias
+// status: passing
+namespace spec.structs.type_alias_cycle_error
+
+type A = B
+type B = []A
+
+func main() {
+    var a A
+    _ = a
+}

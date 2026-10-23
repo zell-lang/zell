@@ -307,7 +307,7 @@ pub(crate) fn selection_chain(f: &ast::File, text: &str, off: u32) -> Vec<Span> 
             ast::Decl::Func(func) => funcs.push(func),
             ast::Decl::Var(v) => exprs.extend(v.init.iter()),
             ast::Decl::Const(c) => exprs.push(&c.value),
-            ast::Decl::Error(_) => {}
+            ast::Decl::TypeAlias(_) | ast::Decl::Error(_) => {}
         }
     }
     for i in &f.imports {

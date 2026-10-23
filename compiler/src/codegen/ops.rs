@@ -394,6 +394,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
                 Ok(Val::borrowed(self.i64_ty().const_int(n, false).into()))
             }
+            Builtin::MapLookup => self.map_lookup(ty, &args[0], &args[1]),
             Builtin::LenMap => {
                 let m = self.expr(&args[0])?;
                 let r = self.call_rt_v("zell_map_len", &[m.get().into()]);

@@ -121,6 +121,7 @@ impl StdIndex {
                     }
                 }
                 ast::Decl::Const(c) => push(self, format!("{ns}.{}", c.name.name), &c.name, c.span, SymbolKind::Const),
+                ast::Decl::TypeAlias(a) => push(self, format!("{ns}.{}", a.name.name), &a.name, a.span, SymbolKind::BuiltinType),
                 ast::Decl::Var(v) => {
                     if let Some(n) = v.names.first() {
                         push(self, format!("{ns}.{}", n.name), n, v.span, SymbolKind::Global);

@@ -131,6 +131,7 @@ impl<'a> Sema<'a> {
             return;
         };
         let init = self.value(e, None);
+        let init = self.comma_ok(init, v.names.len());
         let tys = match self.tt.get(init.ty).clone() {
             Type::Tuple(ts) if ts.len() == v.names.len() => ts,
             Type::Invalid => vec![self.tt.invalid; v.names.len()],
@@ -150,6 +151,17 @@ impl<'a> Sema<'a> {
             .map(|(n, t)| if n.name == "_" { None } else { Some(self.declare_local(&n.name, t, LocalKind::Var, n.span)) })
             .collect();
         out.push(Stmt { kind: StmtKind::LetTuple { locals, init }, span: v.span });
+    }
+
+    /// A map index destructured into two values is the comma-ok lookup
+    /// (`var (v, ok) = m[k]`, `v, ok = m[k]`): `(V, bool)`, Go semantics.
+    fn comma_ok(&mut self, h: hir::Expr, n: usize) -> hir::Expr {
+        if n != 2 {
+            return h;
+        }
+        let ExprKind::MapGet { map, key } = h.kind else { return h };
+        let ty = self.tt.tuple(vec![h.ty, self.tt.bool_]);
+        mk(ExprKind::Builtin { op: hir::Builtin::MapLookup, args: vec![*map, *key] }, ty, h.span)
     }
 
     fn local_const(&mut self, c: &ast::ConstDecl) {
@@ -782,6 +794,7 @@ impl<'a> Sema<'a> {
             }
             _ => {
                 let hv = self.value(value, None);
+                let hv = self.comma_ok(hv, places.len());
                 let tys = match self.tt.get(hv.ty).clone() {
                     Type::Tuple(ts) if ts.len() == places.len() => ts,
                     Type::Invalid => vec![self.tt.invalid; places.len()],

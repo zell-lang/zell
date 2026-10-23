@@ -1,0 +1,7 @@
+0 exit 2
+1 temporary true
+2 other plain
+3 other boxed string
+4 value 7
+exit 2
+struct case x

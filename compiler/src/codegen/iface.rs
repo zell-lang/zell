@@ -344,6 +344,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// Boxes struct value `v` (owned) as a typed error (+1).
     fn box_error(&mut self, st: TypeId, sid: u32, v: BasicValueEnum<'ctx>) -> R<BasicValueEnum<'ctx>> {
         let thunk = self.message_thunk(sid)?;
+        // A candidate dynamic type for `case SomeInterface x:` on errors.
+        if !self.any_dyn_tys.contains(&st) {
+            self.any_dyn_tys.push(st);
+        }
         let obj = self.new_box(st, v);
         let ti = self.type_info(st);
         let e = self.call_rt_v("zell_error_new_typed", &[ti.into(), obj.into(), thunk.as_global_value().as_pointer_value().into()]);
@@ -573,7 +577,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// For a type-switch subject `subj` (interface or error value) and
     /// pattern type `pat`: (matches, pointer to the stored `pat` value).
     pub(crate) fn type_test(&mut self, subj_ty: TypeId, subj: BasicValueEnum<'ctx>, pat: TypeId) -> R<(IntValue<'ctx>, PointerValue<'ctx>)> {
-        let ti = self.type_info(pat);
         let res = self.entry_alloca(self.ctx.bool_type().into(), "tm", false);
         self.b.build_store(res, self.ctx.bool_type().const_zero()).unwrap();
         let datap = self.entry_alloca(self.ptr_ty().into(), "td", false);
@@ -581,7 +584,38 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let has = self.block("tt.has");
         let done = self.block("tt.done");
         match self.ty(subj_ty) {
+            Type::Error if matches!(self.ty(pat), Type::Interface(_)) => {
+                // `case ExitCoder c:` on an error: like on `any`, the
+                // vtable is looked up by the payload's dynamic type (the
+                // user type at +32; NULL for message-only errors). Every
+                // struct boxed into an error is a candidate
+                // (`box_error` records it); the payload is a value box,
+                // so `data` is its payload address.
+                let e = subj.into_pointer_value();
+                let nn = self.b.build_is_not_null(e, "").unwrap();
+                self.b.build_conditional_branch(nn, has, done).unwrap();
+                self.b.position_at_end(has);
+                let utp = self.byte_gep(e, 32);
+                let ut = self.b.build_load(self.ptr_ty(), utp, "").unwrap().into_pointer_value();
+                let typed = self.block("tt.typed");
+                let utn = self.b.build_is_not_null(ut, "").unwrap();
+                self.b.build_conditional_branch(utn, typed, done).unwrap();
+                self.b.position_at_end(typed);
+                let f = self.iface_conv_fn(pat);
+                let nvt = self.b.build_call(f, &[ut.into()], "").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                let ok = self.b.build_is_not_null(nvt, "").unwrap();
+                self.b.build_store(res, ok).unwrap();
+                let pp = self.byte_gep(e, 40);
+                let payload = self.b.build_load(self.ptr_ty(), pp, "").unwrap().into_pointer_value();
+                let d = self.payload(payload);
+                let pt = self.llty(pat);
+                let slot = self.entry_alloca(pt, "tiface", false);
+                let np = self.make_pair(d, nvt);
+                self.b.build_store(slot, np).unwrap();
+                self.b.build_store(datap, slot).unwrap();
+            }
             Type::Error => {
+                let ti = self.type_info(pat);
                 let e = subj.into_pointer_value();
                 let nn = self.b.build_is_not_null(e, "").unwrap();
                 self.b.build_conditional_branch(nn, has, done).unwrap();
@@ -651,6 +685,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let nn = self.b.build_is_not_null(vt, "").unwrap();
                 self.b.build_conditional_branch(nn, has, done).unwrap();
                 self.b.position_at_end(has);
+                let ti = self.type_info(pat);
                 let tid = if matches!(self.ty(subj_ty), Type::Any) {
                     vt
                 } else {

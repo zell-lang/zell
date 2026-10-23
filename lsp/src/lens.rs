@@ -61,6 +61,7 @@ pub(crate) fn code_lenses(a: &Analysis, file: usize, uri: &Url) -> Vec<CodeLens>
             ast::Decl::Interface(i) => refs_lens(&i.name, &mut out),
             ast::Decl::Enum(e) => refs_lens(&e.name, &mut out),
             ast::Decl::Const(c) => refs_lens(&c.name, &mut out),
+            ast::Decl::TypeAlias(_) => {}
             ast::Decl::Var(v) => {
                 if let [n] = v.names.as_slice() {
                     refs_lens(n, &mut out);

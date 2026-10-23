@@ -77,6 +77,8 @@ pub enum Decl {
     Func(FuncDecl),
     Var(VarDecl),
     Const(ConstDecl),
+    /// `type Name = Type`: a transparent alias.
+    TypeAlias(TypeAliasDecl),
     /// A declaration that failed to parse (error recovery); the span
     /// covers the skipped tokens. Later phases ignore it.
     Error(Span),
@@ -91,6 +93,7 @@ impl Decl {
             Decl::Func(d) => d.span,
             Decl::Var(d) => d.span,
             Decl::Const(d) => d.span,
+            Decl::TypeAlias(d) => d.span,
             Decl::Error(s) => *s,
         }
     }
@@ -195,6 +198,15 @@ pub struct VarDecl {
     pub names: Vec<Ident>,
     pub ty: Option<TypeExpr>,
     pub init: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeAliasDecl {
+    pub attrs: Vec<Attribute>,
+    pub name: Ident,
+    /// The aliased type (`type Handler = func(Request) Response!`).
+    pub ty: TypeExpr,
     pub span: Span,
 }
 

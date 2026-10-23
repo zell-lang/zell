@@ -1,0 +1,36 @@
+// test: a line starting with `.` continues the previous line (method chains broken before the dot, across comments and blank lines)
+// status: passing
+namespace spec.basics.leading_dot_chain
+
+import io
+
+struct Builder {
+    parts []string
+
+    func Add(s string) *Builder {
+        this.parts = append(this.parts, s)
+        return this
+    }
+
+    func Join() string {
+        return strings.Join(this.parts, "-")
+    }
+}
+
+func main() {
+    var b = &Builder{}
+    var s = b
+        .Add("a")
+        // a comment inside the chain
+        .Add("b")
+
+        .Add("c")
+        .Join()
+    println(s)
+    var n = len(b
+
+        .parts)
+    println(n)
+    b.Add("d");
+    println(b.Join())
+}
