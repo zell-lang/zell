@@ -508,6 +508,29 @@ zell-<версия>-<хост>/
 наличие всех файлов каждой цели; `zell target list` пишет `bundled`;
 `zell env ZELL_LINKER ZELL_TARGETS` — линковщик и каталоги целей.
 
+### LTO программы и рантайма (`ZELL_LTO=1`, опционально)
+
+Каждый вызов помощника рантайма из кода Zell (`zell_slice_new`, строковые
+функции, `rtGet` в `encoding.json`) — внешний вызов в `libzell_rt.a`.
+ThinLTO между программой и рантаймом включается явно:
+
+```sh
+make -C runtime LTO=1 CC=clang      # build/lto/libzell_rt.a: объекты-биткод (-flto=thin)
+ZELL_LTO=1 zell build --release main.zl
+```
+
+С `ZELL_LTO=1` компилятор в `--release` сборке для хоста пишет модуль
+программы биткодом (`.bc`, уже оптимизированным) и линкует системным
+`clang -flto=thin -fuse-ld=lld`; рантайм берётся из `build/lto/` рядом с
+найденным `libzell_rt.a` (или `lto/libzell_rt.a` рядом с установленным),
+без него — ThinLTO только над программой (с `-v` об этом пишется).
+Нужны clang и lld одной версии (биткод рантайма читает `llvm-ar` той же
+версии, что clang; биткод LLVM 18 компилятора новый lld читает).
+По умолчанию выключено: без системного clang/lld не работает, линковка
+дольше (~1 с на `benchmarks/json_codec`). Эффект: json_codec «value
+lookups» 67 → 47 мс (Go 43), `strings` 35 → 32 мс, `map` без изменений.
+Не действует на кросс-сборки, Windows и сборки с bundled lld.
+
 ### Как собираются входы (`scripts/bundle-targets.sh`)
 
 Все загрузки закреплены URL и sha256 в скрипте (Ubuntu-архив хранит

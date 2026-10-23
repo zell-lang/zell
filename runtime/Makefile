@@ -2,6 +2,8 @@
 #   make        -> build/libzell_rt.a (also copied to ./libzell_rt.a)
 #   make test   -> build and run tests/*.c
 #   make clean
+#   make LTO=1 CC=clang -> build/lto/libzell_rt.a of ThinLTO bitcode objects, used by
+#               `ZELL_LTO=1 zell build --release` (docs/PLATFORMS.md, «LTO»)
 #   make asan   -> clean rebuild + tests under AddressSanitizer
 #   make tsan   -> build/tsan/: the poller/network/scheduler tests under ThreadSanitizer
 #   CFLAGS_EXTRA=... is appended to CFLAGS (and to the coro test link, done with $(CC)),
@@ -110,6 +112,14 @@ PICFLAG := -fPIC
 OSFLAGS :=
 LDLIBS  = -lpthread -lm
 RDYNAMIC := -rdynamic
+# make LTO=1 -> build/lto/libzell_rt.a of ThinLTO bitcode objects (clang only),
+# for `zell build --release` with ZELL_LTO=1 (docs/PLATFORMS.md): the linker
+# then inlines runtime helpers into the Zell code. Not copied to ./libzell_rt.a.
+ifeq ($(LTO),1)
+BUILD   := build/lto
+CFLAGS  += -flto=thin
+AR      := $(shell command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || (command -v llvm-ar-18 >/dev/null 2>&1 && echo llvm-ar-18 || echo ar))
+endif
 endif
 
 CFLAGS  += -std=c11 -Wall -Wextra -Werror $(PICFLAG) -fno-omit-frame-pointer -ffunction-sections -fdata-sections -D_GNU_SOURCE $(OSFLAGS) -Iinclude -g $(CFLAGS_EXTRA)
@@ -124,7 +134,9 @@ TASK_TEST_ENV ?=
 
 .PHONY: all test clean asan tsan test-wine test-cross
 
-ifeq ($(CROSS),)
+ifeq ($(CROSS)$(LTO),1)
+all: $(LIB)
+else ifeq ($(CROSS),)
 all: libzell_rt.a
 
 libzell_rt.a: $(LIB)
