@@ -66,16 +66,47 @@ pub(crate) fn display_path(p: &Path) -> String {
 /// Loads, parses and analyses `target` with all its dependencies.
 /// `dev` makes the target's dev-dependencies visible (for `zell test`).
 pub fn check(project: &Project, target: PkgId, dev: bool, diags: &mut Diagnostics) -> Result<Checked, String> {
+    check_with(project, target, dev, diags, None)
+}
+
+/// The target package's sources given by the caller instead of read from
+/// disk (`zell test`: its files with `main` renamed, then generated files
+/// from position `generated_from` on, which are exempt from the namespace
+/// and entry-file checks).
+pub struct TargetSources {
+    pub files: Vec<SourceFile>,
+    pub generated_from: usize,
+}
+
+/// [`check`], optionally with the target's sources replaced. Test files
+/// (`*_test.zl`) of dependencies are never compiled into a dependent.
+pub fn check_with(project: &Project, target: PkgId, dev: bool, diags: &mut Diagnostics, mut own: Option<TargetSources>) -> Result<Checked, String> {
     let closure = project.closure(target, dev);
     let mut files = Vec::new();
     let mut file_pkg = Vec::new();
+    let mut generated = Vec::new();
     for (i, &id) in closure.iter().enumerate() {
         let p = &project.packages[id];
+        if id == target {
+            if let Some(own) = own.take() {
+                for (k, f) in own.files.into_iter().enumerate() {
+                    if k >= own.generated_from {
+                        generated.push(files.len());
+                    }
+                    files.push(f);
+                    file_pkg.push(i);
+                }
+                continue;
+            }
+        }
         let paths = p.source_files()?;
         if paths.is_empty() {
             return Err(format!("package `{}` has no source files (expected {}/src/**/*.zl)", p.name, display_path(&p.dir)));
         }
         for path in paths {
+            if id != target && crate::doc::is_test_file(&path.to_string_lossy()) {
+                continue;
+            }
             let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             files.push(SourceFile::new(display_path(&path), text));
             file_pkg.push(i);
@@ -91,9 +122,10 @@ pub fn check(project: &Project, target: PkgId, dev: bool, diags: &mut Diagnostic
     crate::sema::lint::update_config(|c| c.overrides.extend(overrides));
     let target_pos = closure.iter().position(|&id| id == target);
     let lint_files = |i: usize| Some(file_pkg[i]) == target_pos;
-    let mut program = crate::driver::check_with_policy(&files, diags, &policy, &env, |asts, d| check_namespaces(asts, &file_pkg, &scopes, d), &lint_files);
+    let checked_ns = |asts: &[ast::File], d: &mut Diagnostics| check_namespaces_except(asts, &file_pkg, &scopes, &generated, d);
+    let mut program = crate::driver::check_with_policy(&files, diags, &policy, &env, checked_ns, &lint_files);
     let t = &project.packages[target];
-    if let (Some(prog), Some(entry)) = (&program, t.entry()) {
+    if let (Some(prog), Some(entry), true) = (&program, t.entry(), generated.is_empty()) {
         let entry = entry.canonicalize().unwrap_or(entry);
         let entry_idx = files.iter().position(|f| Path::new(&f.path).canonicalize().ok().as_ref() == Some(&entry));
         let main_file = prog.entry.map(|f| prog.funcs[f.0 as usize].file);
@@ -109,7 +141,15 @@ pub fn check(project: &Project, target: PkgId, dev: bool, diags: &mut Diagnostic
 /// Reports files whose `namespace` is not under their package's root.
 /// `scopes` are (package name, namespace root) per closure position.
 pub fn check_namespaces(asts: &[ast::File], file_pkg: &[usize], scopes: &[(String, String)], diags: &mut Diagnostics) {
+    check_namespaces_except(asts, file_pkg, scopes, &[], diags)
+}
+
+/// [`check_namespaces`] skipping the files at positions `skip`.
+fn check_namespaces_except(asts: &[ast::File], file_pkg: &[usize], scopes: &[(String, String)], skip: &[usize], diags: &mut Diagnostics) {
     for (i, f) in asts.iter().enumerate() {
+        if skip.contains(&i) {
+            continue;
+        }
         let (name, root) = &scopes[file_pkg[i]];
         let ns = f.namespace.to_string();
         let ok = ns == *root || ns.strip_prefix(root.as_str()).is_some_and(|r| r.starts_with('.'));

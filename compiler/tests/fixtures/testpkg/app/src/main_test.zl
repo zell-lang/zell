@@ -1,0 +1,10 @@
+namespace testapp
+
+import testdep
+
+@test
+func TestNine(t *testing.T) {
+    var db = Database{Rows: Triple(1)}
+    testing.Equal(t, db.Rows, 3)
+    testing.Equal(t, Nine(), 9)
+}

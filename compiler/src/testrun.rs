@@ -123,6 +123,7 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let own_files = files.len();
     let mut tests: BTreeMap<String, Vec<(String, Kind, bool)>> = BTreeMap::new();
     let mut examples: Vec<(String, zell::doc::Example)> = Vec::new();
     for f in &mut files {
@@ -206,7 +207,7 @@ pub fn run(args: &[String]) -> i32 {
     driver.push_str("    os.Exit(await testing.Main(cases))\n}\n");
     files.push(SourceFile::new(tmp.join("driver.zl").display().to_string(), driver));
     let exe = tmp.join("tests");
-    let code = match zell::build::build_sources(files, &exe, &opts) {
+    let code = match zell::build::build_test_sources(files, own_files, &exe, &opts) {
         Ok(exe) => {
             let tests_code = if total == 0 {
                 0

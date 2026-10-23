@@ -1,0 +1,15 @@
+namespace testapp
+
+import io
+
+struct Database {
+    Rows int
+}
+
+func Nine() int {
+    return testdep.Triple(3)
+}
+
+func main() {
+    println(Nine())
+}

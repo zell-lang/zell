@@ -1,0 +1,8 @@
+[package]
+name = "testapp"
+version = "0.1.0"
+namespace = "testapp"
+entry = "src/main.zl"
+
+[dependencies]
+testdep = { path = "../dep" }
