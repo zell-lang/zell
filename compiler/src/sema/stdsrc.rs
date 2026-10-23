@@ -354,6 +354,7 @@ impl<'a> Sema<'a> {
                         });
                         self.iface_src.push(it);
                         self.nss[ns].members.insert(it.name.name.clone(), (Member::Interface(id), Span::DUMMY, 0));
+                        self.std_iface_lazy.insert(id, ns);
                         // Default methods: ordinary functions of the stdlib
                         // namespace (signature and body in its scope).
                         for m in it.methods.iter().filter(|m| m.body.is_some()) {

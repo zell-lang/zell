@@ -378,6 +378,13 @@ impl<'a> Sema<'a> {
     fn default_method_iface(&mut self, ty: TypeId, name: &ast::Ident) -> Option<TypeId> {
         let mut found: Vec<(FuncId, TypeId)> = Vec::new();
         for iid in 0..self.interfaces.len() {
+            // Unforced stdlib interfaces are consulted by their default table.
+            if self.std_iface_lazy.contains_key(&(iid as u32)) {
+                if !self.iface_defaults.contains_key(&(iid as u32, name.name.clone())) {
+                    continue;
+                }
+                self.force_iface(iid as u32);
+            }
             let Some(def) = self.interfaces[iid].methods.iter().find(|m| m.name == name.name).and_then(|m| m.default) else { continue };
             if found.iter().any(|(f, _)| *f == def) {
                 continue;

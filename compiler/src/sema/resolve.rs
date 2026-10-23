@@ -767,7 +767,10 @@ impl<'a> Sema<'a> {
             PathRes::BuiltinType(t) => t,
             PathRes::Builtin(BuiltinFn::Error) => self.tt.error,
             PathRes::Member(Member::Struct(s)) => self.tt.intern(Type::Struct(DeclId(s))),
-            PathRes::Member(Member::Interface(i)) => self.tt.intern(Type::Interface(DeclId(i))),
+            PathRes::Member(Member::Interface(i)) => {
+                self.force_iface(i);
+                self.tt.intern(Type::Interface(DeclId(i)))
+            }
             PathRes::Member(Member::Enum(e)) => self.tt.intern(Type::Enum(DeclId(e))),
             PathRes::Member(Member::Alias(a)) => self.alias_type(a),
             _ => return None,
@@ -805,41 +808,12 @@ impl<'a> Sema<'a> {
             self.resolve_enum_variants(eid);
         }
         for iid in 0..self.interfaces.len() {
-            let src = self.iface_src[iid];
+            if self.std_iface_lazy.contains_key(&(iid as u32)) {
+                continue;
+            }
             self.cur_file = self.interfaces[iid].file;
             self.cur_ns = self.file_scopes[self.cur_file].ns;
-            let mut ms: Vec<hir::MethodSig> = Vec::new();
-            for m in &src.methods {
-                self.reject_generics(&m.generics, "interface methods");
-                if ms.iter().any(|x| x.name == m.name.name) {
-                    self.err(format!("duplicate method {} in interface {}", m.name.name, src.name.name), m.name.span);
-                    continue;
-                }
-                // (Stdlib interfaces have no declaration span: not recorded.)
-                if self.interfaces[iid].span != Span::DUMMY {
-                    self.ide_def(index::SymKey::IfaceMethod(iid as u32, ms.len() as u32), &m.name, m.span, Some(index::SymKey::Interface(iid as u32)));
-                }
-                let params: Vec<TypeId> = m.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
-                let ret = m.ret.as_ref().map(|r| self.resolve_type(r)).unwrap_or(self.tt.void);
-                if m.is_async {
-                    // DESIGN.md "Асинхронность": interface methods are never
-                    // `async`; the asynchronous shape is `func X() Task<T>`.
-                    let ps: Vec<String> = params.iter().map(|&t| self.tn(t)).collect();
-                    self.err(
-                        format!(
-                            "interface method {} cannot be async: declare it as `func {}({}) Task<{}>` and implement it with a method that returns the task of an async function",
-                            m.name.name,
-                            m.name.name,
-                            ps.join(", "),
-                            self.tn(ret)
-                        ),
-                        m.span,
-                    );
-                }
-                let default = if m.body.is_some() { self.iface_defaults.get(&(iid as u32, m.name.name.clone())).copied() } else { None };
-                ms.push(hir::MethodSig { name: m.name.name.clone(), params, ret, default });
-            }
-            self.interfaces[iid].methods = ms;
+            self.resolve_iface_methods(iid);
         }
         self.resolve_interface_embeds();
 
@@ -853,6 +827,68 @@ impl<'a> Sema<'a> {
         }
     }
 
+    /// Resolves the method signatures of interface `iid` in the scope of
+    /// its file and namespace (set by the caller).
+    fn resolve_iface_methods(&mut self, iid: usize) {
+        let src = self.iface_src[iid];
+        let mut ms: Vec<hir::MethodSig> = Vec::new();
+        for m in &src.methods {
+            self.reject_generics(&m.generics, "interface methods");
+            if ms.iter().any(|x| x.name == m.name.name) {
+                self.err(format!("duplicate method {} in interface {}", m.name.name, src.name.name), m.name.span);
+                continue;
+            }
+            // (Stdlib interfaces have no declaration span: not recorded.)
+            if self.interfaces[iid].span != Span::DUMMY {
+                self.ide_def(index::SymKey::IfaceMethod(iid as u32, ms.len() as u32), &m.name, m.span, Some(index::SymKey::Interface(iid as u32)));
+            }
+            let params: Vec<TypeId> = m.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
+            let ret = m.ret.as_ref().map(|r| self.resolve_type(r)).unwrap_or(self.tt.void);
+            if m.is_async {
+                // DESIGN.md "Асинхронность": interface methods are never
+                // `async`; the asynchronous shape is `func X() Task<T>`.
+                let ps: Vec<String> = params.iter().map(|&t| self.tn(t)).collect();
+                self.err(
+                    format!(
+                        "interface method {} cannot be async: declare it as `func {}({}) Task<{}>` and implement it with a method that returns the task of an async function",
+                        m.name.name,
+                        m.name.name,
+                        ps.join(", "),
+                        self.tn(ret)
+                    ),
+                    m.span,
+                );
+            }
+            let default = if m.body.is_some() { self.iface_defaults.get(&(iid as u32, m.name.name.clone())).copied() } else { None };
+            ms.push(hir::MethodSig { name: m.name.name.clone(), params, ret, default });
+        }
+        self.interfaces[iid].methods = ms;
+    }
+
+    /// Resolves the signatures of stdlib interface `iid` on its first use
+    /// (see `std_iface_lazy`); a no-op for every other interface.
+    pub(crate) fn force_iface(&mut self, iid: u32) {
+        let Some(ns) = self.std_iface_lazy.remove(&iid) else { return };
+        let saved = (self.cur_file, self.cur_ns);
+        self.cur_file = 0;
+        self.cur_ns = ns;
+        self.resolve_iface_methods(iid as usize);
+        // Embedded interfaces (none in the stdlib today): their methods
+        // follow the interface's own, as resolve_interface_embeds does.
+        let src = self.iface_src[iid as usize];
+        for e in &src.embeds {
+            let t = self.resolve_type(e);
+            if let Type::Interface(d) = *self.tt.get(t) {
+                for m in self.interfaces[d.0 as usize].methods.clone() {
+                    if !self.interfaces[iid as usize].methods.iter().any(|x| x.name == m.name) {
+                        self.interfaces[iid as usize].methods.push(m);
+                    }
+                }
+            }
+        }
+        (self.cur_file, self.cur_ns) = saved;
+    }
+
     /// Adds the methods of embedded interfaces (`interface RW { Reader;
     /// Writer }`), transitively, after the interface's own methods in the
     /// order written. A method embedded twice must have the same signature.
@@ -860,9 +896,13 @@ impl<'a> Sema<'a> {
         let mut embeds: Vec<Vec<(u32, Span)>> = Vec::new();
         for iid in 0..self.interfaces.len() {
             let src = self.iface_src[iid];
+            let mut v = Vec::new();
+            if self.std_iface_lazy.contains_key(&(iid as u32)) {
+                embeds.push(v);
+                continue;
+            }
             self.cur_file = self.interfaces[iid].file;
             self.cur_ns = self.file_scopes[self.cur_file].ns;
-            let mut v = Vec::new();
             for e in &src.embeds {
                 let t = self.resolve_type(e);
                 match *self.tt.get(t) {
@@ -989,6 +1029,7 @@ impl<'a> Sema<'a> {
         }
         if let Some(&i) = self.iface_default_owner.get(&(fid as u32)) {
             // Default methods receive the interface value.
+            self.force_iface(i);
             let ty = self.tt.intern(Type::Interface(crate::types::DeclId(i)));
             locals.push(hir::Local { name: "this".into(), ty, kind: LocalKind::This, captured: false, address_taken: false, span: decl.name.span });
         }

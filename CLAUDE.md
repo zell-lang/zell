@@ -100,11 +100,8 @@ Next, in this order:
    `json/yaml/toml.Value` methods), 17 (`web` error-mapping hook
    `MapError<E>(status)`), 19 (`ExitCoder` through `?("ctx")` wrapping), 20
    (generic/local type aliases), 25 (panic backtraces with `file:line` from
-   a compact pc table, usable stripped), 26 (red test
-   `reflection.rs::no_reflection_without_use`: stdlib interface signatures
-   are resolved eagerly and force `http.Request` → whole stdlib → `reflect`;
-   make them lazy). Simplify the showcase repos to one package now that
-   `zell test` builds dependencies.
+   a compact pc table, usable stripped). Simplify the showcase repos to one
+   package now that `zell test` builds dependencies.
 2. **Security tooling** — `zell audit` (OSV-format advisory DB
    `zell-lang/advisory-db`, check `zell.lock` and the toolchain version,
    `--deny` for CI), capability analysis of dependencies written into the

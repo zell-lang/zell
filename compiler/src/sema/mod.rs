@@ -360,6 +360,12 @@ pub(crate) struct Sema<'a> {
     /// Default methods of stdlib-source interfaces: function id -> the
     /// stdlib namespace whose names their signature and body use.
     pub std_fn_ns: HashMap<u32, NsIdx>,
+    /// Stdlib-source interfaces whose method signatures are not resolved
+    /// yet (interface id -> its namespace): [`Sema::force_iface`] resolves
+    /// them on the first use of the interface type, so a program does not
+    /// pay for `net.http.Handler` (whose signatures pull in the whole
+    /// stdlib) unless it names it.
+    pub std_iface_lazy: HashMap<u32, NsIdx>,
     /// [`Sema::check_attributes`] ran: later struct instances evaluate
     /// their attributes themselves.
     pub attrs_done: bool,
@@ -421,6 +427,7 @@ impl<'a> Sema<'a> {
             iface_defaults: HashMap::new(),
             iface_default_owner: HashMap::new(),
             std_fn_ns: HashMap::new(),
+            std_iface_lazy: HashMap::new(),
             attrs_done: false,
             policy: None,
             ide: None,

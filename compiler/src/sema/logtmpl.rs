@@ -132,6 +132,7 @@ impl<'a> Sema<'a> {
         match self.nss[self.log_ns()?].members.get("Logger")? {
             (Member::Interface(i), _, _) => {
                 let i = *i;
+                self.force_iface(i);
                 Some(self.tt.intern(Type::Interface(crate::types::DeclId(i))))
             }
             _ => None,
