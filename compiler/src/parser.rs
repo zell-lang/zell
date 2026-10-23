@@ -799,7 +799,12 @@ impl Parser<'_> {
             self.expect(&TokenKind::RParen)?;
             names
         } else {
-            vec![self.binding()?]
+            // `var v, ok = m[k]` is `var (v, ok) = m[k]` (Go's spelling).
+            let mut names = vec![self.binding()?];
+            while self.eat(&TokenKind::Comma) {
+                names.push(self.binding()?);
+            }
+            names
         };
         let ty = if starts_type(self.peek()) { Some(self.parse_type()?) } else { None };
         let init = if self.eat(&TokenKind::Assign) {

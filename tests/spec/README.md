@@ -688,6 +688,13 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     declaration keyword followed by `Name {`, `Name<` or `Name implements`
     inside a struct body is a nested declaration (missing `}`), not a field.
     — `attributes2/keyword_arg_names`
+82. **Comma-ok map lookup** (`DESIGN.md` "Объявления переменных", Go
+    semantics): a map index destructured into exactly two values
+    (`var v, ok = m[k]`, `var (v, ok) = m[k]`, `v, ok = m[k]`) is
+    `(V, bool)`; an absent key gives the zero value and `false`, the map is
+    not changed. `var a, b = f()` is accepted as `var (a, b) = f()`. No `in`
+    operator. Lowered as `hir::Builtin::MapLookup` over the existing
+    `zell_map_get*` (NULL = absent), no new runtime entry. — `basics/map_comma_ok`
 
 ## Ambiguities found in DESIGN.md
 

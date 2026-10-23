@@ -139,6 +139,13 @@ var count int        // без инициализатора: нулевое зн
 - Множественное присваивание существующим переменным:
   `a, b = b, a` (сначала вычисляются все значения справа) и
   `(q, r) = DivMod(17, 5)` для кортежного результата (`_` отбрасывает).
+- Кортежный результат раскладывается в новые переменные:
+  `var (q, r) = DivMod(17, 5)` или, как в Go, без скобок
+  `var q, r = DivMod(17, 5)` (явный тип не пишется).
+- Поиск в map с проверкой наличия (comma-ok, как в Go):
+  `var v, ok = m[k]` (или `var (v, ok) = m[k]`, `v, ok = m[k]`) — `ok`
+  типа `bool`, при отсутствии ключа `v` — нулевое значение. Простое
+  `m[k]` по-прежнему даёт только значение. Оператора `in` для map нет.
 - `s[i]` строки — байт (`byte`) по смещению `i`, выход за границы — паника;
   `for i, ch in s` перебирает кодовые точки.
 
@@ -2480,7 +2487,8 @@ stmt        = var | const | if | for | switch | trystmt | "return" [ exprs ]
             | "break" | "continue" | "defer" expr | exprs [ assignop exprs ] ;
 assignop    = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "@=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
                                               (* a, b = b, a ; (q, r) = f() *)
-var         = "var" ident [ type ] [ "=" expr ] ;
+var         = "var" ( ident { "," ident } | "(" ident { "," ident } ")" ) [ type ] [ "=" expr ] ;
+                                              (* several names: tuple destructuring; var v, ok = m[k] is the comma-ok lookup *)
 if          = "if" expr block [ "else" ( if | block ) ] ;
 for         = "for" [ ident [ "," ident ] "in" ( expr | range ) | expr ] block ;
                                               (* "in" is contextual: an ordinary name elsewhere *)

@@ -994,6 +994,40 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         Ok(())
     }
 
+    /// Comma-ok lookup (`hir::Builtin::MapLookup`): the owned tuple
+    /// `(value or zero, found)` of type `tt`.
+    pub(crate) fn map_lookup(&mut self, tt: TypeId, map: &Expr, key: &Expr) -> R<Val<'ctx>> {
+        let (kt, vt) = self.map_kv(map.ty);
+        let later = self.may_run_code(key);
+        let mv = self.operand(map, later)?;
+        let h = self.hold(map.ty, mv);
+        let kv = self.expr(key)?;
+        self.unhold(h);
+        let slot = self.map_slot(kt, mv.get(), kv.get(), false);
+        let lt = self.llty(vt);
+        let res = self.entry_alloca(lt, "mapv", false);
+        self.b.build_store(res, lt.const_zero()).unwrap();
+        let found_bb = self.block("map.found");
+        let join = self.block("map.join");
+        let isnull = self.b.build_is_null(slot, "").unwrap();
+        self.b.build_conditional_branch(isnull, join, found_bb).unwrap();
+        self.b.position_at_end(found_bb);
+        let v = self.b.build_load(lt, slot, "").unwrap();
+        self.b.build_store(res, v).unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        let v = self.b.build_load(lt, res, "").unwrap();
+        let found = self.b.build_is_not_null(slot, "found").unwrap();
+        // The tuple owns its value (a zero value needs no retain).
+        self.retain_val(vt, v);
+        self.drop_val(kt, kv);
+        self.drop_val(map.ty, mv);
+        let st = self.llty(tt).into_struct_type();
+        let agg = self.b.build_insert_value(st.get_undef(), v, 0, "").unwrap().into_struct_value();
+        let agg = self.b.build_insert_value(agg, found, 1, "").unwrap().into_struct_value();
+        Ok(Val::owned(agg.into()))
+    }
+
     fn map_get(&mut self, vt: TypeId, map: &Expr, key: &Expr) -> R<Val<'ctx>> {
         let (kt, _) = self.map_kv(map.ty);
         let later = self.may_run_code(key);

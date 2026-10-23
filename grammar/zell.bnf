@@ -123,7 +123,9 @@ param_group ::= attribute* IDENTIFIER (COMMA IDENTIFIER)* type
 generic_params ::= LT generic_param (COMMA generic_param)* GT
 generic_param ::= IDENTIFIER (COLON type)?
 
-var_decl ::= VAR (IDENTIFIER | var_tuple) type? (ASSIGN expr)?
+// `var (q, r) = f()` and `var q, r = f()` destructure a tuple; with a map
+// index, `var v, ok = m[k]` is the comma-ok lookup (DESIGN.md "Переменные").
+var_decl ::= VAR (var_name (COMMA var_name)* | var_tuple) type? (ASSIGN expr)?
 var_tuple ::= LPAREN var_name (COMMA var_name)* RPAREN
 var_name ::= IDENTIFIER | UNDERSCORE
 const_decl ::= CONST IDENTIFIER type? ASSIGN expr

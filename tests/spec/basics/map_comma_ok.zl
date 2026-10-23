@@ -1,0 +1,49 @@
+// test: comma-ok map lookup (Go): `var v, ok = m[k]`, `var (v, ok) = m[k]` and `v, ok = m[k]` give the value and presence; an absent key gives the zero value and false
+// status: passing
+// run-flags: --leak-check
+namespace spec.basics.map_comma_ok
+
+import io
+
+struct Point {
+    X, Y int
+}
+
+func find(m map[string][]int, k string) []int {
+    var xs, ok = m[k]
+    if !ok {
+        return [-1]
+    }
+    return xs
+}
+
+func main() {
+    var ages = map[string]int{"ann": 31, "bob": 0}
+    var a, ok = ages["ann"]
+    println(a, ok)
+    var (b, okb) = ages["bob"]
+    println(b, okb)
+    var c, okc = ages["cid"]
+    println(c, okc)
+
+    var names = map[int]string{1: "one"}
+    var s, found = names[1]
+    println(s, found, len(s))
+    s, found = names[2]
+    println("[" + s + "]", found)
+    var _, has = names[1]
+    println(has)
+
+    var pts = map[string]Point{"o": Point{X: 1, Y: 2}}
+    var p, okp = pts["o"]
+    p.X = 10
+    var q, okq = pts["z"]
+    println(p.X, pts["o"].X, okp, q.X, q.Y, okq)
+
+    var lists = map[string][]int{"a": [1, 2]}
+    println(find(lists, "a"), find(lists, "b"))
+
+    // Plain indexing still yields just the value.
+    var only = ages["ann"]
+    println(only)
+}
