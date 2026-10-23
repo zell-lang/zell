@@ -16,12 +16,25 @@
 #     macos:      libSystem.tbd (text stub: what the runtime and generated code import plus the
 #                 C/POSIX API), the runtime built against runtime/stub-sdk/macos
 #
-# Usage: scripts/bundle-targets.sh [--cache DIR] [--out DIR] [--offline] [triple...]
+# Usage: scripts/bundle-targets.sh [--cache DIR] [--out DIR] [--offline] [--prebuilt [URL]] [triple...]
 #   --cache DIR  downloads (default build/bundle-cache, or $ZELL_BUNDLE_CACHE); every file
 #                is pinned below by URL and sha256 and re-checked on every run
 #   --out DIR    output directory (default build/targets)
 #   --offline    never download: everything must already be in the cache
 #   --check-darwin-tbd  on a Mac: check the libSystem.tbd files in --out against the SDK
+#   --prebuilt [URL]  first try the output of .github/workflows/inputs.yml: the release
+#                `toolchain-inputs` (URL default
+#                https://github.com/zell-lang/zell/releases/download/toolchain-inputs, or
+#                $ZELL_INPUTS_URL; http(s):// or file://) holds targets-inputs-<key>.tar.xz
+#                (Linux/Windows triples) and targets-inputs-macos-<key>.tar.xz (macOS
+#                triples), each with .sha256; they are verified (a mismatch is an error)
+#                and unpacked into --out. A missing asset (404: the key changed and
+#                inputs.yml was not re-run) falls back to the normal build, slower.
+#                Ignored with --offline.
+#   --print-key  print <key> and exit: the first 16 hex digits of the sha256 of this script,
+#                scripts/lld/darwin-symbols.txt, runtime/Makefile and every file under
+#                runtime/{include,src,stub-sdk}, concatenated (the archives contain the
+#                runtimes and the symbol-derived libSystem.tbd: a runtime change is a new key)
 #   triple...    a subset of the targets (default: all tier-1/2 targets)
 #
 # Needs (on the Linux machine that builds the bundle, CI or a developer box):
@@ -33,6 +46,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cache=${ZELL_BUNDLE_CACHE:-$root/build/bundle-cache}
 out=$root/build/targets
 offline=no
+prebuilt=no
+print_key=no
+inputs_url=${ZELL_INPUTS_URL:-https://github.com/zell-lang/zell/releases/download/toolchain-inputs}
 targets=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -40,16 +56,71 @@ while [ $# -gt 0 ]; do
         --out) shift; out=$1 ;;
         --offline) offline=yes ;;
         --check-darwin-tbd) check_tbd=yes ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        --print-key) print_key=yes ;;
+        --prebuilt)
+            prebuilt=yes
+            case "${2:-}" in http://*|https://*|file://*) shift; inputs_url=$1 ;; esac ;;
+        -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
         -*) echo "bundle-targets.sh: unknown option $1" >&2; exit 2 ;;
         *) targets="$targets $1" ;;
     esac
     shift
 done
+# the inputs key (see --print-key); inputs.yml names its assets with it
+inputs_key() {
+    (
+        cd "$root"
+        {
+            cat scripts/bundle-targets.sh scripts/lld/darwin-symbols.txt runtime/Makefile
+            find runtime/include runtime/src runtime/stub-sdk -type f | LC_ALL=C sort | while read -r f; do cat "$f"; done
+        } | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -c1-16
+    )
+}
+if [ "$print_key" = yes ]; then inputs_key; exit 0; fi
 [ -n "$targets" ] || targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu aarch64-apple-darwin x86_64-apple-darwin"
 mkdir -p "$cache" "$out"
 cache=$(cd "$cache" && pwd)
 out=$(cd "$out" && pwd)
+
+# --prebuilt: unpack the released inputs for as many targets as exist; the
+# rest (all of them on a miss) is built below.
+if [ "$prebuilt" = yes ] && [ "$offline" = yes ]; then
+    echo "bundle-targets.sh: --offline: not looking for prebuilt inputs" >&2
+elif [ "$prebuilt" = yes ]; then
+    . "$root/scripts/prebuilt.sh"
+    key=$(inputs_key)
+    pdir=$root/build/prebuilt-inputs
+    rm -rf "$pdir"; mkdir -p "$pdir"
+    for group in plain macos; do
+        gt=""; rest=""
+        for t in $targets; do
+            case "$t:$group" in
+                *-apple-darwin:macos|*-linux-*:plain|*-windows-*:plain) gt="$gt $t" ;;
+                *) rest="$rest $t" ;;
+            esac
+        done
+        [ -n "$gt" ] || continue
+        asset=targets-inputs-$key.tar.xz
+        [ "$group" = macos ] && asset=targets-inputs-macos-$key.tar.xz
+        prebuilt_fetch "$inputs_url" "$asset" "$pdir" && rc=0 || rc=$?
+        case "$rc" in
+            0)
+                # shellcheck disable=SC2086
+                tar xJf "$pdir/$asset" -C "$out" $gt || { echo "bundle-targets.sh: $asset: cannot unpack$gt" >&2; exit 1; }
+                tar xJf "$pdir/$asset" -C "$out" SOURCES.sha256 2>/dev/null || true
+                echo "bundle-targets.sh: prebuilt $asset ->$gt" >&2
+                targets=$rest ;;
+            3) echo "bundle-targets.sh: no prebuilt $asset in $inputs_url (key $key: run inputs.yml after changing this script, darwin-symbols.txt or the runtime); building$gt here, slower" >&2
+               targets="$rest$gt" ;;
+            *) echo "bundle-targets.sh: prebuilt $asset failed (above)" >&2; exit 1 ;;
+        esac
+    done
+    rm -rf "$pdir"
+    # shellcheck disable=SC2086
+    targets=$(echo $targets)
+    if [ -z "$targets" ]; then echo "targets in $out (all prebuilt)" >&2; exit 0; fi
+fi
+
 work=$root/build/bundle-work
 rm -rf "$work"
 mkdir -p "$work"

@@ -3,7 +3,20 @@
 # "Дистрибутив"): one multi-flavour lld (ELF, COFF/MinGW, Mach-O) that
 # depends on nothing but the OS's C library, from LLVM 18.
 #
-#   scripts/build-lld.sh [--out DIR]        -> DIR/lld (default build/lld/)
+#   scripts/build-lld.sh [--out DIR] [--prebuilt [URL]] [--print-key]
+#                                           -> DIR/lld (default build/lld/)
+#
+# --prebuilt [URL]: first try the output of .github/workflows/inputs.yml: the
+#   release `toolchain-inputs` (URL default
+#   https://github.com/zell-lang/zell/releases/download/toolchain-inputs, or
+#   $ZELL_INPUTS_URL; http(s):// or file://) holds lld-18-<host>-<key>.tar.xz
+#   (+ .sha256; host: linux-amd64, linux-arm64, macos-arm64, macos-amd64,
+#   windows-amd64, as in package-toolchain.sh) with just lld[.exe]. It is
+#   verified (a mismatch is an error), unpacked into DIR and checked by running
+#   it; a missing asset (404: the key changed and inputs.yml was not re-run)
+#   falls back to the steps below, slower.
+# --print-key: print <key> and exit: the first 16 hex digits of the sha256 of
+#   scripts/build-lld.sh followed by scripts/lld/lld-main.cpp.
 #
 # How, in order:
 #   1. $LLD_BINARY: an existing self-contained lld to copy (Windows: lld.exe of
@@ -20,17 +33,60 @@
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=$root/build/lld
+prebuilt=no
+print_key=no
+inputs_url=${ZELL_INPUTS_URL:-https://github.com/zell-lang/zell/releases/download/toolchain-inputs}
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) shift; out=$1 ;;
+        --print-key) print_key=yes ;;
+        --prebuilt)
+            prebuilt=yes
+            case "${2:-}" in http://*|https://*|file://*) shift; inputs_url=$1 ;; esac ;;
         *) echo "build-lld.sh: unknown option $1" >&2; exit 2 ;;
     esac
     shift
 done
+lld_key() {
+    cat "$root/scripts/build-lld.sh" "$root/scripts/lld/lld-main.cpp" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -c1-16
+}
+if [ "$print_key" = yes ]; then lld_key; exit 0; fi
 mkdir -p "$out"
 exe=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=.exe ;; esac
 dst=$out/lld$exe
+
+if [ "$prebuilt" = yes ]; then
+    . "$root/scripts/prebuilt.sh"
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64) host=linux-amd64 ;;
+        Linux-aarch64) host=linux-arm64 ;;
+        Darwin-arm64) host=macos-arm64 ;;
+        Darwin-x86_64) host=macos-amd64 ;;
+        MINGW*-x86_64|MSYS*-x86_64) host=windows-amd64 ;;
+        *) host="" ;;
+    esac
+    asset=lld-18-$host-$(lld_key).tar.xz
+    pdir=$root/build/prebuilt-lld
+    rm -rf "$pdir"; mkdir -p "$pdir"
+    if [ -z "$host" ]; then
+        echo "build-lld.sh: no prebuilt lld for $(uname -s)-$(uname -m); building" >&2
+    else
+        prebuilt_fetch "$inputs_url" "$asset" "$pdir" && rc=0 || rc=$?
+        case "$rc" in
+            0)
+                tar xJf "$pdir/$asset" -C "$out" "lld$exe" || { echo "build-lld.sh: $asset: cannot unpack" >&2; exit 1; }
+                rm -rf "$pdir"
+                chmod +x "$dst"
+                "$dst" -flavor gnu --version
+                echo "build-lld.sh: prebuilt $asset" >&2
+                exit 0 ;;
+            3) echo "build-lld.sh: no prebuilt $asset in $inputs_url (key changed: run inputs.yml after changing build-lld.sh or lld-main.cpp); building lld here, slower" >&2 ;;
+            *) echo "build-lld.sh: prebuilt $asset failed (above)" >&2; exit 1 ;;
+        esac
+    fi
+    rm -rf "$pdir"
+fi
 
 if [ -n "${LLD_BINARY:-}" ]; then
     cp "$LLD_BINARY" "$dst"
