@@ -419,6 +419,36 @@ macos-arm64|macos-amd64 --emit=obj` даёт Mach-O для всех 49 прим�
   С октября 2026 архив самодостаточен (см. «Дистрибутив»): системный
   `clang` больше не нужен.
 
+### Релиз-кандидаты (pre-release)
+
+Кандидат выпускается тем же `release.yml`, тег не нужно создавать заранее:
+
+```sh
+gh workflow run release.yml -f tag=v0.1.0-rc.1 -f dry_run=false -f hosts=all
+```
+
+Тег — `v<версия>` или `v<версия>-rc.<n>` (также `-beta.<n>`, `-alpha.<n>`);
+с `Cargo.toml` сверяется только часть `v<версия>`. Архивы, архивы рантаймов
+и `VERSION` называются по тегу без `v` (`zell-0.1.0-rc.1-macos-arm64.tar.xz`;
+`package-toolchain.sh --version`), а GitHub Release создаётся с
+`--prerelease` на собранном коммите (`gh release create --target <sha>`:
+тег появляется на сервере, workflow ничего не пушит). Pre-release никогда
+не становится `releases/latest`, поэтому `install.sh` без `--version` его
+не видит. Коллеги ставят кандидат так:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.sh | sh -s -- --version 0.1.0-rc.1
+```
+
+или скачивают архив со страницы релиза. Пока бинарники не подписаны, на
+macOS нужно снять карантин: `xattr -dr com.apple.quarantine
+~/.zell/toolchain/zell-0.1.0-rc.1-macos-arm64`. `zell target add` по
+умолчанию ищет `…/download/v<CARGO_PKG_VERSION>/zell-runtime-<CARGO_PKG_VERSION>-…`,
+для кандидата задайте `ZELL_TARGETS_URL` (в самодостаточном архиве все
+рантаймы уже есть). Повторный запуск с тем же тегом докладывает активы
+(`gh release upload --clobber`); `dry_run=true` (по умолчанию) только собирает
+артефакты.
+
 ### Общее
 
 - Условная компиляция (`compiler/src/cfg.rs`, `target.rs`): `@cfg` с

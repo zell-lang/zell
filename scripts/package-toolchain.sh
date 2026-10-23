@@ -23,12 +23,15 @@
 #                                           downloads into ~/.zell/targets
 #   *.sha256 next to every archive
 #
-# Usage: scripts/package-toolchain.sh [--no-build] [--out dir] [--targets dir] [--lld file]
+# Usage: scripts/package-toolchain.sh [--no-build] [--out dir] [--targets dir] [--lld file] [--version V]
 #   --no-build     use the existing target/release binaries
 #   --out dir      output directory (default dist/)
 #   --targets dir  link inputs (default build/targets/, from scripts/bundle-targets.sh);
 #                  without it only the host runtime is packaged and linking needs clang
 #   --lld file     the linker (default build/lld/lld, from scripts/build-lld.sh)
+#   --version V    name archives and VERSION by V instead of the Cargo.toml version
+#                  (or $ZELL_VERSION): a release candidate is 0.1.0-rc.1, giving
+#                  zell-0.1.0-rc.1-<host>.tar.xz (release.yml passes the tag without "v")
 # The archives are what a release uploads; install.sh / install.ps1 install
 # them, and ZELL_TARGETS_URL may point at a directory of runtime archives.
 set -eu
@@ -37,17 +40,19 @@ out="$root/dist"
 build=yes
 targets="$root/build/targets"
 lld=""
+version=${ZELL_VERSION:-}
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) build=no ;;
         --out) shift; out=$1 ;;
         --targets) shift; targets=$1 ;;
         --lld) shift; lld=$1 ;;
+        --version) shift; version=$1 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
     shift
 done
-version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
+[ -n "$version" ] || version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) host=linux-amd64; triple=x86_64-unknown-linux-gnu ;;
     Linux-aarch64) host=linux-arm64; triple=aarch64-unknown-linux-gnu ;;

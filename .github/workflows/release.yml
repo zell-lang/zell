@@ -13,6 +13,15 @@
 # runtimes) and `targets-macos` on a Mac (the macOS runtimes against the real
 # SDK, libSystem.tbd checked against it).
 #
+# Release candidates: the tag may be v<version>-rc.<n> (also -beta.<n>,
+# -alpha.<n>); only the v<version> part must match Cargo.toml. Archives, the
+# runtime archives and VERSION are then named by the tag without "v"
+# (zell-0.1.0-rc.1-macos-arm64.tar.xz; package-toolchain.sh --version), the
+# tag need not exist (the release creates it on the built commit, which is
+# the commit this workflow was started on), and the GitHub Release is marked
+# pre-release, so it never becomes `releases/latest` (what install.sh reads);
+# install it with `install.sh --version 0.1.0-rc.1`.
+#
 # Assets of release v<version>:
 #   zell-<version>-<host>.tar.xz(.sha256)          host: linux-amd64, linux-arm64,
 #                                                  macos-arm64, macos-amd64, windows-amd64
@@ -34,7 +43,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (v<version>, must match Cargo.toml); need not exist yet for a dry run"
+        description: "Tag to release: v<version> (must match Cargo.toml) or a candidate v<version>-rc.<n> (-beta.<n>, -alpha.<n>: published as a pre-release); need not exist yet"
         required: true
       dry_run:
         description: "Build and upload the assets as workflow artifacts only (no GitHub Release)"
@@ -52,19 +61,39 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
-  # what to build: the tag, except for a dry run by hand (the branch it runs on)
-  REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && github.ref || (github.event_name == 'push' && github.ref_name || inputs.tag) }}
 
 jobs:
   meta:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      ref: ${{ steps.r.outputs.ref }}
       unix_matrix: ${{ steps.m.outputs.unix_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      # What to build: an existing tag (a real release of it), else the commit
+      # this workflow was started on (a dry run, or a new tag, which the
+      # release job creates on that commit).
+      - id: r
+        name: Commit to build
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ref=$GITHUB_SHA
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            ref=$TAG
+          elif [ "$DRY_RUN" != true ] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            ref=$TAG
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "building $ref"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.r.outputs.ref }}
       - id: m
         name: Hosts to build
         env:
@@ -78,12 +107,20 @@ jobs:
       - id: v
         name: Tag matches Cargo.toml
         run: |
-          version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error::tag $TAG does not match the workspace version $version in Cargo.toml (expected v$version)"
+          cargo_version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          # v<version> or v<version>-(rc|beta|alpha).<n>
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$'; then
+            echo "::error::tag $TAG is not v<version> or v<version>-rc.<n> (-beta.<n>, -alpha.<n>)"
             exit 1
           fi
+          base=${TAG#v}; base=${base%%-*}
+          if [ "$base" != "$cargo_version" ]; then
+            echo "::error::tag $TAG does not match the workspace version $cargo_version in Cargo.toml (expected v$cargo_version or v$cargo_version-rc.<n>)"
+            exit 1
+          fi
+          # the full string without "v": names the archives and fills VERSION
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          case "$TAG" in *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
 
   targets:
     name: targets (Linux, Windows link inputs)
@@ -92,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ needs.meta.outputs.ref }}
       - name: LLVM 18
         run: sudo ./scripts/setup.sh
       - name: Cache of the pinned downloads
@@ -119,7 +156,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ needs.meta.outputs.ref }}
       - name: LLVM 18
         run: brew install llvm@18
       - name: Link inputs (runtimes built against the SDK)
@@ -146,7 +183,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ needs.meta.outputs.ref }}
       - name: LLVM 18 (Linux)
         if: runner.os == 'Linux'
         run: sudo ./scripts/setup.sh
@@ -240,7 +277,7 @@ jobs:
             ldd target/release/zell
           fi
       - name: Package
-        run: ./scripts/package-toolchain.sh --no-build --out dist && ls -l dist
+        run: ./scripts/package-toolchain.sh --no-build --out dist --version "${{ needs.meta.outputs.version }}" && ls -l dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.host }}
@@ -258,7 +295,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ needs.meta.outputs.ref }}
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -327,7 +364,7 @@ jobs:
       - name: bin/lld
         run: LLD_BINARY="$(cygpath -u "$RUNNER_TEMP")/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin/lld.exe" ./scripts/build-lld.sh --prebuilt
       - name: Package
-        run: ./scripts/package-toolchain.sh --no-build --out dist && ls -l dist
+        run: ./scripts/package-toolchain.sh --no-build --out dist --version "${{ needs.meta.outputs.version }}" && ls -l dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist-windows-amd64
@@ -344,7 +381,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.REF }}
+          ref: ${{ needs.meta.outputs.ref }}
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
@@ -399,10 +436,16 @@ jobs:
 
           Other targets: `zell target add <target>`. Checksums: `SHA256SUMS`.
           NOTES
+          case "$TAG" in *-*) printf '\nPre-release: install with `sh install.sh --version %s` (it is not the latest release). macOS, until the binaries are signed: `xattr -dr com.apple.quarantine <dir>`.\n' "${TAG#v}" >> "$notes" ;; esac
+          # a candidate (v<version>-rc.<n>, -beta, -alpha) is a pre-release: never
+          # `releases/latest`. A tag that does not exist yet is created
+          # server-side on the built commit (no tag push from the workflow).
           pre=""
           case "$TAG" in *-*) pre=--prerelease ;; esac
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release/* --clobber
-          else
+          elif git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             gh release create "$TAG" release/* --title "Zell $TAG" --notes-file "$notes" --verify-tag $pre
+          else
+            gh release create "$TAG" release/* --title "Zell $TAG" --notes-file "$notes" --target "$(git rev-parse HEAD)" $pre
           fi
