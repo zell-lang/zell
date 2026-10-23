@@ -34,7 +34,9 @@ impl Target {
         let arch = arch_name(std::env::consts::ARCH);
         let triple = match (std::env::consts::ARCH, os) {
             (a, "linux") => format!("{a}-unknown-linux-gnu"),
-            (a, "macos") => format!("{}-apple-darwin", if a == "aarch64" { "arm64" } else { a }),
+            // The same spelling as `--target macos-arm64` and the toolchain's
+            // `targets/aarch64-apple-darwin/`: the host runtime is looked up by it.
+            (a, "macos") => format!("{a}-apple-darwin"),
             (a, "windows") => format!("{a}-pc-windows-gnu"),
             (a, o) => format!("{a}-unknown-{o}"),
         };
