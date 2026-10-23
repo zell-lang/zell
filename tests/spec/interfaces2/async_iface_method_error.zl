@@ -1,0 +1,12 @@
+// error: interface method Get cannot be async: declare it as `func Get(int) Task<int!>`
+// status: passing
+namespace spec.interfaces2.async_iface_method_error
+
+// DESIGN.md "Асинхронность": interface methods are never `async`; the
+// asynchronous shape is spelled `func Get(n int) Task<int!>`.
+interface Getter {
+    async func Get(n int) int!
+}
+
+func main() {
+}

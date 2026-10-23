@@ -735,8 +735,23 @@ impl<'a> Sema<'a> {
                 if self.interfaces[iid].span != Span::DUMMY {
                     self.ide_def(index::SymKey::IfaceMethod(iid as u32, ms.len() as u32), &m.name, m.span, Some(index::SymKey::Interface(iid as u32)));
                 }
-                let params = m.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
+                let params: Vec<TypeId> = m.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
                 let ret = m.ret.as_ref().map(|r| self.resolve_type(r)).unwrap_or(self.tt.void);
+                if m.is_async {
+                    // DESIGN.md "Асинхронность": interface methods are never
+                    // `async`; the asynchronous shape is `func X() Task<T>`.
+                    let ps: Vec<String> = params.iter().map(|&t| self.tn(t)).collect();
+                    self.err(
+                        format!(
+                            "interface method {} cannot be async: declare it as `func {}({}) Task<{}>` and implement it with a method that returns the task of an async function",
+                            m.name.name,
+                            m.name.name,
+                            ps.join(", "),
+                            self.tn(ret)
+                        ),
+                        m.span,
+                    );
+                }
                 let default = if m.body.is_some() { self.iface_defaults.get(&(iid as u32, m.name.name.clone())).copied() } else { None };
                 ms.push(hir::MethodSig { name: m.name.name.clone(), params, ret, default });
             }
