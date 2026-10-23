@@ -481,7 +481,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         envs.sort_by_key(|(f, ..)| *f);
         for (func, e, g, vf) in envs {
             // A closure's function pointer is its type id.
-            let fp = self.funcs[func.0 as usize].as_global_value().as_pointer_value();
+            let fp = self.closure_entry(func)?.as_global_value().as_pointer_value();
             e.set_initializer(&ent.const_named_struct(&[g.as_pointer_value().into(), vf.as_global_value().as_pointer_value().into(), null.into(), null.into(), fp.into(), zero.into()]));
         }
         Ok(())

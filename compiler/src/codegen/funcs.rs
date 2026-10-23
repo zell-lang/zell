@@ -397,7 +397,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// `closure func [captures]`: an owned `{fn, env}`.
     pub(crate) fn emit_closure(&mut self, func: FuncId, captures: &[CaptureSource]) -> R<Val<'ctx>> {
-        let fv = self.funcs[func.0 as usize];
+        let fv = self.closure_entry(func)?;
         let env = if captures.is_empty() {
             self.ptr_ty().const_null()
         } else {
@@ -458,13 +458,61 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let thunk = self.module.add_function(&format!("{}$thunk", f.symbol), lty, Some(inkwell::module::Linkage::Internal));
         self.thunks.insert(fid, thunk);
         let target = self.funcs[fid.0 as usize];
+        let (is_async, ret) = (f.is_async, f.ret);
         self.with_helper(thunk, |cg| {
             let args: Vec<BasicMetadataValueEnum> = thunk.get_params().iter().skip(1).map(|p| (*p).into()).collect();
+            if is_async {
+                let t = cg.call_async_thunk(target, ret, args);
+                cg.b.build_return(Some(&t)).unwrap();
+                return Ok(());
+            }
             let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().left();
             match r {
                 Some(v) => cg.b.build_return(Some(&v)).unwrap(),
                 None => cg.b.build_return(None).unwrap(),
             };
+            Ok(())
+        })?;
+        Ok(thunk)
+    }
+
+    /// Calls async function `target` (result type `ret`) with `args` and
+    /// returns its `Task<T>` (+1), materialising a completed one when the
+    /// call never suspended: the body of thunks that must return a task.
+    pub(crate) fn call_async_thunk(&mut self, target: FunctionValue<'ctx>, ret: TypeId, mut args: Vec<BasicMetadataValueEnum<'ctx>>) -> PointerValue<'ctx> {
+        let rty = self.coro_res_ty(ret);
+        let res = self.entry_alloca(rty.into(), "res", false);
+        args.push(res.into());
+        self.b.build_call(target, &args, "").unwrap();
+        self.coro_res_task(ret, res)
+    }
+
+    /// The function pointer stored in a closure value of lambda `func`:
+    /// the lambda itself, or for an async lambda a thunk `(env, params)
+    /// -> Task<T>` over its ramp (which returns through a result slot).
+    pub(crate) fn closure_entry(&mut self, func: FuncId) -> R<FunctionValue<'ctx>> {
+        let f = &self.prog.funcs[func.0 as usize];
+        if !f.is_async {
+            return Ok(self.funcs[func.0 as usize]);
+        }
+        if let Some(t) = self.thunks.get(&func) {
+            return Ok(*t);
+        }
+        let (symbol, ret) = (f.symbol.clone(), f.ret);
+        let target = self.funcs[func.0 as usize];
+        let mut ps: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
+        for p in &f.params {
+            let t = f.locals[p.0 as usize].ty;
+            ps.push(self.llty(t).into());
+        }
+        ps.insert(0, self.ptr_ty().into());
+        let lty = self.ptr_ty().fn_type(&ps, false);
+        let thunk = self.module.add_function(&format!("{symbol}$thunk"), lty, Some(inkwell::module::Linkage::Internal));
+        self.thunks.insert(func, thunk);
+        self.with_helper(thunk, |cg| {
+            let args: Vec<BasicMetadataValueEnum> = thunk.get_params().iter().map(|p| (*p).into()).collect();
+            let t = cg.call_async_thunk(target, ret, args);
+            cg.b.build_return(Some(&t)).unwrap();
             Ok(())
         })?;
         Ok(thunk)
