@@ -26,18 +26,8 @@ typedef struct {
 
 static const limb4 P_M = { 0xffffffffffffffffULL, 0x00000000ffffffffULL, 0, 0xffffffff00000001ULL };
 static const limb4 N_M = { 0xf3b9cac2fc632551ULL, 0xbce6faada7179e84ULL, 0xffffffffffffffffULL, 0xffffffff00000000ULL };
-static const uint8_t B_BYTES[32] = {
-    0x5a, 0xc6, 0x35, 0xd8, 0xaa, 0x3a, 0x93, 0xe7, 0xb3, 0xeb, 0xbd, 0x55, 0x76, 0x98, 0x86, 0xbc,
-    0x65, 0x1d, 0x06, 0xb0, 0xcc, 0x53, 0xb0, 0xf6, 0x3b, 0xce, 0x3c, 0x3e, 0x27, 0xd2, 0x60, 0x4b,
-};
-static const uint8_t GX_BYTES[32] = {
-    0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40, 0xf2,
-    0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2, 0x96,
-};
-static const uint8_t GY_BYTES[32] = {
-    0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e, 0x16,
-    0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5,
-};
+/* b, G and the Montgomery constants live in p256_table.h (generated from the
+ * SEC 2 values with this file's own arithmetic). */
 
 static void l4_from_be(limb4 r, const uint8_t b[32]) {
     for (int i = 0; i < 4; i++) r[i] = zell__ld64be(b + 24 - 8 * i);
@@ -78,25 +68,6 @@ static uint64_t l4_is_zero(const limb4 a) {
 static uint64_t l4_lt(const limb4 a, const limb4 m) {
     limb4 t;
     return l4_sub(t, a, m);
-}
-
-static void mont_init(mont *c, const limb4 m) {
-    l4_copy(c->m, m);
-    uint64_t inv = 1;
-    for (int i = 0; i < 7; i++) inv *= 2 - m[0] * inv;   /* m^-1 mod 2^64 */
-    c->m0 = 0 - inv;
-    /* R mod m = 2^256 - m (m > 2^255) */
-    limb4 z = { 0, 0, 0, 0 };
-    l4_sub(c->one, z, m);
-    /* R^2 = R * 2^256: double 256 times modulo m */
-    limb4 x, t;
-    l4_copy(x, c->one);
-    for (int i = 0; i < 256; i++) {
-        uint64_t carry = l4_add(x, x, x);
-        uint64_t borrow = l4_sub(t, x, m);
-        l4_cmov(x, t, 0 - (carry | (borrow ^ 1)));
-    }
-    l4_copy(c->rr, x);
 }
 
 /* r = a * b * R^-1 mod m for a, b < m. */
@@ -177,18 +148,7 @@ typedef struct {
     pt g;
 } curve;
 
-static void curve_init(curve *k) {
-    mont_init(&k->fp, P_M);
-    mont_init(&k->fn, N_M);
-    limb4 t;
-    l4_from_be(t, B_BYTES);
-    mont_to(&k->fp, k->b, t);
-    l4_from_be(t, GX_BYTES);
-    mont_to(&k->fp, k->g.X, t);
-    l4_from_be(t, GY_BYTES);
-    mont_to(&k->fp, k->g.Y, t);
-    l4_copy(k->g.Z, k->fp.one);
-}
+#include "p256_table.h"
 
 /* Complete addition, RCB 2016 algorithm 4 (a = -3). */
 static void pt_add(const curve *k, pt *r, const pt *p, const pt *q) {
@@ -276,6 +236,51 @@ static void pt_mul(const curve *k, pt *r, const uint8_t s[32], const pt *p) {
     zell__crypto_wipe(tab, sizeof tab);
 }
 
+/* r = [s]G, s a 32-byte big-endian scalar; constant time. The scalar is
+ * recoded into 65 signed radix-16 digits in [-8, 8]; every digit scans all
+ * eight affine entries of its P256_BASE row with conditional moves, the
+ * selected point is conditionally negated and added (complete formulas,
+ * so an accumulator at infinity is fine), and for a zero digit the
+ * accumulator is moved back. */
+static void pt_mul_base(const curve *k, pt *r, const uint8_t s[32]) {
+    int8_t e[65];
+    for (int i = 0; i < 32; i++) {
+        e[2 * i] = (int8_t)(s[31 - i] & 15);
+        e[2 * i + 1] = (int8_t)((s[31 - i] >> 4) & 15);
+    }
+    int8_t carry = 0;
+    for (int i = 0; i < 64; i++) {
+        e[i] = (int8_t)(e[i] + carry);
+        carry = (int8_t)((e[i] + 8) >> 4);
+        e[i] = (int8_t)(e[i] - (int8_t)(carry << 4));
+    }
+    e[64] = carry;
+    pt acc, sel, t;
+    pt_infinity(k, &acc);
+    l4_copy(sel.Z, k->fp.one);
+    for (int j = 0; j < 65; j++) {
+        uint64_t neg = (uint64_t)((uint8_t)e[j] >> 7);
+        uint64_t abs = (uint64_t)(uint8_t)(e[j] - (((0 - (int8_t)neg) & e[j]) << 1));
+        memset(sel.X, 0, sizeof sel.X);
+        memset(sel.Y, 0, sizeof sel.Y);
+        for (unsigned i = 0; i < 8; i++) {
+            uint64_t eq = (((abs ^ (i + 1)) - 1) & ~(abs ^ (i + 1))) >> 63;   /* 1 iff abs == i + 1 */
+            l4_cmov(sel.X, P256_BASE[j][i][0], 0 - eq);
+            l4_cmov(sel.Y, P256_BASE[j][i][1], 0 - eq);
+        }
+        limb4 ny, zero = { 0, 0, 0, 0 };
+        mont_sub(&k->fp, ny, zero, sel.Y);
+        l4_cmov(sel.Y, ny, 0 - neg);
+        pt_add(k, &t, &acc, &sel);
+        uint64_t nonzero = ((abs - 1) >> 63) ^ 1;   /* 1 iff abs != 0 */
+        pt_cmov(&acc, &t, 0 - nonzero);
+    }
+    *r = acc;
+    zell__crypto_wipe(e, sizeof e);
+    zell__crypto_wipe(&sel, sizeof sel);
+    zell__crypto_wipe(&t, sizeof t);
+}
+
 /* Affine coordinates as big-endian bytes; false for the point at infinity. */
 static bool pt_affine(const curve *k, const pt *p, uint8_t x[32], uint8_t y[32]) {
     limb4 zi, t;
@@ -326,18 +331,16 @@ static bool scalar_ok(const uint8_t s[32]) {
 
 bool zell__p256_pubkey(uint8_t pub[65], const uint8_t priv[32]) {
     if (!scalar_ok(priv)) return false;
-    curve k;
-    curve_init(&k);
+    const curve k = P256;
     pt q;
-    pt_mul(&k, &q, priv, &k.g);
+    pt_mul_base(&k, &q, priv);
     pub[0] = 4;
     return pt_affine(&k, &q, pub + 1, pub + 33);
 }
 
 bool zell__p256_ecdh(uint8_t out[32], const uint8_t priv[32], const uint8_t peer[65]) {
     if (!scalar_ok(priv)) return false;
-    curve k;
-    curve_init(&k);
+    const curve k = P256;
     pt p, q;
     if (!pt_decode(&k, &p, peer)) return false;
     pt_mul(&k, &q, priv, &p);
@@ -379,8 +382,7 @@ static void hmac2(uint8_t out[32], const uint8_t key[32], const uint8_t *a, size
 bool zell__p256_sign(uint8_t sig[64], const uint8_t priv[32], const uint8_t *digest, size_t dlen,
                       const uint8_t *extra, size_t elen) {
     if (!scalar_ok(priv)) return false;
-    curve k;
-    curve_init(&k);
+    const curve k = P256;
     const mont *fn = &k.fn;
     limb4 e, d;
     digest_to_scalar(e, digest, dlen);
@@ -401,7 +403,7 @@ bool zell__p256_sign(uint8_t sig[64], const uint8_t priv[32], const uint8_t *dig
         hmac2(V, K, V, 32, NULL, 0, NULL, 0, NULL, 0, NULL, 0);
         if (scalar_ok(V)) {
             pt R;
-            pt_mul(&k, &R, V, &k.g);
+            pt_mul_base(&k, &R, V);
             uint8_t rx[32];
             if (pt_affine(&k, &R, rx, NULL)) {
                 limb4 r, rd, kk, ki, s, t;
@@ -445,8 +447,7 @@ bool zell__p256_sign(uint8_t sig[64], const uint8_t priv[32], const uint8_t *dig
 
 bool zell__p256_verify(const uint8_t sig[64], const uint8_t pub[65], const uint8_t *digest, size_t dlen) {
     if (!scalar_ok(sig) || !scalar_ok(sig + 32)) return false;
-    curve k;
-    curve_init(&k);
+    const curve k = P256;
     const mont *fn = &k.fn;
     pt Q;
     if (!pt_decode(&k, &Q, pub)) return false;
@@ -467,7 +468,7 @@ bool zell__p256_verify(const uint8_t sig[64], const uint8_t pub[65], const uint8
     l4_to_be(b1, u1);
     l4_to_be(b2, u2);
     pt A, B, X;
-    pt_mul(&k, &A, b1, &k.g);
+    pt_mul_base(&k, &A, b1);
     pt_mul(&k, &B, b2, &Q);
     pt_add(&k, &X, &A, &B);
     uint8_t xb[32];

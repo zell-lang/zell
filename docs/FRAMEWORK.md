@@ -154,7 +154,7 @@ switch any {
 - ✓ Примитивы на C с постоянным временем: bitsliced AES + GHASH без таблиц,
   AES-NI/PCLMULQDQ по cpuid (на этой машине AES-128-GCM ~1 GB/s с AES-NI и
   ~70 MB/s без него, ChaCha20-Poly1305 ~270 MB/s), X25519 и Ed25519 (поле
-  2^255-19 на 51-битных лимбах), P-256 (Монтгомери, полные формулы RCB),
+  2^255-19 на 51-битных лимбах), P-256 (Монтгомери, полные формулы RCB, таблица базовой точки),
   RSA (CRT + ослепление экспоненты), SHA-2 (SHA-256 через SHA-NI по cpuid,
   `ZELL_NO_SHANI=1` отключает), HMAC, HKDF. NEON — нет.
 - ✓ X.509 на Zell: DER/PEM, цепочки, сроки, CA/pathlen, keyUsage/EKU,
