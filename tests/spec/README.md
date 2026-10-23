@@ -711,6 +711,11 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     switch over `any`; message-only errors never match. Previously such a
     case compiled but compared type ids and never matched.
     — `errors2/switch_interface_case`
+85. **`cli.ExitCoder`**: an error returned by a command's `Run` that
+    implements `cli.ExitCoder` (`ExitCode() int`) sets `App.Run`'s result
+    (its message is still printed to `App.Errors`); other errors give 1,
+    usage errors 2. Only the error itself is checked, not its wrap chain.
+    — `stdlib2/cli_exit_code`
 
 ## Ambiguities found in DESIGN.md
 

@@ -58,7 +58,7 @@
 | `os/user` | `os.user` | ✅ есть (`Current`, `Lookup`, `LookupId`, `LookupGroup(Id)`) | — |
 | `io/fs`, `path`, `path/filepath` | `fs` (+ `fs.Path` функции) | ✅ есть | `Walk` async, glob, `Watch` (inotify/FSEvents) |
 | `embed` | `@embed("file")` атрибут | ✅ есть (`string`, `[]byte`, `const`, `embed.FS` из каталога или `dir/*.ext`) | проверяется при компиляции, `embed.FS` |
-| `flag` | `cli` | ✅ есть (подкоманды, флаги из полей структуры `@cli.flag(...)` (умолчание — значение поля или `default: "текст"`), env fallback, help, «did you mean», completion bash/zsh/fish) | подкоманды, help из атрибутов, env fallback |
+| `flag` | `cli` | ✅ есть (подкоманды, флаги из полей структуры `@cli.flag(...)` (умолчание — значение поля или `default: "текст"`), env fallback, help, «did you mean», completion bash/zsh/fish; ошибка команды с `ExitCode() int` (`cli.ExitCoder`) задаёт код выхода `App.Run`) | подкоманды, help из атрибутов, env fallback |
 | `sync`, `sync/atomic` | `task` (`Mutex`, `WaitGroup`) + `sync` (`RwMutex`, `Semaphore`, `Barrier`, `Once`, `AtomicInt/AtomicBool`, `Atomic<T>`, `Pool<T>`) | ✅ есть | async-aware мьютексы, generic атомики |
 | `context` | контекст задачи в `task` | ✅ есть | неявная передача, типизированные ключи, отмена дерева |
 | `math/rand`, `crypto/rand` | `random`, `crypto.rand` | ✅ есть | — |

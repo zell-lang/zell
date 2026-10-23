@@ -22,8 +22,15 @@
 // default is the struct field's default value, or @flag(default: "text");
 // unset flags fall back to their env variable, then to that default. -h/--help on any command and `help [command]`
 // print help; --version prints the version. Exit codes of App.Run: 0 ok,
-// 1 the command failed, 2 usage error.
+// 1 the command failed (or the error's ExitCode() when it implements
+// ExitCoder), 2 usage error.
 namespace cli
+
+// An error returned by a command's Run that chooses the process exit code
+// of App.Run (its message is still printed): `func ExitCode() int`.
+interface ExitCoder {
+    func ExitCode() int
+}
 
 // Field attribute of a flags struct (all parameters optional). The flag
 // name defaults to the field name in kebab-case (MaxConns -> max-conns).
@@ -282,6 +289,9 @@ struct App {
         var run = cmd.Run
         try run(ctx) catch err {
             eprintln(this.Errors, "error: " + err.Message())
+            switch err {
+                case ExitCoder e: return e.ExitCode()
+            }
             return 1
         }
         return 0
