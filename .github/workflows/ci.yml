@@ -6,9 +6,9 @@
 # the cross job adds the runtime archives that `zell target add` fetches.
 name: ci
 
+# Manual only (workflow_dispatch): the suites are run locally before a push;
+# start a run from the Actions tab or `gh workflow run ci.yml` when needed.
 on:
-  push:
-  pull_request:
   workflow_dispatch:
     inputs:
       only:
