@@ -776,6 +776,7 @@ pub const FUNCS: &[StdFunc] = &[
     f!("strings", "rtCopyString", "[]byte, int, string, int, int", "void", "zell_strings_rt_copy_string"),
     f!("strings", "rtIndexByte", "[]byte, int, int", "int", "zell_strings_rt_index_byte"),
     f!("strings", "rtMakeBytes", "int", "[]byte", "zell_strings_rt_make_bytes"),
+    f!("strings", "rtSort", "[]string", "void", "zell_strings_rt_sort"),
     f!("strings", "Title", "string", "string", "zell_strings_title"),
     // math (more); int helpers are I-prefixed (no overloading)
     f!("math", "Round", "float", "float", "zell_math_round"),

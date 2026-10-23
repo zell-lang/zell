@@ -1799,6 +1799,7 @@ Paths and other strings with an embedded NUL byte are rejected with `EINVAL`
 | `rtCopyString(dst, dstOff, s, from, n)` | `void zell_strings_rt_copy_string(zell_slice *dst, int64_t dst_off, const zell_string *s, int64_t src_off, int64_t n)` | internal: the same from the bytes of `s` |
 | `rtIndexByte(b, from, c) int` | `int64_t zell_strings_rt_index_byte(const zell_slice *b, int64_t from, int64_t c)` | internal: `memchr` from `from`; -1 when absent |
 | `rtMakeBytes(n) []byte` | `void zell_strings_rt_make_bytes(int64_t n, zell_slice *out)` | internal: a zeroed `[]byte` of length and capacity `n` (`n < 0` gives an empty slice) |
+| `rtSort(xs []string)` | `void zell_strings_rt_sort(zell_slice *xs)` | internal (`slices.Sort<string>`): byte-wise introsort (not stable, which is unobservable for equal strings) that permutes the `zell_string *` elements in place; the backing array keeps its references, nothing is retained or released |
 | `Title(s)` | `zell_string *zell_strings_title(const zell_string *s)` | upper-cases the first rune of each white-space separated word (Go's deprecated `strings.Title`, white space as the only separator) |
 
 **math** (`src/std_math_ext.c`). Zell has no overloading, so the int

@@ -11,7 +11,105 @@ struct Pair<A, B> {
 
 // Sorts xs in place, ascending, stable.
 func Sort<T: Ordered>(xs []T) {
-    SortFunc(xs, (a T, b T) => a < b)
+    if reflect.TypeOf<T>().Kind == reflect.Kind.String {
+        // pointers permuted in C, no retain/release per move
+        strings.rtSort(xs)
+    } else {
+        sortOrdered(xs)
+    }
+}
+
+// SortFunc with `<` compiled in: a closure call per comparison retains and
+// releases both arguments, which was the bulk of the time for strings.
+func sortOrdered<T: Ordered>(xs []T) {
+    var n = len(xs)
+    if n < 2 {
+        return
+    }
+    var run = 16
+    var lo = 0
+    for lo < n {
+        var hi = lo + run
+        if hi > n {
+            hi = n
+        }
+        insertionOrdered(xs, lo, hi)
+        lo = hi
+    }
+    if n <= run {
+        return
+    }
+    var buf []T = []
+    for x in xs {
+        buf = append(buf, x)
+    }
+    var src = xs
+    var dst = buf
+    var inBuf = false
+    var width = run
+    for width < n {
+        var i = 0
+        for i < n {
+            var mid = i + width
+            if mid > n {
+                mid = n
+            }
+            var end = i + 2 * width
+            if end > n {
+                end = n
+            }
+            mergeOrdered(src, dst, i, mid, end)
+            i = end
+        }
+        var t = src
+        src = dst
+        dst = t
+        inBuf = !inBuf
+        width = width * 2
+    }
+    if inBuf {
+        for k in 0..n {
+            xs[k] = src[k]
+        }
+    }
+}
+
+func insertionOrdered<T: Ordered>(xs []T, lo int, hi int) {
+    for i in lo + 1..hi {
+        var j = i
+        var x = xs[i]
+        for j > lo && x < xs[j - 1] {
+            xs[j] = xs[j - 1]
+            j -= 1
+        }
+        xs[j] = x
+    }
+}
+
+func mergeOrdered<T: Ordered>(src []T, dst []T, lo int, mid int, hi int) {
+    var i = lo
+    var j = mid
+    var k = lo
+    for i < mid && j < hi {
+        if src[j] < src[i] {
+            dst[k] = src[j]
+            j += 1
+        } else {
+            dst[k] = src[i]
+            i += 1
+        }
+        k += 1
+    }
+    for i < mid {
+        dst[k] = src[i]
+        i += 1
+        k += 1
+    }
+    for j < hi {
+        dst[k] = src[j]
+        j += 1
+        k += 1
+    }
 }
 
 // Sorts xs in place by key(x), ascending, stable. key is called twice
