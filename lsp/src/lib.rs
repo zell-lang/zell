@@ -757,6 +757,8 @@ impl Server {
             code: d.code.map(|c| NumberOrString::String(c.into())),
             message,
             related_information: (!related.is_empty()).then_some(related),
+            // Unused code is faded out by editors.
+            tags: matches!(d.code, Some(zell::diagnostics::codes::UNUSED_VARIABLE | zell::diagnostics::codes::UNUSED_IMPORT)).then(|| vec![DiagnosticTag::UNNECESSARY]),
             ..Default::default()
         }
     }

@@ -303,3 +303,16 @@ fn robustness_large_files_edit_storms_and_broken_syntax() {
         }
     }
 }
+
+#[test]
+fn unused_code_is_tagged_unnecessary() {
+    let src = "namespace app\n\nfunc main() {\n    var unused = 1\n}\n";
+    let (dir, uri) = project_with("main.zl", src);
+    let mut c = Client::start(&dir);
+    c.open(&uri, src);
+    let d = c.diagnostics(&uri);
+    assert!(!d.is_empty(), "{d:?}");
+    for d in &d {
+        assert_eq!(d.tags, Some(vec![DiagnosticTag::UNNECESSARY]), "{d:?}");
+    }
+}
