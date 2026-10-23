@@ -16,25 +16,43 @@
 #     macos:      libSystem.tbd (text stub: what the runtime and generated code import plus the
 #                 C/POSIX API), the runtime built against runtime/stub-sdk/macos
 #
-# Usage: scripts/bundle-targets.sh [--cache DIR] [--out DIR] [--offline] [--prebuilt [URL]] [triple...]
+# Two layers (docs/PLATFORMS.md, "Готовые входы"), because the runtime changes often
+# and the rest almost never:
+#   external  everything but the files below: glibc stubs, crt objects, musl, mingw CRT and
+#             import libraries, compiler-rt builtins/crtbegin/crtend, BUNDLE (non-macOS),
+#             SOURCES.sha256
+#   runtime   libzell_rt.a of every triple, and for macOS also libSystem.tbd, libsqlite3.tbd
+#             (derived from the runtime's symbols) and BUNDLE
+# Unpacked over each other they give the complete directory `zell doctor` expects.
+#
+# Usage: scripts/bundle-targets.sh [--cache DIR] [--out DIR] [--offline] [--layer L] [--prebuilt [URL]] [triple...]
 #   --cache DIR  downloads (default build/bundle-cache, or $ZELL_BUNDLE_CACHE); every file
 #                is pinned below by URL and sha256 and re-checked on every run
 #   --out DIR    output directory (default build/targets)
 #   --offline    never download: everything must already be in the cache
+#   --layer L    all (default), external or runtime: build/fetch only that layer. A runtime-only
+#                build still downloads the headers it compiles against (glibc, mingw-w64) and
+#                unpacks the musl sources, but builds no stubs, no musl, no compiler-rt archive
+#                (macOS: compiler-rt is built into a scratch directory for the symbol list)
 #   --check-darwin-tbd  on a Mac: check the libSystem.tbd files in --out against the SDK
 #   --prebuilt [URL]  first try the output of .github/workflows/inputs.yml: the release
 #                `toolchain-inputs` (URL default
 #                https://github.com/zell-lang/zell/releases/download/toolchain-inputs, or
-#                $ZELL_INPUTS_URL; http(s):// or file://) holds targets-inputs-<key>.tar.xz
-#                (Linux/Windows triples) and targets-inputs-macos-<key>.tar.xz (macOS
-#                triples), each with .sha256; they are verified (a mismatch is an error)
-#                and unpacked into --out. A missing asset (404: the key changed and
-#                inputs.yml was not re-run) falls back to the normal build, slower.
+#                $ZELL_INPUTS_URL; http(s):// or file://) holds, per layer,
+#                targets-external-<ekey>.tar.xz / targets-runtime-<rkey>.tar.xz (Linux/Windows
+#                triples) and targets-external-macos-<ekey>.tar.xz /
+#                targets-runtime-macos-<rkey>.tar.xz (macOS triples), each with .sha256; they
+#                are verified (a mismatch is an error) and unpacked into --out. A missing
+#                asset (404: the key changed and inputs.yml was not re-run) builds only that
+#                layer here, slower; the other layer still comes from the release.
 #                Ignored with --offline.
-#   --print-key  print <key> and exit: the first 16 hex digits of the sha256 of this script,
-#                scripts/lld/darwin-symbols.txt, runtime/Makefile and every file under
-#                runtime/{include,src,stub-sdk}, concatenated (the archives contain the
-#                runtimes and the symbol-derived libSystem.tbd: a runtime change is a new key)
+#   --print-key [external|runtime]  print the keys and exit. Without an argument:
+#                `external=<ekey> runtime=<rkey>`; with one, just that key. Both are the first
+#                16 hex digits of a sha256.
+#                ekey: this script.
+#                rkey: runtime/Makefile, every file under runtime/{include,src,stub-sdk},
+#                scripts/lld/darwin-symbols.txt, and from this script only what shapes the
+#                runtime: the pinned inputs (PINS and versions), runtime() and darwin().
 #   triple...    a subset of the targets (default: all tier-1/2 targets)
 #
 # Needs (on the Linux machine that builds the bundle, CI or a developer box):
@@ -48,6 +66,7 @@ out=$root/build/targets
 offline=no
 prebuilt=no
 print_key=no
+layer=all
 inputs_url=${ZELL_INPUTS_URL:-https://github.com/zell-lang/zell/releases/download/toolchain-inputs}
 targets=""
 while [ $# -gt 0 ]; do
@@ -56,70 +75,97 @@ while [ $# -gt 0 ]; do
         --out) shift; out=$1 ;;
         --offline) offline=yes ;;
         --check-darwin-tbd) check_tbd=yes ;;
-        --print-key) print_key=yes ;;
+        --print-key)
+            print_key=yes
+            case "${2:-}" in external|runtime) shift; print_key=$1 ;; esac ;;
+        --layer) shift; layer=$1
+            case "$layer" in all|external|runtime) ;; *) echo "bundle-targets.sh: --layer all|external|runtime" >&2; exit 2 ;; esac ;;
         --prebuilt)
             prebuilt=yes
             case "${2:-}" in http://*|https://*|file://*) shift; inputs_url=$1 ;; esac ;;
-        -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,57p' "$0"; exit 0 ;;
         -*) echo "bundle-targets.sh: unknown option $1" >&2; exit 2 ;;
         *) targets="$targets $1" ;;
     esac
     shift
 done
-# the inputs key (see --print-key); inputs.yml names its assets with it
-inputs_key() {
+# the input keys (see --print-key); inputs.yml names its assets with them
+sha16() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-16; }
+external_key() {
+    (cd "$root" && cat scripts/bundle-targets.sh | sha16)
+}
+runtime_key() {
     (
         cd "$root"
         {
-            cat scripts/bundle-targets.sh scripts/lld/darwin-symbols.txt runtime/Makefile
+            cat scripts/lld/darwin-symbols.txt runtime/Makefile
+            sed -n '/^UA=/,/^"$/p;/^runtime() {/,/^}/p;/^darwin() {/,/^}/p' scripts/bundle-targets.sh
             find runtime/include runtime/src runtime/stub-sdk -type f | LC_ALL=C sort | while read -r f; do cat "$f"; done
-        } | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -c1-16
+        } | sha16
     )
 }
-if [ "$print_key" = yes ]; then inputs_key; exit 0; fi
+case "$print_key" in
+    yes) echo "external=$(external_key) runtime=$(runtime_key)"; exit 0 ;;
+    external) external_key; exit 0 ;;
+    runtime) runtime_key; exit 0 ;;
+esac
 [ -n "$targets" ] || targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu aarch64-apple-darwin x86_64-apple-darwin"
 mkdir -p "$cache" "$out"
 cache=$(cd "$cache" && pwd)
 out=$(cd "$out" && pwd)
 
-# --prebuilt: unpack the released inputs for as many targets as exist; the
-# rest (all of them on a miss) is built below.
+# ext_targets / rt_targets: the targets whose external / runtime layer is still
+# to be built here (all of them, unless --prebuilt unpacks a layer)
+ext_targets=""; rt_targets=""
+[ "$layer" = runtime ] || ext_targets=$targets
+[ "$layer" = external ] || rt_targets=$targets
+
+# --prebuilt: unpack the released layers for as many targets as exist; the
+# rest (everything on a miss) is built below.
 if [ "$prebuilt" = yes ] && [ "$offline" = yes ]; then
     echo "bundle-targets.sh: --offline: not looking for prebuilt inputs" >&2
 elif [ "$prebuilt" = yes ]; then
     . "$root/scripts/prebuilt.sh"
-    key=$(inputs_key)
     pdir=$root/build/prebuilt-inputs
     rm -rf "$pdir"; mkdir -p "$pdir"
-    for group in plain macos; do
-        gt=""; rest=""
-        for t in $targets; do
-            case "$t:$group" in
-                *-apple-darwin:macos|*-linux-*:plain|*-windows-*:plain) gt="$gt $t" ;;
-                *) rest="$rest $t" ;;
+    for lay in external runtime; do
+        [ "$layer" = all ] || [ "$layer" = "$lay" ] || continue
+        if [ "$lay" = external ]; then key=$(external_key); todo=$ext_targets; else key=$(runtime_key); todo=$rt_targets; fi
+        for group in plain macos; do
+            gt=""; rest=""
+            for t in $todo; do
+                case "$t:$group" in
+                    *-apple-darwin:macos|*-linux-*:plain|*-windows-*:plain) gt="$gt $t" ;;
+                    *) rest="$rest $t" ;;
+                esac
+            done
+            [ -n "$gt" ] || continue
+            asset=targets-$lay-$key.tar.xz
+            [ "$group" = macos ] && asset=targets-$lay-macos-$key.tar.xz
+            prebuilt_fetch "$inputs_url" "$asset" "$pdir" && rc=0 || rc=$?
+            case "$rc" in
+                0)
+                    # shellcheck disable=SC2086
+                    tar xJf "$pdir/$asset" -C "$out" $gt || { echo "bundle-targets.sh: $asset: cannot unpack$gt" >&2; exit 1; }
+                    [ "$lay" = external ] && { tar xJf "$pdir/$asset" -C "$out" SOURCES.sha256 2>/dev/null || true; }
+                    echo "bundle-targets.sh: prebuilt $asset ->$gt" >&2
+                    todo="$rest" ;;
+                3) echo "bundle-targets.sh: no prebuilt $asset in $inputs_url (key $key: run inputs.yml, layer=$lay, after changing its inputs); building the $lay layer of$gt here, slower" >&2
+                   todo="$rest$gt" ;;
+                *) echo "bundle-targets.sh: prebuilt $asset failed (above)" >&2; exit 1 ;;
             esac
         done
-        [ -n "$gt" ] || continue
-        asset=targets-inputs-$key.tar.xz
-        [ "$group" = macos ] && asset=targets-inputs-macos-$key.tar.xz
-        prebuilt_fetch "$inputs_url" "$asset" "$pdir" && rc=0 || rc=$?
-        case "$rc" in
-            0)
-                # shellcheck disable=SC2086
-                tar xJf "$pdir/$asset" -C "$out" $gt || { echo "bundle-targets.sh: $asset: cannot unpack$gt" >&2; exit 1; }
-                tar xJf "$pdir/$asset" -C "$out" SOURCES.sha256 2>/dev/null || true
-                echo "bundle-targets.sh: prebuilt $asset ->$gt" >&2
-                targets=$rest ;;
-            3) echo "bundle-targets.sh: no prebuilt $asset in $inputs_url (key $key: run inputs.yml after changing this script, darwin-symbols.txt or the runtime); building$gt here, slower" >&2
-               targets="$rest$gt" ;;
-            *) echo "bundle-targets.sh: prebuilt $asset failed (above)" >&2; exit 1 ;;
-        esac
+        if [ "$lay" = external ]; then ext_targets=$todo; else rt_targets=$todo; fi
     done
     rm -rf "$pdir"
     # shellcheck disable=SC2086
-    targets=$(echo $targets)
-    if [ -z "$targets" ]; then echo "targets in $out (all prebuilt)" >&2; exit 0; fi
+    ext_targets=$(echo $ext_targets); rt_targets=$(echo $rt_targets)
+    if [ -z "$ext_targets$rt_targets" ]; then echo "targets in $out (all prebuilt)" >&2; exit 0; fi
 fi
+# shellcheck disable=SC2086
+targets=$(printf '%s\n' $ext_targets $rt_targets | awk '!s[$0]++' | tr '\n' ' ')
+# has LIST T: T is in the space separated LIST
+has() { case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
 
 work=$root/build/bundle-work
 rm -rf "$work"
@@ -225,9 +271,9 @@ undeb() {
     if command -v dpkg-deb >/dev/null 2>&1; then
         dpkg-deb -x "$f" "$2"
     else
-        t=$(mktemp -d "$work/deb.XXXXXX")
-        (cd "$t" && "$AR" x "$f" && tar xf data.tar.* -C "$2")
-        rm -rf "$t"
+        udt=$(mktemp -d "$work/deb.XXXXXX")
+        (cd "$udt" && "$AR" x "$f" && tar xf data.tar.* -C "$2")
+        rm -rf "$udt"
     fi
 }
 
@@ -364,6 +410,18 @@ runtime() {
     "$STRIP" --strip-debug "$ro/libzell_rt.a"
 }
 
+# begin_target T: sets o, want_ext, want_rt; a target whose both layers are built
+# here starts from an empty directory, a single layer is added to what --prebuilt
+# (or a previous run) left there
+begin_target() {
+    o=$out/$1
+    want_ext=no; want_rt=no
+    has "$ext_targets" "$1" && want_ext=yes
+    has "$rt_targets" "$1" && want_rt=yes
+    if [ "$want_ext" = yes ] && [ "$want_rt" = yes ]; then rm -rf "$o"; fi
+    mkdir -p "$o"
+}
+
 bundle_file() { # DIR key=value...
     d=$1; shift
     { echo "# Zell toolchain link inputs (scripts/bundle-targets.sh); see docs/PLATFORMS.md, \"Дистрибутив\""; for kv in "$@"; do echo "$kv"; done; } > "$d/BUNDLE"
@@ -381,8 +439,8 @@ linux_gnu() {
     sr=$work/sysroot-$t
     for p in libc6-$deb libc6-dev-$deb linux-libc-dev-$deb libsqlite3-0-$deb libsqlite3-dev; do undeb "$p" "$sr"; done
     # the -dev packages link libfoo.so to absolute /lib/... paths; point them into the sysroot
-    o=$out/$t
-    rm -rf "$o"; mkdir -p "$o"
+    begin_target "$t"
+    if [ "$want_ext" = yes ]; then
     for f in Scrt1.o crt1.o crti.o crtn.o libc_nonshared.a; do cp "$sr/usr/lib/$ma/$f" "$o/"; done
     L=$sr/lib/$ma
     elf_stub "$L/libc-$GLIBC_VERSION.so" "$o/libc.so" libc.so.6 "$ma"
@@ -397,10 +455,11 @@ linux_gnu() {
     # headers for the runtime build: glibc 2.31 + kernel 5.4 + sqlite3.h; the
     # libsqlite3.so symlink must resolve inside the sysroot
     builtins "$t" "$ma" "$o" --sysroot="$sr" -nostdinc -isystem "$("$CLANG" -print-resource-dir)/include" -isystem "$sr/usr/include/$ma" -isystem "$sr/usr/include"
-    runtime "$ma" "$t" "$o" SYSROOT="$sr"
     bundle_file "$o" "triple=$t" "libc=glibc $GLIBC_VERSION (stubs; executables need glibc >= $GLIBC_VERSION)" \
         "dynamic-linker=$interp" "sqlite=$SQLITE_VERSION (stub, libsqlite3.so.0 at run time)" \
         "compiler-rt=$COMPILER_RT_VERSION"
+    fi
+    if [ "$want_rt" = yes ]; then runtime "$ma" "$t" "$o" SYSROOT="$sr"; fi
 }
 
 # --- linux-musl ----------------------------------------------------------------
@@ -413,15 +472,21 @@ linux_musl() {
     mb=$work/musl-build-$cpu
     mr=$work/musl-root-$cpu
     mkdir -p "$mb"
-    (cd "$mb" && CC="$CLANG -target $mt" AR="$AR" RANLIB="$RANLIB" CFLAGS="-O2 -g0" \
-        "$src/configure" --target="$mt" --prefix=/ --disable-shared >/dev/null &&
-        make -s -j"$JOBS" AR="$AR" RANLIB="$RANLIB" >/dev/null && make -s install DESTDIR="$mr" >/dev/null)
-    o=$out/$t
-    rm -rf "$o"; mkdir -p "$o"
-    for f in crt1.o rcrt1.o Scrt1.o crti.o crtn.o libc.a; do cp "$mr/lib/$f" "$o/"; done
-    builtins "$t" "$mt" "$o" -nostdinc -isystem "$mr/include" -isystem "$("$CLANG" -print-resource-dir)/include"
-    runtime "$mt" "$t" "$o" MUSL_INC="$mr/include"
-    bundle_file "$o" "triple=$t" "libc=musl $MUSL_VERSION (static)" "compiler-rt=$COMPILER_RT_VERSION"
+    begin_target "$t"
+    if [ "$want_ext" = yes ]; then
+        (cd "$mb" && CC="$CLANG -target $mt" AR="$AR" RANLIB="$RANLIB" CFLAGS="-O2 -g0" \
+            "$src/configure" --target="$mt" --prefix=/ --disable-shared >/dev/null &&
+            make -s -j"$JOBS" AR="$AR" RANLIB="$RANLIB" >/dev/null && make -s install DESTDIR="$mr" >/dev/null)
+        for f in crt1.o rcrt1.o Scrt1.o crti.o crtn.o libc.a; do cp "$mr/lib/$f" "$o/"; done
+        builtins "$t" "$mt" "$o" -nostdinc -isystem "$mr/include" -isystem "$("$CLANG" -print-resource-dir)/include"
+        bundle_file "$o" "triple=$t" "libc=musl $MUSL_VERSION (static)" "compiler-rt=$COMPILER_RT_VERSION"
+    else
+        # the runtime layer only needs musl's headers
+        (cd "$mb" && CC="$CLANG -target $mt" AR="$AR" RANLIB="$RANLIB" CFLAGS="-O2 -g0" \
+            "$src/configure" --target="$mt" --prefix=/ --disable-shared >/dev/null &&
+            make -s install-headers DESTDIR="$mr" >/dev/null)
+    fi
+    if [ "$want_rt" = yes ]; then runtime "$mt" "$t" "$o" MUSL_INC="$mr/include"; fi
 }
 
 # --- windows (MinGW ABI) ---------------------------------------------------------
@@ -431,14 +496,15 @@ windows() {
     mr=$work/mingw
     undeb mingw-w64-x86-64-dev "$mr"
     undeb mingw-w64-common "$mr"
-    o=$out/$t
-    rm -rf "$o"; mkdir -p "$o"
-    L=$mr/usr/x86_64-w64-mingw32/lib
-    for f in crt2.o dllcrt2.o libmingw32.a libmingwex.a libmoldname.a libmsvcrt.a; do cp "$L/$f" "$o/"; done
-    for l in $WINDOWS_LIBS; do cp "$L/lib$l.a" "$o/"; done
-    builtins "$t" x86_64-w64-mingw32 "$o" --sysroot="$mr/usr"
-    runtime x86_64-w64-mingw32 "$t" "$o" SYSROOT="$mr/usr"
-    bundle_file "$o" "triple=$t" "libc=mingw-w64 $MINGW_VERSION (msvcrt.dll)" "compiler-rt=$COMPILER_RT_VERSION"
+    begin_target "$t"
+    if [ "$want_ext" = yes ]; then
+        L=$mr/usr/x86_64-w64-mingw32/lib
+        for f in crt2.o dllcrt2.o libmingw32.a libmingwex.a libmoldname.a libmsvcrt.a; do cp "$L/$f" "$o/"; done
+        for l in $WINDOWS_LIBS; do cp "$L/lib$l.a" "$o/"; done
+        builtins "$t" x86_64-w64-mingw32 "$o" --sysroot="$mr/usr"
+        bundle_file "$o" "triple=$t" "libc=mingw-w64 $MINGW_VERSION (msvcrt.dll)" "compiler-rt=$COMPILER_RT_VERSION"
+    fi
+    if [ "$want_rt" = yes ]; then runtime x86_64-w64-mingw32 "$t" "$o" SYSROOT="$mr/usr"; fi
 }
 
 # --- macOS -------------------------------------------------------------------
@@ -453,26 +519,31 @@ darwin() {
     t=$1
     cpu=${t%%-*}
     arch=$cpu; [ "$cpu" = aarch64 ] && arch=arm64
-    o=$out/$t
-    rm -rf "$o"; mkdir -p "$o"
+    begin_target "$t"
+    # compiler-rt belongs to the external layer; the runtime layer builds it into a
+    # scratch directory, only to list its symbols for libSystem.tbd
+    bi=$o
+    if [ "$want_ext" = no ]; then bi=$work/darwin-builtins-$t; mkdir -p "$bi"; fi
     sdk=${SDKROOT:-}
     if [ -z "$sdk" ] && command -v xcrun >/dev/null 2>&1; then sdk=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true); fi
     if [ -n "$sdk" ]; then
         # on a Mac (release builds): the real SDK's headers
-        builtins "$t" "$arch-apple-macos$MACOS_MIN" "$o" -isysroot "$sdk"
-        runtime "$t" "$t" "$o" SDKROOT="$sdk" STUBSDK= MACOS_MIN="$MACOS_MIN"
+        builtins "$t" "$arch-apple-macos$MACOS_MIN" "$bi" -isysroot "$sdk"
+        [ "$want_rt" = no ] || runtime "$t" "$t" "$o" SDKROOT="$sdk" STUBSDK= MACOS_MIN="$MACOS_MIN"
         built="the macOS SDK $(basename "$sdk")"
     else
-        builtins "$t" "$arch-apple-macos$MACOS_MIN" "$o" -nostdlibinc -isystem "$root/runtime/stub-sdk/macos/include"
-        runtime "$t" "$t" "$o" STUBSDK=yes MACOS_MIN="$MACOS_MIN"
+        builtins "$t" "$arch-apple-macos$MACOS_MIN" "$bi" -nostdlibinc -isystem "$root/runtime/stub-sdk/macos/include"
+        [ "$want_rt" = no ] || runtime "$t" "$t" "$o" STUBSDK=yes MACOS_MIN="$MACOS_MIN"
         built="runtime/stub-sdk/macos"
     fi
+    # external layer only: nothing derived from the runtime to write
+    [ "$want_rt" = yes ] || return 0
     syms=$work/darwin-$arch.syms
     {
-        "$NM" -u "$o/libzell_rt.a" "$o/libclang_rt.builtins.a" 2>/dev/null | awk 'NF == 2 && $1 == "U" { print $2 } NF == 1 && $1 !~ /:$/ { print $1 }'
+        "$NM" -u "$o/libzell_rt.a" "$bi/libclang_rt.builtins.a" 2>/dev/null | awk 'NF == 2 && $1 == "U" { print $2 } NF == 1 && $1 !~ /:$/ { print $1 }'
         sed -e 's/#.*//' -e '/^[[:space:]]*$/d' -e 's/^\([^=]\)/_\1/' -e 's/^=//' "$root/scripts/lld/darwin-symbols.txt"
     } | sort -u > "$syms.all"
-    "$NM" --defined-only "$o/libzell_rt.a" "$o/libclang_rt.builtins.a" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u > "$syms.def"
+    "$NM" --defined-only "$o/libzell_rt.a" "$bi/libclang_rt.builtins.a" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u > "$syms.def"
     comm -23 "$syms.all" "$syms.def" > "$syms.need"
     grep -v '^_sqlite3_' "$syms.need" > "$syms" || true
     grep '^_sqlite3_' "$syms.need" > "$syms.sqlite" || true
@@ -522,6 +593,8 @@ for t in $targets; do
 done
 # provenance of every download, next to the targets (package-toolchain.sh
 # copies it into THIRD_PARTY.md's inputs list)
-printf '%s\n' "$PINS" | sed '/^$/d' | awk -F'|' '{ printf "%s  %s\n", $3, $2 }' > "$out/SOURCES.sha256"
+if [ -n "$ext_targets" ]; then
+    printf '%s\n' "$PINS" | sed '/^$/d' | awk -F'|' '{ printf "%s  %s\n", $3, $2 }' > "$out/SOURCES.sha256"
+fi
 rm -rf "$work"
 echo "targets in $out" >&2

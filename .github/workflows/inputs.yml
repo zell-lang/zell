@@ -5,33 +5,49 @@
 # per release dry run instead of 30, and no dependence on archive.ubuntu.com,
 # the GitHub release downloads of the pinned packages, or an LLVM build).
 #
-#   targets-inputs-<key>.tar.xz          build/targets/ of the Linux and Windows
-#                                        triples + SOURCES.sha256
-#                                        (scripts/bundle-targets.sh)
-#   targets-inputs-macos-<key>.tar.xz    the two apple-darwin triples, built on a Mac
-#                                        against the real SDK, libSystem.tbd checked
-#   lld-18-<host>-<lldkey>.tar.xz        bin/lld of each host (scripts/build-lld.sh)
-#   *.sha256                             next to every archive (verified by --prebuilt)
+#   targets-external-<ekey>.tar.xz        the slow, rarely changing layer of build/targets/ for the
+#                                          Linux and Windows triples: glibc stubs, crt objects, musl,
+#                                          mingw CRT, compiler-rt, BUNDLE + SOURCES.sha256
+#   targets-external-macos-<ekey>.tar.xz   compiler-rt of the two apple-darwin triples (built on a Mac)
+#   targets-runtime-<rkey>.tar.xz          libzell_rt.a of the Linux and Windows triples
+#   targets-runtime-macos-<rkey>.tar.xz    libzell_rt.a, libSystem.tbd, libsqlite3.tbd and BUNDLE of the
+#                                          two apple-darwin triples (built against the real SDK, the
+#                                          .tbd checked)
+#   lld-18-<host>-<lldkey>.tar.xz          bin/lld of each host (scripts/build-lld.sh)
+#   *.sha256                               next to every archive (verified by --prebuilt)
+# (scripts/bundle-targets.sh header: unpacked over each other, the two layers
+# are the complete directory `zell doctor` expects.)
 #
 # Keys (16 hex digits of a sha256; print them with --print-key):
-#   <key>     scripts/bundle-targets.sh --print-key: scripts/bundle-targets.sh,
-#             scripts/lld/darwin-symbols.txt, runtime/Makefile and all of
-#             runtime/{include,src,stub-sdk} concatenated (the archives hold the
-#             runtimes and the symbol-derived libSystem.tbd)
+#   <ekey>    scripts/bundle-targets.sh --print-key external: scripts/bundle-targets.sh
+#   <rkey>    scripts/bundle-targets.sh --print-key runtime: runtime/Makefile,
+#             runtime/{include,src,stub-sdk}/**, scripts/lld/darwin-symbols.txt, and
+#             from the script the pinned inputs, runtime() and darwin()
 #   <lldkey>  scripts/build-lld.sh --print-key: scripts/build-lld.sh followed
 #             by scripts/lld/lld-main.cpp
 # (not the value of hashFiles(...) that the actions/cache keys use: a plain
 # sha256 of the concatenated files, computable by the scripts themselves.)
 #
+# After a change under runtime/ (the common case) run only the runtime layer,
+# about 1-2 minutes per OS:  gh workflow run inputs.yml -f layer=runtime
+# The input `layer` is all (default), external (stubs, musl, mingw, compiler-rt
+# and lld) or runtime.
+#
 # Re-run this workflow by hand (Actions tab or `gh workflow run inputs.yml`)
 # whenever those files change; the old assets are kept, a new key adds new
 # ones. Until then release.yml / bundle.yml still work: --prebuilt finds no
-# asset for the new key, says so, and builds everything on the runner.
+# asset for the new key, says so, and builds that layer on the runner.
 name: toolchain inputs
 
 # Manual only: start from the Actions tab or `gh workflow run inputs.yml`.
 on:
   workflow_dispatch:
+    inputs:
+      layer:
+        description: "Which inputs to build and publish: all, external (stubs, musl, mingw, compiler-rt, lld; after a change of bundle-targets.sh / build-lld.sh) or runtime (libzell_rt.a and libSystem.tbd; after a change under runtime/)"
+        type: choice
+        options: [all, external, runtime]
+        default: all
 
 permissions:
   contents: read
@@ -40,8 +56,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  targets-linux:
-    name: targets (Linux, Windows link inputs)
+  targets-linux-external:
+    name: external (Linux, Windows link inputs)
+    if: inputs.layer != 'runtime'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -53,52 +70,113 @@ jobs:
           path: build/bundle-cache
           key: bundle-cache-${{ hashFiles('scripts/bundle-targets.sh') }}
           restore-keys: bundle-cache-
-      - name: Link inputs
+      - name: Link inputs (external layer)
         run: |
-          ./scripts/bundle-targets.sh x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+          ./scripts/bundle-targets.sh --layer external x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
             x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
           du -sh build/targets/*
       - name: Pack
         run: |
-          key=$(./scripts/bundle-targets.sh --print-key)
+          key=$(./scripts/bundle-targets.sh --print-key external)
           mkdir -p out
-          tar cJf "out/targets-inputs-$key.tar.xz" -C build/targets $(ls build/targets)
-          (cd out && sha256sum "targets-inputs-$key.tar.xz" > "targets-inputs-$key.tar.xz.sha256")
+          tar cJf "out/targets-external-$key.tar.xz" -C build/targets $(ls build/targets)
+          (cd out && sha256sum "targets-external-$key.tar.xz" > "targets-external-$key.tar.xz.sha256")
           ls -l out
       - uses: actions/upload-artifact@v4
         with:
-          name: inputs-targets-linux
+          name: inputs-targets-external-linux
           path: out/
           if-no-files-found: error
 
-  targets-macos:
-    name: targets (macOS, real SDK)
+  targets-linux-runtime:
+    name: runtime (Linux, Windows)
+    if: inputs.layer != 'external'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM 18
+        run: sudo ./scripts/setup.sh
+      - name: Cache of the pinned downloads
+        uses: actions/cache@v4
+        with:
+          path: build/bundle-cache
+          key: bundle-cache-${{ hashFiles('scripts/bundle-targets.sh') }}
+          restore-keys: bundle-cache-
+      # only the headers the runtime compiles against are downloaded/unpacked
+      - name: Runtimes
+        run: |
+          ./scripts/bundle-targets.sh --layer runtime x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
+          du -sh build/targets/*
+      - name: Pack
+        run: |
+          key=$(./scripts/bundle-targets.sh --print-key runtime)
+          mkdir -p out
+          tar cJf "out/targets-runtime-$key.tar.xz" -C build/targets $(ls build/targets)
+          (cd out && sha256sum "targets-runtime-$key.tar.xz" > "targets-runtime-$key.tar.xz.sha256")
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs-targets-runtime-linux
+          path: out/
+          if-no-files-found: error
+
+  targets-macos-external:
+    name: external (macOS, compiler-rt)
+    if: inputs.layer != 'runtime'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - name: LLVM 18
         run: brew install llvm@18
-      - name: Link inputs (runtimes built against the SDK)
+      - name: Link inputs (compiler-rt built against the SDK)
         run: |
           export CLANG="$(brew --prefix llvm@18)/bin/clang"
-          ./scripts/bundle-targets.sh aarch64-apple-darwin x86_64-apple-darwin
+          ./scripts/bundle-targets.sh --layer external aarch64-apple-darwin x86_64-apple-darwin
+          ls -l build/targets/*
+      - name: Pack
+        run: |
+          key=$(./scripts/bundle-targets.sh --print-key external)
+          mkdir -p out
+          tar cJf "out/targets-external-macos-$key.tar.xz" -C build/targets $(ls build/targets)
+          (cd out && shasum -a 256 "targets-external-macos-$key.tar.xz" > "targets-external-macos-$key.tar.xz.sha256")
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs-targets-external-macos
+          path: out/
+          if-no-files-found: error
+
+  targets-macos-runtime:
+    name: runtime (macOS, real SDK)
+    if: inputs.layer != 'external'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM 18
+        run: brew install llvm@18
+      - name: Runtimes built against the SDK, libSystem.tbd
+        run: |
+          export CLANG="$(brew --prefix llvm@18)/bin/clang"
+          ./scripts/bundle-targets.sh --layer runtime aarch64-apple-darwin x86_64-apple-darwin
           ./scripts/bundle-targets.sh --check-darwin-tbd
           cat build/targets/*/BUNDLE
       - name: Pack
         run: |
-          key=$(./scripts/bundle-targets.sh --print-key)
+          key=$(./scripts/bundle-targets.sh --print-key runtime)
           mkdir -p out
-          tar cJf "out/targets-inputs-macos-$key.tar.xz" -C build/targets $(ls build/targets)
-          (cd out && shasum -a 256 "targets-inputs-macos-$key.tar.xz" > "targets-inputs-macos-$key.tar.xz.sha256")
+          tar cJf "out/targets-runtime-macos-$key.tar.xz" -C build/targets $(ls build/targets)
+          (cd out && shasum -a 256 "targets-runtime-macos-$key.tar.xz" > "targets-runtime-macos-$key.tar.xz.sha256")
           ls -l out
       - uses: actions/upload-artifact@v4
         with:
-          name: inputs-targets-macos
+          name: inputs-targets-runtime-macos
           path: out/
           if-no-files-found: error
 
   lld:
     name: lld ${{ matrix.host }}
+    if: inputs.layer != 'runtime'
     strategy:
       fail-fast: false
       matrix:
@@ -142,6 +220,7 @@ jobs:
 
   lld-windows:
     name: lld windows-amd64
+    if: inputs.layer != 'runtime'
     runs-on: windows-latest
     defaults:
       run:
@@ -181,7 +260,9 @@ jobs:
 
   publish:
     name: publish to the toolchain-inputs release
-    needs: [targets-linux, targets-macos, lld, lld-windows]
+    needs: [targets-linux-external, targets-linux-runtime, targets-macos-external, targets-macos-runtime, lld, lld-windows]
+    # jobs of the layer not asked for are skipped; every job that ran must have passed
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

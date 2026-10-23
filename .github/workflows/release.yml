@@ -32,10 +32,13 @@
 # --prebuilt, which first downloads the matching archive from the release
 # `toolchain-inputs` (built by inputs.yml, keyed by `scripts/bundle-targets.sh
 # --print-key` and `scripts/build-lld.sh --print-key`); the actions/cache steps
-# stay as a second layer. inputs.yml must be re-run by hand after
-# scripts/bundle-targets.sh, scripts/build-lld.sh, scripts/lld/*, or runtime/
-# change (the key changes). Without a matching asset a run still works, it
-# just builds everything here (about 30 minutes instead of 10).
+# stay as a second layer. The link inputs come in two layers with their own
+# keys (`--print-key` prints `external=<ekey> runtime=<rkey>`). inputs.yml must
+# be re-run by hand after scripts/bundle-targets.sh or scripts/build-lld.sh
+# change (`-f layer=external` or all) and after runtime/ or
+# scripts/lld/darwin-symbols.txt change (`-f layer=runtime`, 1-2 minutes).
+# Without a matching asset a run still works, it just builds that layer here
+# (about 30 minutes instead of 10 if both are missing).
 name: release
 
 # Manual only (workflow_dispatch; a tag push no longer releases by itself).

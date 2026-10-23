@@ -514,36 +514,71 @@ zell-<версия>-<хост>/
 compiler-rt, сборка lld из LLVM 18. Поэтому ручной workflow
 `.github/workflows/inputs.yml` (`gh workflow run inputs.yml`) собирает их
 один раз и кладёт в GitHub Release `toolchain-inputs` (тег
-`toolchain-inputs`, pre-release, чтобы не стать `releases/latest`):
+`toolchain-inputs`, pre-release, чтобы не стать `releases/latest`).
 
-- `targets-inputs-<key>.tar.xz` — `build/targets/` для Linux- и
-  Windows-целей + `SOURCES.sha256`; `targets-inputs-macos-<key>.tar.xz` —
-  обе apple-darwin цели (собраны на Mac против настоящего SDK,
-  `libSystem.tbd` проверен);
+Входы линковки делятся на два слоя с разными ключами: рантайм
+(`runtime/`) меняется часто, а заглушки glibc, musl, mingw CRT и
+compiler-rt — почти никогда и собираются долго.
+
+- `targets-external-<ekey>.tar.xz` — внешний слой для Linux- и
+  Windows-целей: заглушки glibc, crt-объекты, musl, mingw CRT и
+  импорт-библиотеки, compiler-rt, `BUNDLE`, `SOURCES.sha256`;
+  `targets-external-macos-<ekey>.tar.xz` — compiler-rt обеих
+  apple-darwin целей (собран на Mac против настоящего SDK);
+- `targets-runtime-<rkey>.tar.xz` — `libzell_rt.a` Linux- и Windows-целей;
+  `targets-runtime-macos-<rkey>.tar.xz` — `libzell_rt.a`, `libSystem.tbd`,
+  `libsqlite3.tbd` и `BUNDLE` apple-darwin целей (`libSystem.tbd` выведен
+  из символов рантайма и проверен против SDK);
 - `lld-18-<хост>-<lldkey>.tar.xz` — `bin/lld` для linux-amd64,
   linux-arm64, macos-arm64, macos-amd64, windows-amd64;
 - `.sha256` рядом с каждым архивом.
 
-Ключи — первые 16 hex-цифр sha256 (печатаются `scripts/bundle-targets.sh
---print-key` и `scripts/build-lld.sh --print-key`): `<key>` — склейка
-`scripts/bundle-targets.sh`, `scripts/lld/darwin-symbols.txt`,
-`runtime/Makefile` и всех файлов `runtime/{include,src,stub-sdk}` (в
-архиве лежат рантаймы и `libSystem.tbd`, выведенный из их символов);
-`<lldkey>` — `scripts/build-lld.sh` и `scripts/lld/lld-main.cpp`. Это не
-значение `hashFiles` из ключей `actions/cache`.
+Два слоя, распакованные друг поверх друга, дают полный каталог
+`build/targets/<triple>/` (`BUNDLE`, `libzell_rt.a`, `libSystem.tbd` и
+остальное — то, что проверяет `zell doctor`); `BUNDLE` лежит во внешнем
+слое, а у apple-darwin — в слое рантайма, где известно число символов
+`.tbd`.
+
+Ключи — первые 16 hex-цифр sha256. `scripts/bundle-targets.sh --print-key`
+печатает `external=<ekey> runtime=<rkey>` (`--print-key external|runtime` —
+один ключ), `scripts/build-lld.sh --print-key` — `<lldkey>`:
+
+- `<ekey>` — сам `scripts/bundle-targets.sh`;
+- `<rkey>` — `runtime/Makefile`, все файлы `runtime/{include,src,stub-sdk}`,
+  `scripts/lld/darwin-symbols.txt` и те части скрипта, что определяют
+  рантайм: закреплённые входы (`PINS`, версии), функции `runtime()` и
+  `darwin()` (смена флагов сборки или версии заголовков — новый слой
+  рантайма, остальные правки скрипта его не трогают);
+- `<lldkey>` — `scripts/build-lld.sh` и `scripts/lld/lld-main.cpp`.
+
+Это не значение `hashFiles` из ключей `actions/cache`.
 
 `bundle-targets.sh --prebuilt [URL]` и `build-lld.sh --prebuilt [URL]`
 (URL по умолчанию — релиз `zell-lang/zell`, или `$ZELL_INPUTS_URL`, в том
-числе `file://`) скачивают архив своего ключа, сверяют `.sha256`
+числе `file://`) скачивают архивы своих ключей, сверяют `.sha256`
 (несовпадение — ошибка, а не молчаливая пересборка) и распаковывают в
-`--out`; если актива с таким ключом нет (404), сообщают об этом и
-собирают как обычно, медленнее. `--offline` не меняется. `release.yml` и
-`bundle.yml` вызывают скрипты с `--prebuilt` (`actions/cache` остаётся
-вторым слоем), а сухой прогон релиза занимает около 10 минут вместо 30.
-**Запускать `inputs.yml` заново нужно после любого изменения**
-`scripts/bundle-targets.sh`, `scripts/build-lld.sh`, `scripts/lld/*` или
-`runtime/` (ключ меняется; старые активы остаются). Пока этого не сделано,
-релиз работает, но собирает всё на раннере.
+`--out`. Слои независимы: если актива одного слоя нет (404), скрипт
+сообщает об этом и собирает только этот слой, второй берёт из релиза.
+`--layer all|external|runtime` ограничивает работу одним слоем;
+сборка только рантайма по-прежнему скачивает заголовки (glibc,
+mingw-w64) и распаковывает исходники musl, но не собирает заглушки, musl
+и compiler-rt. `--offline` не меняется. `release.yml` и `bundle.yml`
+вызывают скрипты с `--prebuilt` (`actions/cache` остаётся вторым слоем),
+а сухой прогон релиза занимает около 10 минут вместо 30.
+
+`inputs.yml` принимает вход `layer: all|external|runtime`. После правки
+`runtime/` или `scripts/lld/darwin-symbols.txt` (частый случай) достаточно
+обновить только рантайм, около 1-2 минут на ОС:
+
+```sh
+gh workflow run inputs.yml -f layer=runtime
+```
+
+После правки `scripts/bundle-targets.sh` вне `runtime()`/`darwin()`/`PINS`
+или `scripts/build-lld.sh` нужен `-f layer=external` (или `all`); правка
+`PINS`, `runtime()` и `darwin()` меняет оба ключа. Старые активы
+остаются. Пока слой не обновлён, релиз работает, но собирает этот слой на
+раннере.
 
 Сгенерированные `libSystem.tbd` и заглушки glibc в репозиторий не
 коммитятся: `libSystem.tbd` строится из неопределённых символов
