@@ -477,6 +477,50 @@ zell-<версия>-<хост>/
 импорт-библиотек), `bin/lld` — 56 МБ, `bin/zell` — 67 МБ. Цель — не
 больше 80 МБ на архив хоста.
 
+### Готовые входы (релиз `toolchain-inputs`)
+
+Сборка входов медленная и почти не меняется: скачивание ~10 пакетов
+(Ubuntu, mingw-w64, исходники musl и compiler-rt), сборка musl и
+compiler-rt, сборка lld из LLVM 18. Поэтому ручной workflow
+`.github/workflows/inputs.yml` (`gh workflow run inputs.yml`) собирает их
+один раз и кладёт в GitHub Release `toolchain-inputs` (тег
+`toolchain-inputs`, pre-release, чтобы не стать `releases/latest`):
+
+- `targets-inputs-<key>.tar.xz` — `build/targets/` для Linux- и
+  Windows-целей + `SOURCES.sha256`; `targets-inputs-macos-<key>.tar.xz` —
+  обе apple-darwin цели (собраны на Mac против настоящего SDK,
+  `libSystem.tbd` проверен);
+- `lld-18-<хост>-<lldkey>.tar.xz` — `bin/lld` для linux-amd64,
+  linux-arm64, macos-arm64, macos-amd64, windows-amd64;
+- `.sha256` рядом с каждым архивом.
+
+Ключи — первые 16 hex-цифр sha256 (печатаются `scripts/bundle-targets.sh
+--print-key` и `scripts/build-lld.sh --print-key`): `<key>` — склейка
+`scripts/bundle-targets.sh`, `scripts/lld/darwin-symbols.txt`,
+`runtime/Makefile` и всех файлов `runtime/{include,src,stub-sdk}` (в
+архиве лежат рантаймы и `libSystem.tbd`, выведенный из их символов);
+`<lldkey>` — `scripts/build-lld.sh` и `scripts/lld/lld-main.cpp`. Это не
+значение `hashFiles` из ключей `actions/cache`.
+
+`bundle-targets.sh --prebuilt [URL]` и `build-lld.sh --prebuilt [URL]`
+(URL по умолчанию — релиз `zell-lang/zell`, или `$ZELL_INPUTS_URL`, в том
+числе `file://`) скачивают архив своего ключа, сверяют `.sha256`
+(несовпадение — ошибка, а не молчаливая пересборка) и распаковывают в
+`--out`; если актива с таким ключом нет (404), сообщают об этом и
+собирают как обычно, медленнее. `--offline` не меняется. `release.yml` и
+`bundle.yml` вызывают скрипты с `--prebuilt` (`actions/cache` остаётся
+вторым слоем), а сухой прогон релиза занимает около 10 минут вместо 30.
+**Запускать `inputs.yml` заново нужно после любого изменения**
+`scripts/bundle-targets.sh`, `scripts/build-lld.sh`, `scripts/lld/*` или
+`runtime/` (ключ меняется; старые активы остаются). Пока этого не сделано,
+релиз работает, но собирает всё на раннере.
+
+Сгенерированные `libSystem.tbd` и заглушки glibc в репозиторий не
+коммитятся: `libSystem.tbd` строится из неопределённых символов
+собранного `libzell_rt.a` и compiler-rt (а не только из
+`darwin-symbols.txt`), поэтому меняется вместе с рантаймом, а заглушки
+glibc — бинарные `.so`, порождаемые из таблиц символов `.deb`.
+
 ### Линковка (`compiler/src/crosslink.rs`)
 
 Если рядом с найденным рантаймом цели лежит `BUNDLE`, `zell` сам строит

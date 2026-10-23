@@ -29,3 +29,5 @@ compiler-rt (Apache-2.0 WITH LLVM-exception: no attribution required for
 binaries), and, for musl targets, musl (MIT) and for Windows the mingw-w64
 startup code (ZPL/public domain). glibc, msvcrt.dll and libSystem are linked
 dynamically and come from the system the program runs on.
+
+The `toolchain-inputs` release (built by the manual workflow `.github/workflows/inputs.yml`; `scripts/bundle-targets.sh --prebuilt`, `scripts/build-lld.sh --prebuilt`) redistributes exactly the components above, built from the same pinned sources and packaged in the same archives, under the same licences; it is a build cache for the release workflows, not an additional distribution channel.
