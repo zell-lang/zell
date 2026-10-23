@@ -44,6 +44,11 @@ ZELL_CRYPTO_HIDDEN void zell__sha_force_portable(int on);
 ZELL_CRYPTO_HIDDEN bool zell__cpu_has_vaes(void);
 /* Forces the 128-bit AES-NI GCM path (1) or back to auto-detection (0). */
 ZELL_CRYPTO_HIDDEN void zell__vaes_force_off(int on);
+/* AVX2 with OS support for YMM state (ChaCha20 runs 8 blocks per pass);
+ * ZELL_NO_AVX2=1 disables it. */
+ZELL_CRYPTO_HIDDEN bool zell__cpu_has_avx2(void);
+/* Forces the portable ChaCha20 path (1) or back to auto-detection (0). */
+ZELL_CRYPTO_HIDDEN void zell__avx2_force_off(int on);
 
 static inline uint32_t zell__ld32be(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];

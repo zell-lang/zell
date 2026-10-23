@@ -104,6 +104,32 @@ bool zell__cpu_has_vaes(void) {
 }
 
 void zell__vaes_force_off(int on) { vaes_forced_off = on; }
+
+static int avx2_state = -1;   /* -1 unknown, 0 no, 1 yes */
+static int avx2_forced_off;
+
+bool zell__cpu_has_avx2(void) {
+    if (avx2_forced_off) return false;
+    int s = __atomic_load_n(&avx2_state, __ATOMIC_RELAXED);
+    if (s < 0) {
+        unsigned a, b, c, d;
+        s = 0;
+        /* leaf 1 ECX: bit 27 OSXSAVE, bit 28 AVX; XCR0 bits 1-2: the OS
+         * saves XMM and YMM state; leaf 7.0 EBX bit 5: AVX2 */
+        if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 27)) && (c & (1u << 28))) {
+            unsigned xlo, xhi;
+            __asm__ __volatile__("xgetbv" : "=a"(xlo), "=d"(xhi) : "c"(0));
+            (void)xhi;
+            if ((xlo & 6) == 6 && __get_cpuid_count(7, 0, &a, &b, &c, &d)) s = (b & (1u << 5)) != 0;
+        }
+        const char *env = getenv("ZELL_NO_AVX2");
+        if (env && env[0] == '1') s = 0;
+        __atomic_store_n(&avx2_state, s, __ATOMIC_RELAXED);
+    }
+    return s == 1;
+}
+
+void zell__avx2_force_off(int on) { avx2_forced_off = on; }
 #else
 bool zell__cpu_has_aesni(void) { return false; }
 void zell__aes_force_portable(int on) { (void)on; }
@@ -111,4 +137,6 @@ bool zell__cpu_has_shani(void) { return false; }
 void zell__sha_force_portable(int on) { (void)on; }
 bool zell__cpu_has_vaes(void) { return false; }
 void zell__vaes_force_off(int on) { (void)on; }
+bool zell__cpu_has_avx2(void) { return false; }
+void zell__avx2_force_off(int on) { (void)on; }
 #endif
