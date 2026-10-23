@@ -801,6 +801,26 @@ caller's context is saved and restored so that what the body sets never
 leaks out) and, with a suspend point, one frame allocation and free from the
 object heap's size classes plus `zell_task_is_done` / `zell_task_result`.
 
+`RUNS=2 DETAIL=1 ./scripts/bench-perf.sh await_chain async_io` on the same
+machine (load average 1.7 before the run), "before" being the master
+compiler built from the same checkout:
+
+| bench | metric | Zell before | Zell after | Go | after / Go (Go = 1.00) |
+|---|---|---:|---:|---:|---:|
+| await_chain | 10M async calls, no suspension | 500 ms (50 ns/call) | 118 ms (11.8 ns/call) | 10 ms | 11.8 |
+| | 1k chains of 1000 resuming | 381 ms | 375 ms | 7 ms | 54 |
+| | wall s (CPU s) | - | 0.495 (1.38) | 0.019 (0.02) | 26 |
+| async_io | round trips/s (> 1 better) | - | 353 982 | 766 283 | 0.46 |
+| | p50 / p99 / max | - | 2.8 / 3.1 / 10.3 ms | 1.1 / 5.9 / 52.6 ms | 2.5 / 0.52 / 0.20 |
+| | wall s (CPU s) | - | 2.90 (29.8) | 1.40 (12.2) | 2.07 |
+
+The chain's synchronous phase is 4.2x faster (each level still allocates
+its frame, since its `await` of the recursive call is a real suspend point
+the optimiser cannot fold); the resuming phase, where every level really
+suspends, costs the same as before, as intended. `async_io` is bound by the
+scheduler's queue trips, not by the call protocol (the figures above are
+from a 16-core desktop, not the 4 vCPU VM of the earlier table).
+
 Latency, cores scaling and language-mechanism benchmarks: see [RESULTS-latency.md](RESULTS-latency.md).
 Stdlib benchmarks (`json_codec`, `encodings`, `crypto`, `file_io`, `sort_collect`): see [RESULTS-stdlib.md](RESULTS-stdlib.md).
 Framework benchmarks (web_api, orm_sqlite, logging, websocket_echo, startup): [RESULTS-framework.md](RESULTS-framework.md).
