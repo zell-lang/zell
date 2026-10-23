@@ -1,0 +1,8 @@
+query users: not found
+true
+not found
+load: query users: not found
+true
+query outer: query inner: code 7
+true 7
+false

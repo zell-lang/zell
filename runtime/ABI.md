@@ -903,7 +903,9 @@ typedef zell_string *(*zell_message_fn)(void *payload);  // returns an OWNED str
 typedef struct zell_error {            // 224 bytes
     zell_object hdr;                   // +0   type = &zell_type_error
     zell_string *message;              // +16  own message, or the wrap context (owned)
-    struct zell_error *inner;          // +24  wrapped error (owned) or NULL
+    struct zell_error *inner;          // +24  wrapped error (owned) or NULL; for a typed error
+                                       //      whose struct has `Unwrap() error`, the compiler
+                                       //      stores that result here right after boxing
     const zell_type_info *user_type;   // +32  type of a boxed user error, or NULL
     void *payload;                      // +40  boxed user value (a zell object, owned) or NULL
     zell_message_fn message_fn;        // +48  user Message() thunk or NULL
@@ -940,7 +942,7 @@ example in a module initialiser).
 | `zell_error_new_typed(const zell_type_info *type, void *payload, zell_message_fn fn)` | boxes a user error (any struct with `Message()`). `payload` must be a zell heap object holding the struct value (for example `zell_object_new(&NotFound_type, 16 + sizeof(NotFound))` with the fields copied in). It is **retained**. `fn(payload)` is the compiler-generated thunk that calls the user's `Message()` and returns an owned string |
 | `zell_error_wrap(zell_error *inner, const zell_string *ctx)` | `err?("ctx")` and `errors.Wrap(err, ctx)`: a new error whose own text is `ctx`, wrapping `inner` (retained). **`inner == NULL` returns NULL** |
 | `zell_error_unwrap(const zell_error *e)` | `errors.Unwrap`: the inner error, +1, or NULL |
-| `zell_string *zell_error_message(const zell_error *e)` | owned full text: own text, then `": "` plus the text of each inner error down the chain, for example `startup: loading config: file missing`. The own text of a typed error is `message_fn(payload)`. NULL gives `"<nil>"` |
+| `zell_string *zell_error_message(const zell_error *e)` | owned full text: own text, then `": "` plus the text of each inner error down the chain, for example `startup: loading config: file missing`. The own text of a typed error is `message_fn(payload)`, and the chain stops after a link with a `message_fn` (a user `Message()` is the whole text; its `inner` is the `Unwrap()` cause). NULL gives `"<nil>"` |
 | `bool zell_error_is(const zell_error *err, const zell_error *target)` | `errors.Is`: walks `err`, `err->inner`, ... and returns true if any link **is the same object** (pointer identity) as `target`, where a copy-on-write copy (7.4) counts as its `origin`. Sentinels work because they are unique objects. `is(NULL, NULL)` is true and `is(x, NULL)` is false for non-NULL `x` |
 | `void *zell_error_as(const zell_error *err, const zell_type_info *type)` | `errors.As`: the **[borrowed]** payload of the first link with `user_type == type`, or NULL. The compiler copies (and retains) the struct out of `payload + 16` into the target |
 | `zell_err_eof` | immortal sentinel `"EOF"`, returned by `zell_read_line` |

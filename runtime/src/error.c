@@ -98,7 +98,9 @@ zell_string *zell_error_message(const zell_error *err) {
     if (!err) return zell_string_new("<nil>", 5);
     zell_string *acc = own_text(err);
     static ZELL_STRING_STORAGE(3) sep = ZELL_STRING_INIT(sep, ": ");
-    for (const zell_error *e = err->inner; e; e = e->inner) {
+    /* A typed (user) link's Message() is its whole text: its inner (the
+     * user Unwrap() cause) is not appended. */
+    for (const zell_error *p = err, *e = err->inner; e && !p->message_fn; p = e, e = e->inner) {
         zell_string *t = own_text(e);
         zell_string *a = zell_string_concat(acc, (zell_string *)&sep);
         zell_string *b = zell_string_concat(a, t);

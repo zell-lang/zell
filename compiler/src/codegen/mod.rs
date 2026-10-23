@@ -59,7 +59,9 @@
 //! `case I x:` on an `any` looks the vtable up with `iface.conv.N(typeid)`
 //! (NULL = no match) and unwraps a stored `*S` when `boxed = 0`. Storing a
 //! struct in an `error` boxes it and calls `zell_error_new_typed` with a
-//! `Message()` thunk; `error` method 0 is `zell_error_message`.
+//! `Message()` thunk; when the struct has `Unwrap() error`, its result
+//! (+1) is stored into the new error's `inner` (+24). `error` method 0 is
+//! `zell_error_message`.
 //!
 //! **Arenas.** `Builtin::ArenaNew` (`*T`) and `ArenaSlice` (`[]T`) call
 //! `zell_arena_object` / `zell_arena_slice` (runtime/ABI.md 3.6): the

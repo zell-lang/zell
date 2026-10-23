@@ -1,0 +1,49 @@
+// status: passing
+namespace spec.errors2.unwrap_method
+
+import io
+
+// A user error with an `Unwrap() error` method: errors.Is / As / Unwrap
+// follow it to the cause, like an errors.Wrap link; its Message() stays
+// the whole text (the cause is not appended).
+
+const ErrNotFound = error("not found")
+
+struct QueryError {
+    Query string
+    Err error
+
+    func Message() string { return "query " + this.Query + ": " + this.Err.Message() }
+    func Unwrap() error { return this.Err }
+}
+
+struct CodeError {
+    Code int
+
+    func Message() string { return "code " + strconv.Itoa(this.Code) }
+}
+
+func find(q string) int! {
+    return QueryError{Query: q, Err: ErrNotFound}
+}
+
+func deep() int! {
+    return QueryError{Query: "outer", Err: QueryError{Query: "inner", Err: CodeError{Code: 7}}}
+}
+
+func main() {
+    try find("users") catch err {
+        println(err.Message())
+        println(errors.Is(err, ErrNotFound))
+        println(errors.Unwrap(err).Message())
+        var w = errors.Wrap(err, "load")
+        println(w.Message())
+        println(errors.Is(w, ErrNotFound))
+    }
+    try deep() catch err {
+        println(err.Message())
+        var ce CodeError
+        println(errors.As(err, &ce), ce.Code)
+        println(errors.Is(err, ErrNotFound))
+    }
+}
