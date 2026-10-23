@@ -95,6 +95,16 @@ fn main() {
         exit(if args.len() < 2 { 2 } else { 0 });
     }
     let rest = &args[2..];
+    // `zell <command> --help` (commands with their own help handle it).
+    if matches!(rest.first().map(String::as_str), Some("-h" | "--help")) && !matches!(args[1].as_str(), "doc" | "fmt" | "data") {
+        match command_usage(&args[1]) {
+            Some(u) => {
+                println!("{u}");
+                exit(0);
+            }
+            None => usage_error(&format!("unknown command `{}`", args[1])),
+        }
+    }
     match args[1].as_str() {
         "version" | "--version" | "-V" => {
             println!("zell {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH);
@@ -170,6 +180,35 @@ fn print(r: Result<String, String>) {
 fn fail(e: &str) -> ! {
     eprintln!("error: {e}");
     exit(1);
+}
+
+/// The lines of [`USAGE`] describing `cmd` (`init`, `debug`, ...) plus the
+/// build options for the commands that take them; `None` for an unknown
+/// command.
+fn command_usage(cmd: &str) -> Option<String> {
+    let (commands, options) = USAGE.split_once("\nbuild options:\n")?;
+    let mut out = String::new();
+    let mut inside = false;
+    for line in commands.lines() {
+        let is_entry = line.starts_with("  ") && !line.starts_with("   ");
+        if is_entry {
+            let first = line.trim_start().split([' ', '\t']).next().unwrap_or("");
+            inside = first == cmd;
+        } else if !line.starts_with("   ") {
+            inside = false;
+        }
+        if inside {
+            out.push_str(&format!("{line}\n"));
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    let out = format!("usage: zell {cmd} ...\n\n{out}");
+    if matches!(cmd, "build" | "run" | "check" | "test" | "debug") {
+        return Some(format!("{out}\nbuild options:\n{options}"));
+    }
+    Some(out.trim_end().to_string())
 }
 
 fn usage_error(e: &str) -> ! {

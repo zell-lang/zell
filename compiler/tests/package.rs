@@ -274,6 +274,13 @@ fn init_creates_runnable_packages_in_every_format() {
     assert!(err.contains("libraries"), "{err}");
     let err = fails(&root, &["init", "util"]);
     assert!(err.contains("already has a manifest"), "{err}");
+    // `--help` after a command prints that command's usage (exit 0) and
+    // creates nothing.
+    let (help, _) = ok(&root, &["init", "--help"]);
+    assert!(help.starts_with("usage: zell init") && help.contains("--format toml|json|yaml"), "{help}");
+    assert!(!root.join("--help").exists());
+    let (help, _) = ok(&root, &["build", "-h"]);
+    assert!(help.contains("build options:") && help.contains("--release"), "{help}");
 }
 
 #[test]
