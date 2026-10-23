@@ -35,7 +35,7 @@ selection:
 ## Showcase repositories
 
 These are separate repositories, **being created at the time of writing**
-(in progress); the links may not resolve yet. Each is a Zell project
+— all four are published. Each is a Zell project
 (`zell.toml`), so the same two commands work everywhere: `zell run` and
 `zell test`. They need the toolchain from the
 [README](../README.md#install).
@@ -67,7 +67,7 @@ zell run           # then call the printed address
 zell test
 ```
 
-### example-cli (in progress)
+### example-cli — published
 
 [github.com/zell-lang/example-cli](https://github.com/zell-lang/example-cli):
 a command-line tool with subcommands, JSON and YAML input and output, and
@@ -80,7 +80,7 @@ zell run -- --help
 zell test
 ```
 
-### example-worker (in progress)
+### example-worker — published
 
 [github.com/zell-lang/example-worker](https://github.com/zell-lang/example-worker):
 a background worker. Shows: channels, a worker pool, and graceful shutdown

@@ -57,3 +57,23 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
 
 Not an obstacle but noted: OpenAPI 3.1 generation, `web.TestServer`, DI,
 request id / tracing / metrics middleware all worked as documented.
+
+## Added while writing `example-cli` and `example-worker` (same day)
+18. **`zell test` leaks an internal symbol**: in a package with `src/main.zl` it
+    prints `warning[L0007]: function zellUserMain__ is never used` — the lint
+    must skip compiler-generated names.
+19. **`cli.App` cannot be redirected or given exit codes**: `Run` returns only
+    0/1/2, help and group text go to stdout via `io.print`
+    (`std/cli/cli.zl:199,274,315`), a command error is always status 1 plus a
+    printed `error: …`. Wanted: `App.Out/Errors` writers and typed exit codes.
+20. **No type aliases** (`type Op = func(*Node) string!`): long function types
+    are repeated at every use. Spec decision.
+21. **`in` is a reserved word** — `var in = …` fails; common flag name. Spec
+    decision (contextual keyword?).
+22. **`strings` lacks `ContainsAny`, `IndexAny`, `ReplaceAll`**; `Replace`'s doc
+    should say whether it replaces every occurrence.
+23. **`encoding.json.Value` / `yaml.Value` are read-only**: no `Set`/`Put` or
+    mutable builder beyond `NewObject(keys, values)`; only `toml.Document.Set`
+    exists. Editing a document means converting to one's own tree.
+24. **The default logger prints error traces with absolute paths over several
+    lines** — noisy in service logs; relative paths (or one line) by default.
