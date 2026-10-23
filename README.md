@@ -57,49 +57,126 @@ async func main() {
 
 ## Install
 
-> **Status:** there is no published release yet, so the prebuilt-toolchain
-> path below does not work until the first `v0.1.0` release is tagged
-> (the release workflow is in `.github/workflows/release.yml`). Until then,
-> build from source (next section): it takes a few minutes and gives you
-> `zell`, `zell-lsp` and `zell-mcp`.
+### Prebuilt toolchain
 
-**A prebuilt toolchain**, self-contained like Zig's: one archive with
-`bin/zell`, `bin/zell-lsp`, `bin/zell-mcp`, the linker `bin/lld`, `std/` and
-the link inputs of every tier-1/2 target in `targets/<triple>/` (runtime,
-compiler-rt, crt objects, glibc 2.31 stubs, musl, mingw-w64,
-`libSystem.tbd`). Nothing else is needed: no clang, no C library headers,
+Download an archive from the [releases page](https://github.com/zell-lang/zell/releases).
+There is one per host, `zell-<version>-<host>.tar.xz` (Windows also
+`.tar.gz`), next to `SHA256SUMS`:
+
+| Host | Archive |
+|---|---|
+| Linux x86-64 | `zell-<version>-linux-amd64.tar.xz` |
+| Linux arm64 | `zell-<version>-linux-arm64.tar.xz` |
+| macOS Apple Silicon | `zell-<version>-macos-arm64.tar.xz` |
+| macOS Intel | `zell-<version>-macos-amd64.tar.xz` |
+| Windows x86-64 | `zell-<version>-windows-amd64.tar.xz` / `.tar.gz` |
+
+Each archive is self-contained, like Zig's: `bin/zell`, `bin/zell-lsp`,
+`bin/zell-mcp`, the linker `bin/lld`, `std/`, `targets/<triple>/` with the
+link inputs of **every** target (runtime, compiler-rt, crt objects, glibc
+2.31 stubs, musl, mingw-w64, `libSystem.tbd`) and `tools/` (lldb/gdb
+formatters, the VS Code client). One archive therefore cross-compiles to
+all targets, and nothing else is needed: no clang, no C library headers,
 no mingw-w64, no macOS SDK.
 
+Release candidates (`v0.1.0-rc.N`) are published as GitHub *pre-releases*;
+a pre-release is never "latest", so the plain installer does not pick it up
+and you ask for it by version.
+
+**One line** (Linux, macOS):
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.sh | sh   # Linux, macOS
-irm https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.ps1 | iex        # Windows (PowerShell)
+curl -fsSL https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.sh | sh -s -- --version 0.1.0-rc.1   # a candidate
 ```
 
-`install.sh` unpacks `zell-<version>-<host>.tar.xz` (about 30 MB; from the
-GitHub release, or `$ZELL_DIST_URL`, or `--from <archive>`) into
-`~/.zell/toolchain/` and links `zell` into `~/.local/bin`; `install.ps1`
-does the same under `%USERPROFILE%\.zell\toolchain` and adds `bin\` to
-the user `PATH`. Every target works out of the box:
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.ps1 | iex
+.\install.ps1 -Version 0.1.0-rc.1        # a candidate, from a saved copy of the script
+```
+
+`install.sh` downloads the archive for your host (from the GitHub release,
+or from `$ZELL_DIST_URL`, a directory of release files, or `--from
+<archive>`), checks its `.sha256`, unpacks it into
+`~/.zell/toolchain/zell-<version>-<host>/`, points `~/.zell/toolchain/current`
+at it and links `zell`, `zell-lsp` and `zell-mcp` into `~/.local/bin`
+(`--dir`, `--bin`, `$ZELL_BIN_DIR` change the places). `install.ps1` does
+the same under `%USERPROFILE%\.zell\toolchain` and adds `bin\` to the user
+`PATH`.
+
+**By hand**: download the archive and `SHA256SUMS`, check and unpack it,
+and put `bin/` on `PATH`:
 
 ```sh
-zell doctor                                  # checks the linker and every target's link inputs
-zell build app.zl                            # this machine
-zell build --target linux-amd64-musl app.zl  # fully static Linux executable
-zell build --target linux-arm64 app.zl       # dynamic, glibc >= 2.31
-zell build --target windows-amd64 app.zl     # app.exe (run it with Wine: zell run --target ...)
-zell build --target macos-arm64 app.zl       # a Mach-O executable, linked on any host
-zell target list                             # the targets and where their link inputs are
+sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c
+tar xf zell-0.1.0-rc.1-linux-amd64.tar.xz
+export PATH="$PWD/zell-0.1.0-rc.1-linux-amd64/bin:$PATH"
+zell doctor                                   # checks the linker and every target's link inputs
+```
+
+**macOS:** the binaries are not signed yet. If Gatekeeper refuses to run
+them, remove the quarantine attribute from the unpacked directory:
+
+```sh
+xattr -dr com.apple.quarantine ~/.zell/toolchain/zell-0.1.0-rc.1-macos-arm64
 ```
 
 Linux executables (glibc) run on any system with glibc 2.31 or newer
-(Ubuntu 20.04+, Debian 11+, RHEL 9+). `ZELL_LINKER=clang` links with the
-system clang instead. `zell target add <target>` still downloads extra
-targets into `~/.zell/targets`. Archives are made with
-`scripts/bundle-targets.sh`, `scripts/build-lld.sh` and
-`scripts/package-toolchain.sh`; licences of the bundled parts are in
-`THIRD_PARTY.md`; details in `docs/PLATFORMS.md`, "Дистрибутив".
+(Ubuntu 20.04+, Debian 11+, RHEL 9+); `--target linux-amd64-musl` gives
+fully static ones. `ZELL_LINKER=clang` links with the system clang
+instead. `zell target add <target>` downloads extra targets into
+`~/.zell/targets`. Archives are made with `scripts/bundle-targets.sh`,
+`scripts/build-lld.sh` and `scripts/package-toolchain.sh`; licences of the
+bundled parts are in `THIRD_PARTY.md`; details and the release process in
+`docs/PLATFORMS.md`, "Дистрибутив" and "Релиз-кандидаты".
 
-**From source** (Linux x86-64 or arm64, macOS; Windows through MSYS2). You
+### Your first program
+
+```sh
+zell init hello && cd hello    # zell.toml + src/main.zl
+zell run                       # build and run the project
+zell test                      # tests, benchmarks and examples (@test functions)
+zell fmt                       # format in the canonical style (--check in CI)
+zell build --release                          # an optimized, stripped binary for this machine
+zell build --release --target linux-arm64-musl   # cross-compile: a static arm64 Linux executable
+zell target list                              # all targets: linux-*, macos-*, windows-amd64
+```
+
+The same cross-build works for `windows-amd64` (an `.exe`) and
+`macos-arm64` (a Mach-O executable linked on any host). A step-by-step
+version is in [Getting started](docs/guide/getting-started.md).
+
+### Editors
+
+- **VS Code**: the extension (highlighting, `zell-lsp`, run/debug code
+  lenses, debugging) is in `editors/vscode`; the toolchain archive carries
+  its sources in `tools/vscode`. Install steps:
+  [editors/vscode/README.md](editors/vscode/README.md).
+- **IntelliJ IDEA, GoLand and other JetBrains IDEs**: the
+  [zell-idea-plugin](https://github.com/zell-lang/zell-idea-plugin);
+  download the zip from its
+  [releases](https://github.com/zell-lang/zell-idea-plugin/releases) and
+  install it with *Settings > Plugins > gear icon > Install Plugin from
+  Disk*. A JetBrains Marketplace listing is planned. The plugin hosts
+  `zell-lsp` through the platform LSP API, which exists only in the
+  **commercial** IDEs (IntelliJ IDEA Ultimate, GoLand, ...); the free
+  Community edition cannot run it. It gives Grammar-Kit PSI syntax
+  highlighting, structure view and folding; LSP diagnostics, navigation,
+  completion and rename; formatting with `zell fmt`; run and test
+  configurations are in progress.
+- Neovim, Helix, Zed, Emacs: see the table below.
+
+### Examples
+
+Runnable programs in [`examples/`](examples) and the showcase
+repositories (a configuration library, a REST service, a CLI, a worker
+pool) are described in [docs/EXAMPLES.md](docs/EXAMPLES.md).
+
+### From source
+
+Building from source works on Linux x86-64 or arm64, macOS and (through MSYS2) Windows. You
 need Rust, LLVM 18, clang and lld (a checkout links with the system clang;
 the bundled lld and link inputs come from `scripts/bundle-targets.sh`):
 
@@ -125,7 +202,7 @@ zell-lsp --version           # the language server (also: zell lsp)
 zell run examples/hello.zl   # Hello, Zell!
 ```
 
-### Editors and the language server
+### The language server and other editors
 
 `zell-lsp` is a standard LSP server over stdio (diagnostics with quick
 fixes, go to definition/implementation/type definition, references, hover,
@@ -137,7 +214,7 @@ the server must be on `PATH` (or point the client at the binary).
 | Editor | Setup |
 |---|---|
 | **VS Code** | `cd editors/vscode && npm install && npx @vscode/vsce package`, then `code --install-extension zell-*.vsix`. The extension starts `zell-lsp` from `PATH` (setting `zell.serverPath` to override), adds syntax highlighting, run/debug code lenses and debugging through `lldb-dap`. Not on the Marketplace yet. |
-| **IntelliJ IDEA / GoLand / other JetBrains IDEs** | plugin repository [zell-lang/zell-idea-plugin](https://github.com/zell-lang/zell-idea-plugin): Grammar-Kit PSI for syntax, `zell-lsp` through the platform LSP API (Ultimate/commercial IDEs). Build with `./gradlew buildPlugin` and install the zip from `build/distributions/`; the toolchain is found on `PATH`, in `ZELL_HOME`, or set in Settings → Languages → Zell. |
+| **IntelliJ IDEA / GoLand / other JetBrains IDEs** | plugin repository [zell-lang/zell-idea-plugin](https://github.com/zell-lang/zell-idea-plugin): Grammar-Kit PSI for syntax, `zell-lsp` through the platform LSP API (Ultimate/commercial IDEs). Install the zip from its [releases](https://github.com/zell-lang/zell-idea-plugin/releases), or build it with `./gradlew buildPlugin` (`build/distributions/`); the toolchain is found on `PATH`, in `ZELL_HOME`, or set in Settings → Languages → Zell. |
 | **Neovim** | `vim.lsp.start({ name = "zell", cmd = { "zell-lsp" }, root_dir = vim.fs.root(0, { "zell.toml", "zell.json", "zell.yaml", ".git" }) })` in an autocommand for `*.zl` (`vim.filetype.add({ extension = { zl = "zell" } })`). |
 | **Helix** | in `languages.toml`: `[[language]] name = "zell" scope = "source.zell" file-types = ["zl"] roots = ["zell.toml"] language-servers = ["zell-lsp"]` and `[language-server.zell-lsp] command = "zell-lsp"`. |
 | **Zed, Sublime, Emacs (eglot/lsp-mode)** | register `zell-lsp` as the server for the `zl` extension; no dedicated extension exists yet. |
@@ -180,6 +257,7 @@ zell build --release                 # an optimized, stripped binary
 | [Testing](docs/guide/testing.md) | `zell test`, benchmarks, runnable examples |
 | [Debugging](docs/guide/debugging.md) | traces, logging, leak checks, the debugger, profiles |
 | [Web services](docs/guide/web.md) | `web` quickstart |
+| [Getting started](docs/guide/getting-started.md) | install, first project, tests, cross-builds, editors |
 | [FAQ](docs/guide/faq.md) | differences from Go and C# |
 | API reference | `zell doc strings.Split`, or `zell doc std --html out/` for a searchable site |
 
@@ -208,7 +286,7 @@ then lives at `https://<user>.github.io/<repo>/`
 ## Status
 
 Zell is young: the language is usable and heavily tested, but not yet
-stable, and there is no binary release.
+stable; binary releases are at the release-candidate stage.
 
 | Area | Status |
 |---|---|
@@ -225,7 +303,7 @@ stable, and there is no binary release.
 | Tools: `fmt`, `test` (with examples), `doc`, LSP + VS Code, debugger (in-process agent, DAP, lldb/gdb) | works |
 | Packages: manifests, workspaces, git modules with MVS, lock file, module proxy | works |
 | Platforms: Linux x86-64/arm64 | works; macOS and Windows (mingw-w64 cross builds) in progress |
-| FFI, a public package index, binary releases | not yet |
+| FFI, a public package index | not yet |
 
 The test suite (`cargo test --workspace`) builds and runs 47 example
 programs byte-exact, a specification corpus of 850+ programs, the
