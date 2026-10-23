@@ -139,3 +139,35 @@ single-implementation devirtualisation of interface calls; preemption or a
 ## Suggested order
 1 -> 2 -> 3 -> 4 (cheap, visible in `defer_errors_iface` and CI), then 6 and
 7 if the target is HTTP services, else 5 and 8.
+
+## JSON: reaching System.Text.Json speed (plan, not started)
+
+Reference point to establish first: a .NET side in `benchmarks/json_codec`
+(System.Text.Json with source generators; the SDK is on the dev machine).
+Public figures put STJ at roughly 300-600 MB/s typed deserialisation and
+1-2 GB/s serialisation; Zell today is 277 MB/s typed parse, 584 MB/s typed
+format, 619 MB/s Value parse (100 MB document, 16-core Zen 4). Steps in
+order of expected gain, each one agent run (`runtime/src/std_json.c`,
+`compiler/src/sema/reflect_src/json.zl`, the decoder generator):
+
+1. One pass instead of two: `Parse<T>` currently builds the arena document
+   and then walks it. Feed the generated decoder from the scanner token by
+   token (SAX style); build the document only for `ParseValue`. Expected
+   -30-40% on typed parse.
+2. Field-name matching as STJ does it: names are compile-time constants, so
+   compare as 8-byte words / perfect hash on length and first bytes, and
+   try the field expected next in declaration order first (real documents
+   almost always match, the search becomes one compare).
+3. Numbers: SWAR parse of up to 8 digits for ints, Eisel-Lemire for floats
+   (today Clinger fast path + `strtod` fallback, and `strtod` is slow).
+4. Strings: UTF-8 validation and quote/escape search in one SIMD pass (SSE2
+   baseline, AVX2 behind the cpuid dispatch); allocate string fields from a
+   per-parse slab instead of the general allocator (~60 instructions per
+   object today).
+5. Writer: two-digit itoa tables, check that `zell__format_float` is
+   Ryu/Dragonbox class (replace if not), SIMD escape scan, "no escape -> one
+   memcpy".
+6. simdjson stage-1 structural indexing on AVX2 — only after 1-5; ~1.5x more
+   on parse for ~500 lines plus a dispatcher.
+Also still open from wave 2: `Value` lookups 1.5x Go (1.07x with
+`ZELL_LTO=1`), per-`Value` extern calls (`math.IsNaN`/`Round`).
