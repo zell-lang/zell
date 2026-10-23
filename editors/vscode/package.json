@@ -70,6 +70,11 @@
         "command": "zell.showReferences",
         "title": "Show references",
         "category": "Zell"
+      },
+      {
+        "command": "zell.showOutput",
+        "title": "Show language server output",
+        "category": "Zell"
       }
     ],
     "configuration": {
@@ -78,7 +83,7 @@
         "zell.serverPath": {
           "type": "string",
           "default": "zell-lsp",
-          "markdownDescription": "Path to the language server executable. The default `zell-lsp` is looked up on `PATH`; if it is not found, `zell lsp` is used instead. A path to the `zell` CLI also works (it is started as `zell lsp`)."
+          "markdownDescription": "Path to the language server executable. Empty or `zell-lsp`: look for `zell-lsp` on `PATH`, then next to the `zell` CLI found on `PATH` (the toolchain archive layout `bin/zell-lsp`), then use `zell lsp`. A path to the `zell` CLI also works (it is started as `zell lsp`)."
         },
         "zell.serverArgs": {
           "type": "array",
@@ -122,6 +127,11 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Path to `tools/lldb/zell_formatters.py`. Empty: ask `zell debug --formatters lldb`."
+        },
+        "zell.statusBar.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the analyzer state (`zell/analyzerStatus`: idle, analysing, queued requests) in the status bar."
         }
       }
     },
@@ -403,6 +413,94 @@
           }
         }
       }
+    ],
+    "snippets": [
+      {
+        "language": "zell",
+        "path": "./snippets/zell.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "zell",
+        "scopes": {
+          "namespace": [
+            "entity.name.namespace.zell"
+          ],
+          "type": [
+            "entity.name.type.zell"
+          ],
+          "struct": [
+            "entity.name.type.struct.zell"
+          ],
+          "enum": [
+            "entity.name.type.enum.zell"
+          ],
+          "enumMember": [
+            "variable.other.enummember.zell"
+          ],
+          "interface": [
+            "entity.name.type.interface.zell"
+          ],
+          "function": [
+            "entity.name.function.zell"
+          ],
+          "method": [
+            "entity.name.function.member.zell"
+          ],
+          "property": [
+            "variable.other.property.zell"
+          ],
+          "variable": [
+            "variable.other.readwrite.zell"
+          ],
+          "variable.readonly": [
+            "variable.other.constant.zell"
+          ],
+          "parameter": [
+            "variable.parameter.zell"
+          ],
+          "keyword": [
+            "keyword.control.zell"
+          ],
+          "string": [
+            "string.quoted.double.zell"
+          ],
+          "number": [
+            "constant.numeric.zell"
+          ],
+          "comment": [
+            "comment.line.double-slash.zell"
+          ],
+          "operator": [
+            "keyword.operator.zell"
+          ]
+        }
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "zell",
+        "owner": "zell",
+        "source": "zell",
+        "fileLocation": [
+          "autoDetect",
+          "${workspaceFolder}"
+        ],
+        "pattern": [
+          {
+            "regexp": "^(error|warning): (.*)$",
+            "severity": 1,
+            "message": 2
+          },
+          {
+            "regexp": "^\\s*-->\\s+(.*):(\\d+):(\\d+)$",
+            "file": 1,
+            "line": 2,
+            "column": 3
+          }
+        ]
+      }
     ]
   },
   "scripts": {
@@ -410,7 +508,9 @@
     "bundle": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --sourcemap --outfile=out/extension.js",
     "build": "npm run typecheck && npm run bundle",
     "watch": "npm run bundle -- --watch",
-    "vscode:prepublish": "npm run build"
+    "vscode:prepublish": "npm run typecheck && npm run bundle -- --minify",
+    "compile": "npm run build",
+    "package": "vsce package --no-dependencies"
   },
   "dependencies": {
     "vscode-languageclient": "9.0.1"
@@ -420,5 +520,9 @@
     "@types/vscode": "1.82.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zell-lang/zell"
   }
 }

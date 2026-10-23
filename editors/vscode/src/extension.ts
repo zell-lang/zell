@@ -1,7 +1,10 @@
 // VS Code client for the Zell language server (zell-lsp).
 //
-// Launches `zell.serverPath` (default `zell-lsp` on PATH; falls back to
-// `zell lsp` when zell-lsp is not installed) over stdio. The `zell.*`
+// Launches the server over stdio, found in this order: `zell.serverPath`,
+// `zell-lsp` on PATH, `zell-lsp` next to the `zell` CLI on PATH (the
+// toolchain archive layout `bin/zell-lsp`), `zell lsp`; with none of them
+// an error explains what to install or set. A status bar item shows the
+// analyzer state (`zell/analyzerStatus`). The `zell.*`
 // settings are sent to the server (initialization options and
 // workspace/didChangeConfiguration), which reads `zell.inlayHints.*`.
 //
@@ -14,11 +17,13 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { Executable, LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
+import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, State } from "vscode-languageclient/node";
 import { registerDebugging } from "./debug";
 
 let client: LanguageClient | undefined;
 let output: vscode.OutputChannel | undefined;
+let status: vscode.StatusBarItem | undefined;
+let statusTimer: NodeJS.Timeout | undefined;
 
 /** Finds `name` on PATH (with Windows extensions); undefined if missing. */
 function which(name: string): string | undefined {
@@ -41,8 +46,9 @@ function which(name: string): string | undefined {
   return undefined;
 }
 
-/** Resolves the server command from the settings. */
-function serverExecutable(): Executable {
+/** Resolves the server command from the settings and PATH; undefined when
+ * no server can be found. */
+function serverExecutable(): Executable | undefined {
   const config = vscode.workspace.getConfiguration("zell");
   const configured = config.get<string>("serverPath", "zell-lsp").trim() || "zell-lsp";
   const extraArgs = config.get<string[]>("serverArgs", []);
@@ -51,11 +57,55 @@ function serverExecutable(): Executable {
   if (base === "zell") {
     return { command: configured, args: ["lsp", ...extraArgs] };
   }
-  if (configured === "zell-lsp" && !which("zell-lsp") && which("zell")) {
-    output?.appendLine("zell-lsp not found on PATH; using `zell lsp`");
-    return { command: "zell", args: ["lsp", ...extraArgs] };
+  if (configured !== "zell-lsp") {
+    return { command: configured, args: extraArgs };
   }
-  return { command: configured, args: extraArgs };
+  const onPath = which("zell-lsp");
+  if (onPath) {
+    return { command: onPath, args: extraArgs };
+  }
+  const cli = which("zell");
+  if (cli) {
+    let dir = path.dirname(cli);
+    try {
+      dir = path.dirname(fs.realpathSync(cli));
+    } catch {
+      // keep the PATH entry
+    }
+    const sibling = path.join(dir, process.platform === "win32" ? "zell-lsp.exe" : "zell-lsp");
+    if (fs.existsSync(sibling)) {
+      output?.appendLine(`zell-lsp not on PATH; using ${sibling} next to ${cli}`);
+      return { command: sibling, args: extraArgs };
+    }
+    output?.appendLine("zell-lsp not found on PATH or next to zell; using `zell lsp`");
+    return { command: cli, args: ["lsp", ...extraArgs] };
+  }
+  return undefined;
+}
+
+/** Polls `zell/analyzerStatus` into the status bar item. */
+async function refreshStatus(): Promise<void> {
+  if (!status) {
+    return;
+  }
+  if (!vscode.workspace.getConfiguration("zell").get<boolean>("statusBar.enabled", true)) {
+    status.hide();
+    return;
+  }
+  status.show();
+  if (!client || client.state !== State.Running) {
+    status.text = client?.state === State.Starting ? "$(sync~spin) Zell" : "$(error) Zell";
+    status.tooltip = client?.state === State.Starting ? "Zell: starting the language server" : "Zell: the language server is not running (click for its output)";
+    return;
+  }
+  try {
+    const s = await client.sendRequest<{ version: number; analysisVersion: number; inFlight: boolean; queued: number; stats: Record<string, number> }>("zell/analyzerStatus", null);
+    const busy = s.inFlight || s.queued > 0 || s.version !== s.analysisVersion;
+    status.text = busy ? "$(sync~spin) Zell" : "$(check) Zell";
+    status.tooltip = `Zell: ${busy ? "analysing" : "ready"} (version ${s.version}, analysed ${s.analysisVersion}, ${s.queued} queued)\n` + Object.entries(s.stats).map(([k, v]) => `${k}: ${v}`).join(", ");
+  } catch {
+    // the server is restarting
+  }
 }
 
 /** The settings the server reads (`zell.inlayHints.*`). */
@@ -69,8 +119,7 @@ function serverSettings(): object {
   };
 }
 
-function createClient(): LanguageClient {
-  const exe = serverExecutable();
+function createClient(exe: Executable): LanguageClient {
   output?.appendLine(`starting ${exe.command} ${(exe.args ?? []).join(" ")}`);
   const serverOptions: ServerOptions = { run: exe, debug: exe };
   const clientOptions: LanguageClientOptions = {
@@ -89,7 +138,18 @@ function createClient(): LanguageClient {
 }
 
 async function startClient(): Promise<void> {
-  client = createClient();
+  const exe = serverExecutable();
+  if (!exe) {
+    const choice = await vscode.window.showErrorMessage(
+      "Zell: the language server was not found: zell-lsp is not on PATH, and neither is the zell CLI. Install the Zell toolchain (bin/zell and bin/zell-lsp) or set \"zell.serverPath\".",
+      "Open Settings",
+    );
+    if (choice === "Open Settings") {
+      void vscode.commands.executeCommand("workbench.action.openSettings", "zell.serverPath");
+    }
+    return;
+  }
+  client = createClient(exe);
   try {
     await client.start();
   } catch (e) {
@@ -199,6 +259,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   output = vscode.window.createOutputChannel("Zell");
   context.subscriptions.push(output);
   context.subscriptions.push(vscode.commands.registerCommand("zell.restartServer", restartClient));
+  context.subscriptions.push(vscode.commands.registerCommand("zell.showOutput", () => output?.show(true)));
+  status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+  status.name = "Zell";
+  status.command = "zell.showOutput";
+  context.subscriptions.push(status);
+  statusTimer = setInterval(() => void refreshStatus(), 1500);
+  context.subscriptions.push({ dispose: () => statusTimer && clearInterval(statusTimer) });
   context.subscriptions.push(vscode.commands.registerCommand("zell.fmt", formatDocument));
   context.subscriptions.push(vscode.commands.registerCommand("zell.runTest", runTest));
   context.subscriptions.push(vscode.commands.registerCommand("zell.debugTest", debugTest));
@@ -209,12 +276,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("zell.serverPath") || e.affectsConfiguration("zell.serverArgs")) {
         void restartClient();
+      } else if (e.affectsConfiguration("zell.statusBar")) {
+        void refreshStatus();
       } else if (e.affectsConfiguration("zell.inlayHints") && client) {
         void client.sendNotification("workspace/didChangeConfiguration", { settings: { zell: serverSettings() } });
       }
     }),
   );
   await startClient();
+  void refreshStatus();
 }
 
 export async function deactivate(): Promise<void> {

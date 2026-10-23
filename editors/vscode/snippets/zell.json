@@ -1,0 +1,82 @@
+{
+  "Function": {
+    "prefix": "func",
+    "body": [
+      "func ${1:Name}(${2}) ${3:int} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Function declaration"
+  },
+  "Fallible function": {
+    "prefix": "funce",
+    "body": [
+      "func ${1:Name}(${2}) ${3:int}! {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Function returning T! (an error union)"
+  },
+  "Async function": {
+    "prefix": "async func",
+    "body": [
+      "async func ${1:Name}(${2}) ${3:int} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Async function (call it with await)"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "\t${2:field} ${3:int}",
+      "",
+      "\tfunc ${4:Method}() ${5:int} {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Struct with a field and a method"
+  },
+  "Interface": {
+    "prefix": "interface",
+    "body": [
+      "interface ${1:Name} {",
+      "\tfunc ${2:Method}() ${3:int}",
+      "}"
+    ],
+    "description": "Interface declaration"
+  },
+  "Test": {
+    "prefix": "test",
+    "body": [
+      "@test func Test${1:Name}(t *testing.T) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Test function (zell test; needs import testing)"
+  },
+  "Main": {
+    "prefix": "main",
+    "body": [
+      "namespace ${1:app}",
+      "",
+      "import io",
+      "",
+      "func main() {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Program entry point"
+  },
+  "For range": {
+    "prefix": "forin",
+    "body": [
+      "for ${1:x} in ${2:items} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "for ... in loop"
+  }
+}
