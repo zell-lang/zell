@@ -33,8 +33,9 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
 10. **The built-in attribute name `json` shadows the `encoding.json` namespace**
     inside a package (`json.Value` → "Value is not a static method of struct
     json"); same for `yaml`, `toml`. Users write `encoding.json.Value`.
-11. **`toml.Value`, `yaml.Value`, `json.Value` expose different method names**
-    for the same idea (`IsTable`/`IsMap`/`IsObject`, `IsArray`/`IsSeq`).
+11. **Fixed (2026-10-24):** `json.Value`, `yaml.Value` and `toml.Value` all
+    have `IsObject()`/`IsArray()`; the format-native names (`IsMap`/`IsSeq`,
+    `IsTable`) stay as synonyms.
 12. `math.Max` is float-only; `slices.Map` over ORM `ToList()` yields `*Row`.
 
 ## Tooling

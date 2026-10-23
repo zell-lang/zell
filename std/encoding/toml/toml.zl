@@ -55,6 +55,11 @@ struct Value {
         return this.kind == 7
     }
 
+    // IsObject is IsTable under the name shared with json.Value and yaml.Value.
+    func IsObject() bool {
+        return this.kind == 7
+    }
+
     // "string", "int", "float", "bool", "datetime", "array", "table" ("none" for the zero Value).
     func Type() string {
         return kindName(this.kind)

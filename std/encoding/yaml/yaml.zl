@@ -58,6 +58,16 @@ struct Value {
         return this.kind == 6
     }
 
+    // IsArray is IsSeq under the name shared with json.Value and toml.Value.
+    func IsArray() bool {
+        return this.kind == 5
+    }
+
+    // IsObject is IsMap under the name shared with json.Value and toml.Value.
+    func IsObject() bool {
+        return this.kind == 6
+    }
+
     // "null", "bool", "int", "float", "string", "seq" or "map".
     func Type() string {
         return kindName(this.kind)

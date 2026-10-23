@@ -1312,7 +1312,9 @@ func ToJson<T>(value T) string {
   ошибки с путём (`users[2].id: expected int, found string`);
   `ParseValue(text) Value!` — динамическое дерево (`Type`, `IsNull`,
   `Bool`, `Float`, `Int`, `String`, `Len`, `Index`, `Get`, `Has`, `Keys`,
-  `Items`, `Format`), конструкторы `NewNull`/`NewBool`/`NewNumber`/
+  `Items`, `Format`; `IsObject`/`IsArray` — общие имена контейнеров у
+  `json.Value`, `yaml.Value` (там же родные `IsMap`/`IsSeq`) и
+  `toml.Value` (`IsTable`/`IsArray`)), конструкторы `NewNull`/`NewBool`/`NewNumber`/
   `NewString`/`NewArray`/`NewObject`, `Decode<T>(v)`, `Quote(s)`.
   Разбор — C (`runtime/src/std_json.c`): текст за один проход
   превращается в документ-арену узлов, `Value` — узел такого документа

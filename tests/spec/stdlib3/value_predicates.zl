@@ -1,0 +1,17 @@
+// test: json.Value, yaml.Value and toml.Value share IsObject/IsArray for their container kinds; the format-native names IsMap/IsSeq and IsTable stay
+// status: passing
+namespace spec.stdlib3.value_predicates
+
+import io
+import encoding.json
+import encoding.yaml
+import encoding.toml
+
+func main() void! {
+    var j = json.ParseValue("{\"a\": [1, 2]}")?
+    println(j.IsObject(), j.IsArray(), j.Get("a").IsArray(), j.Get("a").IsObject())
+    var y = yaml.ParseValue("a: [1, 2]")?
+    println(y.IsObject(), y.IsMap(), y.IsArray(), y.Get("a").IsArray(), y.Get("a").IsSeq())
+    var t = toml.ParseValue("a = [1, 2]")?
+    println(t.IsObject(), t.IsTable(), t.IsArray(), t.Get("a").IsArray(), t.Get("a").IsObject())
+}

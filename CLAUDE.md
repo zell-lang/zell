@@ -96,8 +96,7 @@ repos in `zell-lang` (`zconf`, `example-web-service`, `example-cli`,
 
 Next, in this order:
 
-1. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md` items 11 (unify
-   `json/yaml/toml.Value` methods), 17 (`web` error-mapping hook
+1. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md` items 17 (`web` error-mapping hook
    `MapError<E>(status)`), 19 (`ExitCoder` through `?("ctx")` wrapping), 20
    (generic/local type aliases), 25 (panic backtraces with `file:line` from
    a compact pc table, usable stripped). Simplify the showcase repos to one
