@@ -202,6 +202,49 @@ static void pt_add(const curve *k, pt *r, const pt *p, const pt *q) {
     l4_copy(r->Z, Z3);
 }
 
+/* Exception-free doubling, RCB 2016 algorithm 6 (a = -3). */
+static void pt_dbl(const curve *k, pt *r, const pt *p) {
+    const mont *f = &k->fp;
+    limb4 t0, t1, t2, t3, X3, Y3, Z3;
+    mont_mul(f, t0, p->X, p->X);
+    mont_mul(f, t1, p->Y, p->Y);
+    mont_mul(f, t2, p->Z, p->Z);
+    mont_mul(f, t3, p->X, p->Y);
+    mont_add(f, t3, t3, t3);
+    mont_mul(f, Z3, p->X, p->Z);
+    mont_add(f, Z3, Z3, Z3);
+    mont_mul(f, Y3, k->b, t2);
+    mont_sub(f, Y3, Y3, Z3);
+    mont_add(f, X3, Y3, Y3);
+    mont_add(f, Y3, X3, Y3);
+    mont_sub(f, X3, t1, Y3);
+    mont_add(f, Y3, t1, Y3);
+    mont_mul(f, Y3, X3, Y3);
+    mont_mul(f, X3, X3, t3);
+    mont_add(f, t3, t2, t2);
+    mont_add(f, t2, t2, t3);
+    mont_mul(f, Z3, k->b, Z3);
+    mont_sub(f, Z3, Z3, t2);
+    mont_sub(f, Z3, Z3, t0);
+    mont_add(f, t3, Z3, Z3);
+    mont_add(f, Z3, Z3, t3);
+    mont_add(f, t3, t0, t0);
+    mont_add(f, t0, t3, t0);
+    mont_sub(f, t0, t0, t2);
+    mont_mul(f, t0, t0, Z3);
+    mont_add(f, Y3, Y3, t0);
+    mont_mul(f, t0, p->Y, p->Z);
+    mont_add(f, t0, t0, t0);
+    mont_mul(f, Z3, t0, Z3);
+    mont_sub(f, X3, X3, Z3);
+    mont_mul(f, Z3, t0, t1);
+    mont_add(f, Z3, Z3, Z3);
+    mont_add(f, Z3, Z3, Z3);
+    l4_copy(r->X, X3);
+    l4_copy(r->Y, Y3);
+    l4_copy(r->Z, Z3);
+}
+
 static void pt_infinity(const curve *k, pt *r) {
     memset(r, 0, sizeof *r);
     l4_copy(r->Y, k->fp.one);
@@ -221,7 +264,7 @@ static void pt_mul(const curve *k, pt *r, const uint8_t s[32], const pt *p) {
     for (int i = 2; i < 16; i++) pt_add(k, &tab[i], &tab[i - 1], p);
     pt_infinity(k, &acc);
     for (int w = 0; w < 64; w++) {
-        for (int d = 0; d < 4; d++) pt_add(k, &acc, &acc, &acc);
+        for (int d = 0; d < 4; d++) pt_dbl(k, &acc, &acc);
         unsigned nib = (s[w / 2] >> (w % 2 ? 0 : 4)) & 15;
         pt sel;
         memset(&sel, 0, sizeof sel);
