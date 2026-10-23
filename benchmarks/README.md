@@ -878,3 +878,7 @@ heap objects per call), sentinel errors with traces, Ed25519/P-256
 per `Get`/`Index`; LTO between program and runtime, or a cheaper key
 compare in `rtGet`, is the next step), `fanout_fanin`'s pool phase and
 `timers` lateness (timer wake-ups go through the global queue).
+
+## json_codec on .NET
+
+`benchmarks/json_codec/dotnet/` is the same program on System.Text.Json (typed path through a `[JsonSerializable]` source-generated context, schema-less path through `JsonDocument`/`JsonElement`, net10.0, workstation GC, invariant globalization). `dotnet/run.sh` publishes once (`dotnet publish -c Release -r linux-x64 --self-contained false -o bin`) and runs it with the same `SCALE`, `JSON_DOC_BYTES` and `JSON_DOC_FILE` variables as the others. `benchmarks/json_codec/compare.sh` (`ZELL=... JSON_DOC_FILE=... ./compare.sh`) builds and runs Zell, Go and .NET once each on one document and prints the checksum and phase lines side by side, then states whether the checksum lines are identical. The .NET value-format phase writes sorted keys and shortest-round-trip numbers to match Go's `json.Marshal(any)` byte for byte.
