@@ -287,7 +287,8 @@ runtime() {
     rc=$1; rtr=$2; ro=$3; shift 3
     b=build/bundle/$rtr
     rm -rf "$root/runtime/$b"
-    make -s -C "$root/runtime" -j"$JOBS" CROSS="$rc" BUILD="$b" CLANG="$CLANG" "CFLAGS_EXTRA=-g0" "$@" "$b/libzell_rt.a"
+    # not -s: a failing compile must show its command line in the CI log
+    make -C "$root/runtime" -j"$JOBS" CROSS="$rc" BUILD="$b" CLANG="$CLANG" "CFLAGS_EXTRA=-g0" "$@" "$b/libzell_rt.a" | grep -vE '^(clang|cc|ar) ' || true
     cp "$root/runtime/$b/libzell_rt.a" "$ro/libzell_rt.a"
     "$STRIP" --strip-debug "$ro/libzell_rt.a"
 }

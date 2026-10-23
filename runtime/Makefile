@@ -72,7 +72,10 @@ BUILD   := build/$(CROSS)-stubsdk
 OSFLAGS := -nostdlibinc -isystem stub-sdk/macos/include
 else ifneq ($(SDKROOT),)
 BUILD   := build/$(CROSS)
-OSFLAGS := -isysroot $(SDKROOT)
+# -mmacos-version-min repeats the -target version: the SDK's availability
+# checks (sqlite3_changes64 is macOS 12.3+) must see the deployment target
+# whichever clang and SDK pair the build machine has.
+OSFLAGS := -isysroot $(SDKROOT) -mmacos-version-min=$(MACOS_MIN)
 else
 # No SDK: compile-check against the stub headers; the objects are not a runtime.
 BUILD   := build/$(CROSS)-stubcheck
