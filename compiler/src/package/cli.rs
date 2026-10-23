@@ -293,6 +293,7 @@ pub fn env(args: &[String]) -> Result<String, String> {
         ("ZELL_SUMDB", std::env::var("ZELL_SUMDB").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "off".into())),
         ("ZELL_NOSUMDB", get("ZELL_NOSUMDB")),
         ("ZELL_LINKER", crate::toolchain::linker_description()),
+        ("ZELL_LTO", std::env::var("ZELL_LTO").ok().filter(|s| s == "1").map(|_| "1 (ThinLTO with the runtime in --release builds)".to_string()).unwrap_or_else(|| "off".into())),
         ("ZELL_TARGETS", crate::toolchain::targets_description()),
     ];
     if args.is_empty() {

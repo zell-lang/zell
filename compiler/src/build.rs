@@ -243,6 +243,24 @@ fn find_clang() -> Result<String, String> {
         .ok_or_else(|| "cannot find clang (tried clang-18, clang)".into())
 }
 
+/// Whether a `--release` host build links the program and the runtime with
+/// ThinLTO: opt-in with `ZELL_LTO=1` (docs/PLATFORMS.md «LTO»). The
+/// program is then emitted as bitcode and linked by `clang -flto=thin
+/// -fuse-ld=lld` with the bitcode runtime of `make -C runtime LTO=1`
+/// ([`lto_runtime`]) when there is one. Off by default: it needs the
+/// system clang and lld, and the link takes several seconds.
+fn lto_enabled(opts: &BuildOptions) -> bool {
+    opts.release && !cfg!(target_os = "windows") && std::env::var("ZELL_LTO").is_ok_and(|v| v == "1")
+}
+
+/// The bitcode runtime archive beside the native one `rt`
+/// (`runtime/libzell_rt.a` -> `runtime/build/lto/libzell_rt.a`, or
+/// `<dir>/lto/libzell_rt.a` for an installed `<dir>/libzell_rt.a`).
+fn lto_runtime(rt: &Path) -> Option<PathBuf> {
+    let dir = rt.parent()?;
+    [dir.join("build/lto/libzell_rt.a"), dir.join("lto/libzell_rt.a")].into_iter().find(|p| p.is_file())
+}
+
 /// Whether host links use lld (`ZELL_LINKER=lld`, Linux, `ld.lld` on PATH).
 fn use_lld() -> bool {
     static LLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -575,8 +593,17 @@ fn emit_plain(program: &Program, name: &str, output: PathBuf, opts: &BuildOption
         Emit::Exe => {}
     }
     let libs = module_link_libs(&module);
-    let obj = output.with_extension(format!("{}.o", std::process::id()));
-    write_object_par(&machine, &module, &obj, opts)?;
+    let lto = lto_enabled(opts);
+    let obj = output.with_extension(format!("{}.{}", std::process::id(), if lto { "bc" } else { "o" }));
+    if lto {
+        // Bitcode: the ThinLTO link inlines runtime helpers into the program.
+        let _t = phase("bitcode");
+        if !module.write_bitcode_to_path(&obj) {
+            return Err(format!("cannot write {}", obj.display()));
+        }
+    } else {
+        write_object_par(&machine, &module, &obj, opts)?;
+    }
     let r = link(&[obj.clone()], &output, &libs, opts);
     if r.is_ok() && opts.emits_debug_info() {
         macos_dsym(&output, opts);
@@ -698,13 +725,25 @@ fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions) -> 
     let strip = opts.strip || (opts.release && !opts.debug_info);
     let lo = crate::crosslink::LinkOpts { release: opts.release, strip, static_link: opts.static_link, export_dynamic: !opts.release && !opts.static_link, clang: &clang };
     let cross = !target.is_host() || target.os == "windows";
+    let lto = !cross && lto_enabled(opts);
     let rt = if cross {
         // no runtime for the target: say first what else the clang link would lack (the macOS SDK, ...)
         crate::crosslink::find_runtime(&target).or_else(|e| crate::crosslink::preflight(&target).and(Err(e)))?
+    } else if lto {
+        let rt = find_runtime()?;
+        match lto_runtime(&rt) {
+            Some(bc) => bc,
+            None => {
+                log(opts, format!("no bitcode runtime beside {} (make -C runtime LTO=1): ThinLTO over the program only", rt.display()));
+                rt
+            }
+        }
     } else {
         find_runtime()?
     };
-    let (mut cmd, linker) = if let Some(r) = crate::crosslink::bundled_link(&target, objs, &rt, output, libs, &lo) {
+    let (mut cmd, linker) = if lto {
+        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, true), clang.clone())
+    } else if let Some(r) = crate::crosslink::bundled_link(&target, objs, &rt, output, libs, &lo) {
         r?
     } else if cross {
         // Cross link with the system clang (docs/PLATFORMS.md): the
@@ -713,9 +752,9 @@ fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions) -> 
         find_clang()?;
         crate::crosslink::link_command(&target, objs, &rt, output, libs, &lo)?
     } else {
-        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?), clang.clone())
+        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, false), clang.clone())
     };
-    log(opts, format!("linking {} for {} ({} object(s), runtime {}) with {linker}", output.display(), target.triple, objs.len(), rt.display()));
+    log(opts, format!("linking {} for {} ({} object(s), runtime {}) with {linker}{}", output.display(), target.triple, objs.len(), rt.display(), if lto { " (ThinLTO)" } else { "" }));
     let out = cmd.output().map_err(|e| format!("cannot run {}: {e}", cmd.get_program().to_string_lossy()))?;
     if !out.status.success() {
         return Err(format!("linking failed:\n{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout)));
@@ -725,14 +764,18 @@ fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions) -> 
 
 /// The host link through the system clang driver (a runtime without
 /// bundled link inputs, e.g. `runtime/libzell_rt.a` of the repository).
-fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str], opts: &BuildOptions, clang: &str) -> Command {
+fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str], opts: &BuildOptions, clang: &str, lto: bool) -> Command {
     let mut cmd = Command::new(clang);
     cmd.args(objs).arg(rt);
     for l in libs {
         cmd.arg(format!("-l{l}"));
     }
     cmd.arg("-lpthread").arg("-lm").arg("-o").arg(output);
-    if use_lld() {
+    if lto {
+        // ThinLTO over the program's bitcode and the bitcode runtime
+        // (`lto_enabled`); lld runs the LTO backend itself.
+        cmd.arg("-flto=thin").arg("-fuse-ld=lld").arg("-O2");
+    } else if use_lld() {
         // Opt-in: lld links faster and lays out smaller executables (no
         // page padding between segments: hello 10 KB instead of 15 KB), but
         // its code layout cost 15% on benchmarks/fib, so it is not the default.

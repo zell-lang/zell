@@ -2209,7 +2209,8 @@ returned as the error. `fnval` is a closure-convention thunk
 `src/std_json.c`. The runtime parses a JSON text (RFC 8259) in one pass
 into a **document**: one array of 16-byte nodes in depth-first document
 order, owned by the document together with a byte arena for the strings
-that had escapes and the lazily built index tables of long arrays. The
+that had escapes and the index tables of long arrays (built as the parser
+closes them, or by `rt_index` for an array that has none). The
 document retains the source text (string nodes without escapes point into
 it) and is freed in one call. Handles are addresses passed as `int64_t`:
 the document (`rt_parse` result) and nodes (`0` = no node, which every
@@ -2260,7 +2261,7 @@ control byte in 16-byte blocks; whitespace runs), else portable loops.
 | `rtFirst(n)` | `int64_t zell_encoding_json_rt_first(int64_t n)` | first element / first key node, 0 for an empty container or a scalar |
 | `rtNext(n)` | `int64_t zell_encoding_json_rt_next(int64_t n)` | the node after `n`'s subtree: the next sibling; after a key node, its value. Not bounds-checked: callers count with `rtLen` |
 | `rtGet(obj, key)` | `int64_t zell_encoding_json_rt_get(int64_t obj, const zell_string *key)` | the value of the last pair named `key` (bytewise), 0 if absent or not an object |
-| `rtIndex(d, arr, i)` | `int64_t zell_encoding_json_rt_index(int64_t d, int64_t arr, int64_t i)` | element `i`, 0 if out of range or not an array. Arrays of 16+ elements get a `uint32_t` offset table in the document on the first call (O(1) afterwards); shorter ones are walked |
+| `rtIndex(d, arr, i)` | `int64_t zell_encoding_json_rt_index(int64_t d, int64_t arr, int64_t i)` | element `i`, 0 if out of range or not an array. Arrays of 16+ elements get a `uint32_t` offset table in the document (built by the parser when the array closes, while its nodes are in cache, or on the first call otherwise; O(1) lookups); shorter ones are walked |
 | `rtWNew()` | `int64_t zell_encoding_json_rt_w_new(void)` | a writer: one uniquely owned `zell_string` grown in place (`zell__object_resize`, doubling) |
 | `rtWFinish(w)` | `zell_string *zell_encoding_json_rt_w_finish(int64_t w)` | +1 the text written so far; frees the writer (its capacity stays with the string) |
 | `rtWRaw(w, s)` | `void zell_encoding_json_rt_w_raw(int64_t w, const zell_string *s)` | appends the bytes of `s` as they are (`{`, `,`, `null`, ...) |

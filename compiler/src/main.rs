@@ -44,7 +44,7 @@ commands:
   why <module|name>              print every chain of requirements leading to a package
   vendor                         copy all modules into vendor/ (builds then use it)
   store verify|prune|path        check, clean up or locate the module store
-  env [NAME ...]                 print ZELL_STD, ZELL_HOME, ZELL_STORE, ZELL_LINKER, ZELL_TARGETS, ...
+  env [NAME ...]                 print ZELL_STD, ZELL_HOME, ZELL_STORE, ZELL_LINKER, ZELL_LTO, ZELL_TARGETS, ...
   doctor                         check that the toolchain (linker, std, every target's link inputs) is complete
   proxy serve --dir <cache> [--addr host:port] [--upstream direct|off|<url>] [--sumdb]
                                  serve a module proxy (static layout) and checksum log
@@ -73,6 +73,7 @@ build options:
   --strip              no debug info, stripped executable
   -O0..-O3             optimisation level
   --static             fully static executable
+  ZELL_LTO=1           (env) ThinLTO of a --release build with the runtime (docs/PLATFORMS.md)
   --leak-check         report objects still alive at exit, exit non-zero
   --no-error-trace     do not record error return traces (errors.Trace is empty)
   --deny-warnings      treat warnings (W0001 reference cycles, ...) as errors
