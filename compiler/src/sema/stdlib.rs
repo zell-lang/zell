@@ -774,7 +774,7 @@ pub const FUNCS: &[StdFunc] = &[
     // (reflect_src/builder.zl, stdlib_src/io.zl); bounds are clamped
     f!("strings", "rtCopy", "[]byte, int, []byte, int, int", "void", "zell_strings_rt_copy"),
     f!("strings", "rtCopyString", "[]byte, int, string, int, int", "void", "zell_strings_rt_copy_string"),
-    f!("strings", "rtIndexByte", "[]byte, int, int", "int", "zell_strings_rt_index_byte"),
+    f!("strings", "rtIndexByte", "[]byte, int, int, int", "int", "zell_strings_rt_index_byte"),
     f!("strings", "rtMakeBytes", "int", "[]byte", "zell_strings_rt_make_bytes"),
     f!("strings", "rtSort", "[]string", "void", "zell_strings_rt_sort"),
     f!("strings", "Title", "string", "string", "zell_strings_title"),

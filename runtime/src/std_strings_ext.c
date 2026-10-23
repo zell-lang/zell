@@ -336,10 +336,11 @@ void zell_strings_rt_copy_string(zell_slice *dst, int64_t dst_off, const zell_st
     if (n > 0) memcpy((char *)dst->data + dst_off, s->data + src_off, (size_t)n);
 }
 
-int64_t zell_strings_rt_index_byte(const zell_slice *b, int64_t from, int64_t c) {
+int64_t zell_strings_rt_index_byte(const zell_slice *b, int64_t from, int64_t to, int64_t c) {
     if (from < 0) from = 0;
-    if (from >= b->len) return -1;
-    const char *p = memchr((const char *)b->data + from, (int)(c & 0xff), (size_t)(b->len - from));
+    if (to > b->len) to = b->len;
+    if (from >= to) return -1;
+    const char *p = memchr((const char *)b->data + from, (int)(c & 0xff), (size_t)(to - from));
     return p ? (int64_t)(p - (const char *)b->data) : -1;
 }
 

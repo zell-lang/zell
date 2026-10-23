@@ -893,7 +893,7 @@ struct SplitResult {
 
 // Splits into lines without "\n" / "\r\n" (the last line may lack one).
 func ScanLines(data []byte, atEOF bool) SplitResult {
-    var i = strings.rtIndexByte(data, 0, 10)
+    var i = strings.rtIndexByte(data, 0, len(data), 10)
     if i >= 0 {
         var end = i
         if end > 0 && data[end - 1] == 13 {
@@ -968,10 +968,12 @@ struct Scanner {
     err   error
     done  bool
     max   int
+    lines bool // split is ScanLines: Scan finds "\n" with memchr, no closure call
 
     // Sets the split function (before the first Scan).
     func Split(f func([]byte, bool) SplitResult) {
         this.split = f
+        this.lines = false
     }
 
     // Sets the maximum token size (default 64 KiB).
@@ -985,7 +987,31 @@ struct Scanner {
             return false
         }
         for {
-            if this.end > this.start || this.eof {
+            if this.lines {
+                var i = strings.rtIndexByte(this.buf, this.start, this.end, 10)
+                if i >= 0 {
+                    var end = i
+                    if end > this.start && this.buf[end - 1] == 13 {
+                        end -= 1
+                    }
+                    this.tok = this.buf[this.start..end]
+                    this.start = i + 1
+                    return true
+                }
+                if this.eof {
+                    if this.end > this.start {
+                        var end = this.end
+                        if this.buf[end - 1] == 13 {
+                            end -= 1
+                        }
+                        this.tok = this.buf[this.start..end]
+                        this.start = this.end
+                        return true
+                    }
+                    this.done = true
+                    return false
+                }
+            } else if this.end > this.start || this.eof {
                 var res = this.split(this.buf[this.start..this.end], this.eof)
                 if res.Advance > 0 || res.Ok {
                     this.start += res.Advance
@@ -1047,7 +1073,7 @@ struct Scanner {
 
 // A Scanner splitting r into lines.
 func NewScanner(r io.Reader) *Scanner {
-    return new Scanner{r: r, split: ScanLines, buf: makeBuf(4096), max: 65536}
+    return new Scanner{r: r, split: ScanLines, buf: makeBuf(4096), max: 65536, lines: true}
 }
 
 // All lines of r (without line endings).

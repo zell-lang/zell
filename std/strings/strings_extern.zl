@@ -162,7 +162,7 @@ extern func rtCopyString(a []byte, b int, c string, d int, e int)
 
 // Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_strings_rt_index_byte (runtime/src/std_*.c).
-extern func rtIndexByte(a []byte, b int, c int) int
+extern func rtIndexByte(a []byte, b int, c int, d int) int
 
 // Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_strings_rt_make_bytes (runtime/src/std_*.c).
