@@ -17,6 +17,11 @@ extern func Getenv(key string) string
 // C: zell_os_setenv (runtime/src/std_*.c).
 extern func Setenv(key string, value string) void!
 
+// Environ returns the environment as "KEY=value" strings, including changes made with Setenv.
+//
+// C: zell_os_environ (runtime/src/std_*.c).
+extern func Environ() []string
+
 // Exit terminates the program with status code; deferred calls do not run.
 //
 // C: zell_os_exit (runtime/src/std_*.c).

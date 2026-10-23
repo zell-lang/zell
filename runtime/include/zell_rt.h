@@ -766,6 +766,7 @@ int64_t       zell_time_weekday(int64_t ms);  /* 0 = Sunday */
 zell_string *zell_os_getenv(const zell_string *name);   /* "" if unset */
 void          zell_os_setenv(const zell_string *name, const zell_string *value,
                               zell_error **err);
+void          zell_os_environ(zell_slice *out);          /* owned []string "K=V" */
 ZELL_NORETURN void zell_os_exit(int64_t code);
 zell_string *zell_os_hostname(zell_error **err);
 int64_t       zell_os_pid(void);

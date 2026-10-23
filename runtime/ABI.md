@@ -1888,6 +1888,7 @@ only holds untyped floats (`Pi`, `E`), and `2^63-1` is not representable.
 | `Args() []string` | `void zell_os_args(zell_slice *out)` | existing function (11): program name first |
 | `Getenv(name) string` | `zell_string *zell_os_getenv(const zell_string *name)` | `""` if unset |
 | `Setenv(name, value) void!` | `void zell_os_setenv(const zell_string *name, const zell_string *value, zell_error **err)` | EINVAL for an empty name or one containing `=` |
+| `Environ() []string` | `void zell_os_environ(zell_slice *out)` | owned `[]string` of `"KEY=value"` in the process's current environment (after `Setenv`), from `zell__plat_environ` (POSIX `environ`, Windows `GetEnvironmentStringsW`) |
 | `Exit(code int)` | `ZELL_NORETURN void zell_os_exit(int64_t code)` | = `zell_exit((int32_t)code)`: flushes stdout/stderr, no defers run |
 | `Hostname() string!` / `Cwd() string!` | `zell_string *zell_os_hostname(zell_error **err)` / `zell_os_cwd` | `gethostname` / `getcwd` |
 | `Pid() int` | `int64_t zell_os_pid(void)` | |

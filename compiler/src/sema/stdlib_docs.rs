@@ -104,6 +104,7 @@ pub const DOCS: &[(&str, &str, &str)] = &[
     ("os.Args", "", "Args returns the command-line arguments, starting with the program name."),
     ("os.Getenv", "key", "Getenv returns the value of environment variable key, or \"\"."),
     ("os.Setenv", "key, value", "Setenv sets environment variable key to value."),
+    ("os.Environ", "", "Environ returns the environment as \"KEY=value\" strings, including changes made with Setenv."),
     ("os.Exit", "code", "Exit terminates the program with status code; deferred calls do not run."),
     ("os.Hostname", "", "Hostname returns the host name of the machine."),
     ("os.Pid", "", "Pid returns the process id."),
