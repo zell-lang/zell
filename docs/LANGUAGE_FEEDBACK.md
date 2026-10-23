@@ -1,0 +1,59 @@
+# Language and framework gaps found while writing the showcase projects
+
+Collected on 2026-10-23 while writing `zell-lang/zconf` and
+`zell-lang/example-web-service` against master `6ff3eae`. Each item is a
+real obstacle met in ordinary application code, with the workaround used;
+they are the next inputs for DESIGN.md / stdlib / `zell test` work.
+
+## Language
+1. **No comma-ok map lookup**: `var (v, ok) = m[k]` and `k in m` do not exist;
+   libraries keep a parallel `map[string]bool`. Spec decision needed (Go
+   semantics are the default per CLAUDE.md).
+2. **A method chain cannot start a line with `.`**; the dot must end the
+   previous line (the lexer's automatic `;`). Go has the same rule, but it is
+   the single most common surprise for C#/Kotlin users — consider allowing a
+   leading `.` when the previous line ends an expression.
+3. **`enum` is a keyword and cannot be an attribute field name** (only `default`
+   is special-cased), so `@Conf(enum: "a,b")` had to become `oneOf:`.
+4. **Lower-case attribute structs are private to their package**: user
+   libraries must capitalise (`@zconf.Conf`), while std uses `@json`, `@cli.flag`.
+5. **`async func` in an interface is accepted but never satisfied**, with a
+   contradictory message ("method Get has type func(int) int!, want func(int)
+   int!"); workaround: `func X() Task<T!>` delegating to a private async method.
+6. **`defer this.mu.Unlock()` on a value `task.Mutex` field is rejected**
+   ("interior pointer"); the field has to be `*task.Mutex`.
+7. **Suspicious trace locations** in release builds (`web.Scope.Get` pointing
+   at a test file line).
+
+## Standard library
+8. **No `os.Environ()`** — zconf reads `/proc/self/environ` (Linux-only, misses
+   `os.Setenv` after start).
+9. **`errors.Is`/`As` ignore a struct's `Unwrap()` method** — only `errors.Wrap`
+   chains are followed.
+10. **The built-in attribute name `json` shadows the `encoding.json` namespace**
+    inside a package (`json.Value` → "Value is not a static method of struct
+    json"); same for `yaml`, `toml`. Users write `encoding.json.Value`.
+11. **`toml.Value`, `yaml.Value`, `json.Value` expose different method names**
+    for the same idea (`IsTable`/`IsMap`/`IsObject`, `IsArray`/`IsSeq`).
+12. `math.Max` is float-only; `slices.Map` over ORM `ToList()` yields `*Row`.
+
+## Tooling
+13. **`zell test` does not support `async @test`** (`func(*testing.T)
+    Task<void>` is not accepted); async examples with `// Output:` were used.
+14. **`zell test` builds only the package's own `src/`, not its dependencies**
+    (`compiler/src/testrun.rs:97-102`): a package importing a git dependency
+    cannot be tested, which forced the `server/` split in the web service.
+15. **A dependency's `*_test.zl` files are compiled into dependents** (zconf's
+    test-only `Database` struct → "ambiguous name Database" downstream).
+16. `zell init --help` is an "unknown option".
+
+## Framework (`web`)
+17. **Handler errors become Problem Details at the endpoint**
+    (`std/web/web_app.zl:581`, `writeError` at `:1079`): no middleware or hook
+    sees the original error, so domain-error → status mapping lives in every
+    controller action; and unknown errors return their message in `detail`
+    (500) — an information leak. Wanted: an error-mapping hook/middleware
+    (`app.MapError<ErrNotFound>(404)`) and a generic 500 body by default.
+
+Not an obstacle but noted: OpenAPI 3.1 generation, `web.TestServer`, DI,
+request id / tracing / metrics middleware all worked as documented.

@@ -40,7 +40,7 @@ These are separate repositories, **being created at the time of writing**
 `zell test`. They need the toolchain from the
 [README](../README.md#install).
 
-### zconf (in progress)
+### zconf — published (v0.1.0)
 
 [github.com/zell-lang/zconf](https://github.com/zell-lang/zconf): a layered
 configuration library. Values come from JSON, YAML, TOML and `.env` files,
@@ -54,7 +54,7 @@ git clone https://github.com/zell-lang/zconf && cd zconf
 zell test
 ```
 
-### example-web-service (in progress)
+### example-web-service — published
 
 [github.com/zell-lang/example-web-service](https://github.com/zell-lang/example-web-service):
 a REST service in a clean architecture. Shows: dependency injection,
