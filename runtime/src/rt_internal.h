@@ -183,6 +183,57 @@ ZELL_HIDDEN void zell__map_visit(void *obj, zell_cycle_cb cb, void *ctx);
  * less), and move one object out of / back into the live count (an object
  * whose Drop ran but whose memory is kept for a while). */
 ZELL_HIDDEN void zell__object_free(zell_object *o);
+/* ---- bounded release depth (mem.c; ABI.md 3.2 "deferred drop") ----
+ *
+ * A dead object's drop releases its children, and a child whose count
+ * reaches zero is finalized in turn: without a bound, releasing a 2M-node
+ * linked list recurses release -> drop -> release ... 2M frames deep and
+ * overflows the stack. Every finalizer (the plain release in mem.c, the
+ * biased/unowned one in rc.c, the collector's in cycles.c) brackets its
+ * `drop` with zell__dead_enter/zell__dead_leave:
+ *
+ *     if (!zell__dead_enter()) { zell__dead_push(fin, o, w); return; }
+ *     ... drop, free ...
+ *     zell__dead_leave();
+ *
+ * Fewer than ZELL_DEAD_DEPTH finalizations nested on this thread run on
+ * the stack as before (the shallow common case costs two thread-local
+ * loads). The finalizer that would nest deeper is queued instead:
+ * `fin(o, w)` is pushed onto a thread-local worklist, which the outermost
+ * finalization (depth 1) drains after its own drop. The frame at the
+ * maximum depth reverses the entries its children queued, so the stack
+ * pops them first-pushed first and the order of Drop() calls is exactly
+ * the recursive one: a parent before its children, siblings and their
+ * subtrees in field order. */
+#define ZELL_DEAD_DEPTH 64
+#define ZELL_DEAD_PENDING ((int64_t)1 << 32)   /* the worklist is not empty */
+typedef void (*zell__dead_fn)(zell_object *o, int64_t w);
+/* The nesting depth (low 32 bits) | ZELL_DEAD_PENDING: one word, so the
+ * hot path touches a single thread-local. */
+ZELL_HIDDEN extern _Thread_local int64_t zell__dead_state;
+/* Queues `fin(o, w)` (mem.c); sets ZELL_DEAD_PENDING. */
+ZELL_HIDDEN void zell__dead_push(zell__dead_fn fin, zell_object *o, int64_t w);
+/* The last two levels: enters depth ZELL_DEAD_DEPTH remembering the
+ * worklist size (the mark of the entries its children will queue), or
+ * returns 0 at the bound. */
+ZELL_HIDDEN int zell__dead_enter_slow(void);
+/* The worklist is not empty as a frame at `depth` leaves: reverses the
+ * entries its children queued (depth ZELL_DEAD_DEPTH) or drains the
+ * worklist (depth 1). */
+ZELL_HIDDEN void zell__dead_settle(int64_t depth);
+
+static inline __attribute__((always_inline)) int zell__dead_enter(void) {
+    int64_t s = zell__dead_state;
+    if (__builtin_expect((int32_t)s >= ZELL_DEAD_DEPTH - 1, 0)) return zell__dead_enter_slow();
+    zell__dead_state = s + 1;
+    return 1;
+}
+
+static inline __attribute__((always_inline)) void zell__dead_leave(void) {
+    int64_t s = zell__dead_state;
+    if (__builtin_expect(s & ZELL_DEAD_PENDING, 0)) zell__dead_settle((int32_t)s);
+    zell__dead_state = s - 1;
+}
 /* Per-type live counters for diag (diag_heap.c): on with
  * ZELL_DIAG_HEAP=1; mem.c counts every allocation (+1) and free (-1). */
 /* Weak: diag_heap.c is linked only by programs that use diag's heap
