@@ -54,7 +54,9 @@
 
   // Statement terminators: the lexer layer inserts SEMI at a newline after
   // IDENTIFIER, literals, RETURN, BREAK, CONTINUE, NIL, TRUE, FALSE, THIS,
-  // UNDERSCORE, RPAREN, RBRACE, RBRACKET, QUESTION, BANG (Go-style).
+  // UNDERSCORE, RPAREN, RBRACE, RBRACKET, QUESTION, BANG, GT, SHR (Go-style),
+  // never directly inside ( ) or [ ], and not when the next line's first
+  // token is DOT (a line starting with `.` continues the previous one).
   // `eos` below accepts either an explicit or an inserted SEMI.
 }
 

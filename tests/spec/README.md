@@ -667,6 +667,14 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     the caller. — `async2/sync_fast_path`, `async2/sync_error_trace`,
     `async2/sync_defer_order`
 
+### Language feedback decisions (docs/LANGUAGE_FEEDBACK.md)
+
+79. **A line starting with `.` continues the previous line**
+    (`DESIGN.md` "Точки с запятой"): the automatic `;` before it is not
+    inserted, also across comments and blank lines; `zell fmt` keeps such
+    a chain broken (one `.name` per line, indented). An explicit `;`
+    still ends the statement. — `basics/leading_dot_chain`
+
 ## Ambiguities found in DESIGN.md
 
 Resolved in `DESIGN.md` since: `break` in `switch` (Go semantics, written

@@ -1,0 +1,10 @@
+namespace app
+
+func main() {
+    var s = b.Add("a")
+      .Add("b")  // why
+
+   // own line
+   .Join()
+    var t = x .Len()
+}

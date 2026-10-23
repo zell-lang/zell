@@ -6,6 +6,9 @@
 //! (see [`TokenKind::ends_statement`]). Unlike Go, no semicolons are inserted
 //! while directly inside `( )` or `[ ]`, so argument lists and slice literals
 //! may span lines without trailing commas. Inside `{ }` the normal rule applies.
+//! A line whose first token is `.` continues the previous line: the
+//! semicolon inserted at the newline before it is dropped, so method chains
+//! may break before the dot.
 //!
 //! **Trivia** ([`lex_with_trivia`]): comments and runs of newlines are
 //! recorded and attached to the following real token as its *leading
@@ -184,6 +187,15 @@ impl Lexer<'_, '_> {
     }
 
     fn push(&mut self, kind: TokenKind, start: usize) {
+        // A line starting with `.` continues the previous one (method chains
+        // broken before the dot): drop the automatic `;` inserted at the
+        // newline. Automatic semicolons are the only zero-width `Semi`s.
+        if kind == TokenKind::Dot
+            && self.tokens.last().is_some_and(|t| t.kind == TokenKind::Semi && t.span.start == t.span.end)
+        {
+            self.tokens.pop();
+            self.leading.pop();
+        }
         self.attach_trivia();
         self.tokens.push(Token { kind, span: Span::new(start as u32, self.pos as u32) });
     }
@@ -771,6 +783,9 @@ mod tests {
         // A keyword used as a name after `.` ends a statement too.
         assert_eq!(kinds("a.async\nb"), vec![ident("a"), Dot, Async, Semi, ident("b"), Semi, Eof]);
         // Fallible types and `?` end statements.
+        // A leading `.` continues the previous line (also across comments).
+        assert_eq!(kinds("a\n  .b()\n// c\n.d\nx"), vec![ident("a"), Dot, ident("b"), LParen, RParen, Dot, ident("d"), Semi, ident("x"), Semi, Eof]);
+        assert_eq!(kinds("a;\n.b"), vec![ident("a"), Semi, Dot, ident("b"), Semi, Eof]);
         assert_eq!(kinds("int!\nx?\n"), vec![ident("int"), Bang, Semi, ident("x"), Question, Semi, Eof]);
     }
 
