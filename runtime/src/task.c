@@ -67,6 +67,7 @@ typedef struct worker {
     int64_t spin_until;            /* monotonic ns: when to give the token up and park */
     int spare;
     int alive;                     /* under q_mu: the slot is in use */
+    int64_t live_tasks;            /* tasks made minus tasks dropped on this thread (diag; summed by zell__live_tasks) */
 } worker;
 
 static worker *workers[MAX_WORKERS];   /* slots, allocated once and reused by spares */
@@ -831,7 +832,14 @@ static _Thread_local zell__plat_mutex t_park_mu = ZELL_PLAT_MUTEX_INIT;
 static _Thread_local zell__plat_cond t_park_cv = ZELL_PLAT_COND_INIT;
 static int64_t g_await_spurious;   /* diag: wake-ups of zell_task_await that found the task still pending */
 
-static int64_t g_live_tasks; /* diag */
+static int64_t g_live_tasks; /* diag: tasks made minus dropped on non-worker threads (workers count in their own slot) */
+
+/* Live-task bookkeeping without a shared atomic on the hot path: a worker
+ * counts in its own slot, other threads in g_live_tasks. */
+static inline void live_tasks_add(int64_t d) {
+    if (t_w) t_w->live_tasks += d;
+    else __atomic_add_fetch(&g_live_tasks, d, __ATOMIC_RELAXED);
+}
 
 /* A task's lock: held for a few loads and stores (never across a wait or a
  * call into user code that could take it again), so a spin lock with a
@@ -847,7 +855,12 @@ static inline void task_lock(zell_task *t) {
 
 static inline void task_unlock(zell_task *t) { __atomic_store_n(&t->mu, 0, __ATOMIC_RELEASE); }
 
-int64_t zell__live_tasks(void) { return __atomic_load_n(&g_live_tasks, __ATOMIC_RELAXED); }
+int64_t zell__live_tasks(void) {
+    int64_t n = __atomic_load_n(&g_live_tasks, __ATOMIC_RELAXED);
+    int64_t slots = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
+    for (int64_t i = 0; i < slots; i++) n += __atomic_load_n(&workers[i]->live_tasks, __ATOMIC_RELAXED);
+    return n;
+}
 int64_t zell__await_spurious_wakeups(void) { return __atomic_load_n(&g_await_spurious, __ATOMIC_RELAXED); }
 
 int64_t zell__sched_queue_len(void) {
@@ -860,7 +873,7 @@ int64_t zell__sched_queue_len(void) {
 static void task_drop(void *obj) {
     zell_task *t = obj;
     PROF_START();
-    __atomic_sub_fetch(&g_live_tasks, 1, __ATOMIC_RELAXED);
+    live_tasks_add(-1);
     if (t->state == TASK_DONE && t->ops && t->ops->release)
         t->ops->release(t->slot + t->ops_offset);
     cont *c = t->conts;
@@ -890,7 +903,7 @@ static zell_task *task_new_ex(int64_t result_size, const zell_value_ops *ops, in
     /* Tasks move between threads all the time (awaiters, continuations,
      * jobs): biasing them to one thread would only queue merges (rc.c). */
     t->hdr.refcount |= ZELL_RC_NOBIAS;
-    __atomic_add_fetch(&g_live_tasks, 1, __ATOMIC_RELAXED);
+    live_tasks_add(1);
     t->result_size = result_size;
     t->ops = ops;
     t->ops_offset = ops_off;
@@ -936,7 +949,7 @@ zell_task *zell__task_new_slot(int64_t result_size, const zell_value_ops *ops, i
     if (result_size < 0 || slot_bytes < result_size) zell__panicf("zell__task_new_slot: bad sizes");
     zell_task *t = zell_object_new(&task_type, (int64_t)sizeof(zell_task) + ZELL_ROUND8(slot_bytes));
     t->hdr.refcount |= ZELL_RC_NOBIAS;
-    __atomic_add_fetch(&g_live_tasks, 1, __ATOMIC_RELAXED);
+    live_tasks_add(1);
     t->result_size = result_size;
     t->ops = ops;
     t->ops_offset = ops_off;
@@ -986,18 +999,22 @@ static bool task_complete(zell_task *t, const void *result) {
      * this thread still writes t (conts, the lock word, t_cur): hold one
      * until the task is left (the drop then runs on whichever thread lets
      * go last, ordered by the count's acquire-release decrement). */
-    zell_retain(t);
+    bool held = t_cur == t;   /* the current-task slot's reference keeps t alive until restore_parent drops it, last */
+    if (!held) zell_retain(t);
     task_lock(t);
     if (t->state == TASK_DONE) {
         task_unlock(t);
-        zell_release(t);
+        if (!held) zell_release(t);
         return false;
     }
     if (result && t->result_size > 0) {
         memcpy(t->slot, result, (size_t)t->result_size);
         if (t->ops && t->ops->retain) t->ops->retain(t->slot + t->ops_offset);
     }
-    __atomic_store_n(&t->state, TASK_DONE, __ATOMIC_SEQ_CST);
+    /* Release suffices: readers take `state` with an acquire load (or
+     * under the lock) and then read the slot; no reader pairs it with a
+     * second flag in a store-then-load protocol. */
+    __atomic_store_n(&t->state, TASK_DONE, __ATOMIC_RELEASE);
     cont *c = t->conts, *rev = NULL;
     t->conts = NULL;
     cont first = t->cont0;   /* copied out: t may be freed once unlocked */
@@ -1016,7 +1033,7 @@ static bool task_complete(zell_task *t, const void *result) {
         aw = n;
     }
     restore_parent(t);  /* a coroutine returning: the code after it is its parent's */
-    zell_release(t);
+    if (!held) zell_release(t);
     /* After this point `t` may be freed; use only `first` and `rev`. */
     while (c) { cont *n = c->next; c->next = rev; rev = c; c = n; }
     /* The first continuation runs next on this worker (the common case is
@@ -1076,18 +1093,27 @@ static bool add_cont(zell_task *t, zell_resume_fn fn, void *frame, bool suspend)
     c->fn = fn;
     c->frame = frame;
     c->ctx = t_ctx;
-    c->cur = t_cur;
     zell_retain(c->ctx);
-    zell_retain(c->cur);
     zell_object *drop_ctx = NULL;
     zell_task *cur = t_cur;
-    if (suspend && cur && cur->ctx_saved) {
-        /* restore_parent's context step (the continuation holds the task's
-         * context now, so the old t_ctx is released after unlocking). */
-        drop_ctx = t_ctx;
-        t_ctx = cur->caller_ctx;
-        cur->caller_ctx = NULL;
-        cur->ctx_saved = 0;
+    c->cur = cur;
+    if (suspend && cur) {
+        /* The suspending coroutine's task stops running here: what
+         * restore_parent does, under the lock, with the current-task
+         * reference moved into the continuation instead of retained and
+         * released. Once unlocked, the completer may fire the continuation
+         * and its job's release may free `cur` on another thread, so
+         * nothing of `cur` is touched after the unlock. */
+        if (cur->ctx_saved) {
+            drop_ctx = t_ctx;   /* released after unlocking */
+            t_ctx = cur->caller_ctx;
+            cur->caller_ctx = NULL;
+            cur->ctx_saved = 0;
+        }
+        zell_retain(cur->parent);
+        t_cur = cur->parent;
+    } else {
+        zell_retain(cur);
     }
     task_unlock(t);
     zell_release(drop_ctx);
@@ -1095,11 +1121,10 @@ static bool add_cont(zell_task *t, zell_resume_fn fn, void *frame, bool suspend)
 }
 
 /* Public: the registering code (a coroutine) suspends when this returns
- * true, so the current task becomes its parent again. */
+ * true, so the current task becomes its parent again (add_cont). */
 bool zell_task_add_continuation(zell_task *t, zell_resume_fn fn, void *frame) {
     PROF_START();
     if (!add_cont(t, fn, frame, true)) return false;
-    if (t_cur) restore_parent(t_cur);
     PROF_T(addcont);
     return true;
 }
@@ -1774,11 +1799,10 @@ zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_op
     if (t) return t;
     PROF_START();
     t = task_new_ex(result_size, result_ops, 0);
+    t->hdr.refcount += 2;   /* the frame's and the ramp's references: nobody else sees t yet, so no atomics */
     task_attach(t, t_cur);
     t->caller_ctx = ctx0;   /* moved */
     t->ctx_saved = 1;
-    zell_retain(t);
-    zell_retain(t);
     zell_task *old = t_cur;
     t_cur = t;
     zell_release(old);  /* t->parent holds its own reference */
