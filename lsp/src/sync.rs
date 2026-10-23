@@ -2,7 +2,7 @@
 //! or incremental (`TextDocumentSyncKind::INCREMENTAL`), applied to the
 //! server's copy of a document.
 //!
-//! Positions are UTF-16 (the negotiated `position_encoding`); lines end at
+//! Positions are in the negotiated `position_encoding` (see [`crate::encoding`]); lines end at
 //! `\n` (a `\r` before it is not part of the line), as in
 //! [`zell::span::SourceFile`]. Out-of-range positions are clamped like
 //! the LSP specification asks: a character past the end of its line means
@@ -11,7 +11,7 @@
 
 use lsp_types::{Position, TextDocumentContentChangeEvent};
 
-/// Byte offset of the UTF-16 position `pos` in `text`.
+/// Byte offset of the position `pos` (in the negotiated encoding) in `text`.
 pub(crate) fn offset_at(text: &str, pos: Position) -> usize {
     let mut line_start = 0;
     for _ in 0..pos.line {
@@ -26,7 +26,7 @@ pub(crate) fn offset_at(text: &str, pos: Position) -> usize {
         if c == '\n' || (c == '\r' && rest[i + 1..].starts_with('\n')) {
             return line_start + i;
         }
-        let w = c.len_utf16() as u32;
+        let w = crate::encoding::width(c);
         // A position inside a surrogate pair rounds down to the character.
         if col + w > pos.character {
             return line_start + i;

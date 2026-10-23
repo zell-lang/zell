@@ -604,6 +604,9 @@ fn every_example_survives_all_queries() {
     }
 }
 
+#[path = "server/conformance.rs"]
+mod conformance;
+
 #[path = "server/protocol.rs"]
 mod protocol;
 

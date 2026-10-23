@@ -3,7 +3,7 @@
 //! see the crate docs), or against the current text for the text-only
 //! ones, and returns its result or an error.
 
-use crate::{assist, features, files, lens, nav, path_of, range, Server};
+use crate::{assist, features, files, hierarchy, lens, nav, path_of, range, Server};
 use lsp_server::{Request, RequestId};
 use lsp_types::request::Request as _;
 use lsp_types::*;
@@ -60,6 +60,9 @@ impl Server {
             request::DocumentHighlightRequest => Self::highlights,
             request::DocumentDiagnosticRequest => Self::document_diagnostic,
             request::WillRenameFiles => Self::will_rename_files,
+            request::CallHierarchyPrepare => Self::prepare_call_hierarchy,
+            request::CallHierarchyIncomingCalls => Self::incoming_calls,
+            request::CallHierarchyOutgoingCalls => Self::outgoing_calls,
         }
         match req.method.as_str() {
             request::WorkspaceDiagnosticRequest::METHOD => match serde_json::from_value::<WorkspaceDiagnosticParams>(req.params) {
@@ -86,9 +89,12 @@ impl Server {
 
     fn call<R: request::Request>(&mut self, req: Request, f: fn(&mut Self, R::Params) -> Reply<R::Result>) {
         match serde_json::from_value::<R::Params>(req.params) {
-            Ok(p) => match f(self, p) {
-                Ok(r) => self.reply(req.id, r),
-                Err((code, msg)) => self.reply_err(req.id, code, msg),
+            // A handler bug answers its request with `InternalError`
+            // instead of taking the server down.
+            Ok(p) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, p))) {
+                Ok(Ok(r)) => self.reply(req.id, r),
+                Ok(Err((code, msg))) => self.reply_err(req.id, code, msg),
+                Err(_) => self.reply_err(req.id, lsp_server::ErrorCode::InternalError as i32, format!("internal error in {}", req.method)),
             },
             Err(e) => {
                 eprintln!("zell-lsp: bad params for {}: {e}", req.method);
@@ -101,7 +107,7 @@ impl Server {
     fn locate(&self, doc: &TextDocumentIdentifier, pos: Option<Position>) -> Option<(Arc<Analysis>, usize, u32)> {
         let a = self.analysis.clone()?;
         let file = a.file_index(&path_of(&doc.uri))?;
-        let offset = pos.map(|p| a.files[file].utf16_offset(p.line, p.character)).unwrap_or(0);
+        let offset = pos.map(|p| crate::encoding::offset(&a.files[file], p)).unwrap_or(0);
         Some((a, file, offset))
     }
 
@@ -192,7 +198,7 @@ impl Server {
             p.positions
                 .iter()
                 .map(|pos| {
-                    let off = f.utf16_offset(pos.line, pos.character);
+                    let off = crate::encoding::offset(&f, *pos);
                     // Built from the outermost range inwards.
                     let mut sel: Option<SelectionRange> = None;
                     for s in nav::selection_chain(ast, &f.text, off).iter().rev() {
@@ -220,8 +226,29 @@ impl Server {
         Ok((sym_id, span))
     }
 
+    fn prepare_call_hierarchy(&mut self, p: CallHierarchyPrepareParams) -> Reply<Option<Vec<CallHierarchyItem>>> {
+        let tdp = p.text_document_position_params;
+        let v = self.analysis_version;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| hierarchy::prepare(&a, v, file, off, &|f| self.uri_of(&a, f))))
+    }
+
+    fn incoming_calls(&mut self, p: CallHierarchyIncomingCallsParams) -> Reply<Option<Vec<CallHierarchyIncomingCall>>> {
+        let v = self.analysis_version;
+        Ok(self.analysis.clone().and_then(|a| hierarchy::incoming(&a, v, &p.item, &|f| self.uri_of(&a, f))))
+    }
+
+    fn outgoing_calls(&mut self, p: CallHierarchyOutgoingCallsParams) -> Reply<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let v = self.analysis_version;
+        Ok(self.analysis.clone().and_then(|a| hierarchy::outgoing(&a, v, &p.item, &|f| self.uri_of(&a, f))))
+    }
+
     fn prepare_rename(&mut self, p: TextDocumentPositionParams) -> Reply<Option<PrepareRenameResponse>> {
         let Some((a, file, off)) = self.locate(&p.text_document, Some(p.position)) else { return Ok(None) };
+        // Nothing to rename here: null (the client says so); a symbol that
+        // cannot be renamed: an error with the reason.
+        if a.symbol_at(file, off).is_none() || a.name_span_at(file, off).is_none() {
+            return Ok(None);
+        }
         let (sym, span) = Self::rename_target(&a, file, off).map_err(|m| (REQUEST_FAILED, m))?;
         let placeholder = a.index.symbol(sym).name.clone();
         Ok(Some(PrepareRenameResponse::RangeWithPlaceholder { range: range(&a.files[file], span), placeholder }))
@@ -237,6 +264,9 @@ impl Server {
         let sym = a.index.symbol(sym_id);
         let mut spans: Vec<(usize, Span)> = sym.loc.map(|l| (l.file, l.name_span)).into_iter().collect();
         spans.extend(a.references_of(sym_id).into_iter().map(|r| (r.file, r.span)));
+        if let Some(other) = Self::rename_conflict(&a, sym_id, &spans, &p.new_name) {
+            return Err((REQUEST_FAILED, other));
+        }
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         let mut seen = HashSet::new();
         for (f, s) in spans {
@@ -246,7 +276,51 @@ impl Server {
             let Some(uri) = self.uri_of(&a, f) else { continue };
             changes.entry(uri).or_default().push(TextEdit { range: range(&a.files[f], s), new_text: p.new_name.clone() });
         }
-        Ok(Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }))
+        Ok(Some(self.workspace_edit(changes)))
+    }
+
+    /// Why renaming `sym` (written at `spans`) to `new_name` would change
+    /// what a name means: a sibling member or a name visible at one of the
+    /// uses (a local, a global of the namespace or an import) already
+    /// called `new_name`.
+    fn rename_conflict(a: &Analysis, sym: zell::sema::index::SymbolId, spans: &[(usize, Span)], new_name: &str) -> Option<String> {
+        use zell::sema::index::SymbolKind as K;
+        let s = a.index.symbol(sym);
+        if s.name == new_name {
+            return None;
+        }
+        let clash = |other: zell::sema::index::SymbolId| {
+            let o = a.index.symbol(other);
+            let at = o.loc.map(|l| format!(" ({}:{})", a.files[l.file].path, a.files[l.file].line_col(l.name_span.start).0)).unwrap_or_default();
+            format!("renaming `{}` to `{new_name}` would clash with `{}`{at}", s.name, o.full_name)
+        };
+        if let Some(c) = s.container.filter(|_| !matches!(s.kind, K::Local | K::Param | K::Const)) {
+            if let Some(o) = a.index.symbols.iter().find(|o| o.container == Some(c) && o.name == new_name && o.id != sym) {
+                return Some(clash(o.id));
+            }
+        }
+        if matches!(s.kind, K::Field | K::Method | K::Variant) {
+            return None; // members are reached through a value: only siblings clash
+        }
+        spans.iter().find_map(|&(f, sp)| features::resolve_name(a, f, sp.start, new_name).filter(|&o| o != sym).map(clash))
+    }
+
+    /// A workspace edit of `changes`: versioned `documentChanges` when the
+    /// client supports them (open documents carry their version, others
+    /// null), else plain `changes`.
+    fn workspace_edit(&self, changes: HashMap<Url, Vec<TextEdit>>) -> WorkspaceEdit {
+        if !self.caps.document_changes {
+            return WorkspaceEdit { changes: Some(changes), ..Default::default() };
+        }
+        let mut docs: Vec<TextDocumentEdit> = changes
+            .into_iter()
+            .map(|(uri, edits)| TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier { version: self.doc_versions.get(&path_of(&uri)).copied(), uri },
+                edits: edits.into_iter().map(OneOf::Left).collect(),
+            })
+            .collect();
+        docs.sort_by(|a, b| a.text_document.uri.as_str().cmp(b.text_document.uri.as_str()));
+        WorkspaceEdit { document_changes: Some(DocumentChanges::Edits(docs)), ..Default::default() }
     }
 
     /// `workspace/willRenameFiles`: import and namespace edits for files
@@ -255,7 +329,7 @@ impl Server {
         let Some(a) = self.analysis.clone() else { return Ok(None) };
         let moves: Vec<(usize, PathBuf)> = self.renamed_files(&p).into_iter().filter_map(|(old, new)| Some((a.file_index(&old)?, new))).collect();
         let changes = files::rename_edits(&a, &moves, files::derived_namespace, |f| self.uri_of(&a, f));
-        Ok((!changes.is_empty()).then(|| WorkspaceEdit { changes: Some(changes), ..Default::default() }))
+        Ok((!changes.is_empty()).then(|| self.workspace_edit(changes)))
     }
 
     // -- semantic tokens ---------------------------------------------------------

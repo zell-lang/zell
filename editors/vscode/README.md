@@ -45,10 +45,31 @@ Build the server from the repository root (a source checkout needs LLVM
 cargo build --release -p zell-lsp     # target/release/zell-lsp
 ```
 
-Put `target/release` on `PATH`, or point the `zell.serverPath` setting at
-the binary. If `zell-lsp` is not on `PATH` but the `zell` CLI is, the
-extension runs `zell lsp` instead (which starts the `zell-lsp` binary
-installed next to `zell`). Then build and package the extension:
+The extension finds the server in this order:
+
+1. the `zell.serverPath` setting (a path to `zell` runs `zell lsp`);
+2. `zell-lsp` on `PATH`;
+3. `zell-lsp` next to the `zell` CLI found on `PATH` (the toolchain
+   archive layout: `bin/zell` and `bin/zell-lsp`);
+4. `zell lsp` (the CLI starts the server installed next to it).
+
+If none is found, an error offers to open the setting. Put
+`target/release` on `PATH`, or point `zell.serverPath` at the binary.
+
+## Install
+
+From a release: download `zell-<version>.vsix` and run
+`code --install-extension zell-<version>.vsix` (or Extensions view,
+"Install from VSIX..."). From source:
+
+```sh
+cd editors/vscode
+npm ci
+npm run package      # vsce package --no-dependencies -> zell-<version>.vsix
+code --install-extension zell-*.vsix
+```
+
+## Build and run the extension
 
 ```sh
 cd editors/vscode
@@ -66,7 +87,11 @@ Open `editors/vscode` in VS Code and press **F5** ("Run Zell
 extension"): an Extension Development Host opens on the repository's
 `examples/` folder. Open any `.zl` file to start the server; its log is in
 the **Output** panel under "Zell" (set `"zell.trace.server": "verbose"` to
-see the LSP traffic). `npm run watch` rebuilds the bundle on every change.
+see the LSP traffic).
+
+`npm run watch` rebuilds the bundle on every change (`npm run compile` is
+an alias of `npm run build`). To install the extension permanently, see
+[Install](#install).
 
 ## Settings and commands
 
@@ -80,6 +105,7 @@ see the LSP traffic). `npm run watch` rebuilds the bundle on every change.
 | `zell.path` | `zell` | CLI used to build for debugging and to find the formatters |
 | `zell.debug.lldbDapPath` | `""` | `lldb-dap` executable (default: `lldb-dap`, `lldb-dap-18`, ... on `PATH`) |
 | `zell.debug.formatters` | `""` | path of `zell_formatters.py` (default: `zell debug --formatters lldb`) |
+| `zell.statusBar.enabled` | `true` | analyzer state in the status bar |
 
 Inlay hints are the two `zell.inlayHints.*` settings (the server also reads
 them as `initializationOptions`). Turn either off in the settings UI or in
@@ -91,10 +117,26 @@ them as `initializationOptions`). Turn either off in the settings UI or in
 ```
 
 Command palette: **Zell: Restart server** (also done automatically when
-`zell.serverPath` changes) and **Zell: Format document (zell fmt)**. The
-code lenses above `main` and `@test` functions run **Zell: Run**, **Run
+`zell.serverPath` changes), **Zell: Show language server output** and
+**Zell: Format document (zell fmt)**.
+The code lenses above `main` and `@test` functions run **Zell: Run**, **Run
 test** and **Debug test** (`zell.run`, `zell.runTest`, `zell.debugTest`);
 `zell.showReferences` backs the reference-count lenses.
+
+The status bar item shows the analyzer state (`zell/analyzerStatus`, polled
+every 1.5 s): a spinner while an analysis runs or requests wait, a check
+mark when ready, an error sign when the server is not running; its tooltip
+has the scheduler counters, a click opens the server output.
+
+Also contributed: snippets (`func`, `funce` for `T!`, `async func`,
+`struct`, `interface`, `test`, `main`, `forin`); semantic token scopes
+(`semanticTokenScopes`) so every theme colours the server's tokens; the
+problem matcher **`$zell`** for `zell build` / `zell test` output in
+tasks (`error: ...` followed by `--> file:line:col`):
+
+```json
+{ "label": "build", "type": "shell", "command": "zell build", "problemMatcher": "$zell" }
+```
 
 ### Formatting
 

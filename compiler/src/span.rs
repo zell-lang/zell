@@ -77,6 +77,20 @@ impl SourceFile {
     /// Offsets past the end clamp to the end; offsets inside a multi-byte
     /// character round down to its start.
     pub fn utf16_position(&self, offset: u32) -> (u32, u32) {
+        self.position_in(offset, |c| c.len_utf16() as u32)
+    }
+
+    /// Byte offset of a 0-based (line, UTF-16 column) position. Columns past
+    /// the end of the line clamp to the line end (before its newline); lines
+    /// past the end clamp to the end of the text.
+    pub fn utf16_offset(&self, line: u32, col: u32) -> u32 {
+        self.offset_in(line, col, |c| c.len_utf16() as u32)
+    }
+
+    /// Like [`Self::utf16_position`], with columns counted in the code
+    /// units `width` gives each char (UTF-8 bytes, UTF-16 units or 1 for
+    /// UTF-32: the LSP position encodings).
+    pub fn position_in(&self, offset: u32, width: impl Fn(char) -> u32) -> (u32, u32) {
         let offset = (offset as usize).min(self.text.len());
         let line = match self.line_starts.binary_search(&(offset as u32)) {
             Ok(i) => i,
@@ -88,25 +102,28 @@ impl SourceFile {
             if start + i >= offset {
                 break;
             }
-            col += c.len_utf16() as u32;
+            col += width(c);
         }
         (line as u32, col)
     }
 
-    /// Byte offset of a 0-based (line, UTF-16 column) position. Columns past
-    /// the end of the line clamp to the line end (before its newline); lines
-    /// past the end clamp to the end of the text.
-    pub fn utf16_offset(&self, line: u32, col: u32) -> u32 {
+    /// Like [`Self::utf16_offset`], with columns in `width` code units.
+    /// A column inside a character rounds down to its start; the end of a
+    /// `\r\n` line is before its `\r`.
+    pub fn offset_in(&self, line: u32, col: u32, width: impl Fn(char) -> u32) -> u32 {
         let Some(&start) = self.line_starts.get(line as usize) else {
             return self.text.len() as u32;
         };
         let start = start as usize;
         let mut units = 0u32;
-        for (i, c) in self.text[start..].char_indices() {
-            if units >= col || c == '\n' {
+        let rest = &self.text[start..];
+        for (i, c) in rest.char_indices() {
+            let w = width(c);
+            let eol = c == '\n' || (c == '\r' && rest[i + 1..].starts_with('\n'));
+            if units >= col || eol || units + w > col {
                 return (start + i) as u32;
             }
-            units += c.len_utf16() as u32;
+            units += w;
         }
         self.text.len() as u32
     }
