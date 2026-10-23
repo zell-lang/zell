@@ -2022,7 +2022,9 @@ HMAC — собственная реализация на C по FIPS 180-4 / RF
 
 - `crypto.hash` дополнительно: `Sha384`, `Sha384Hex`, `Sum(alg, data
   []byte) []byte!` (`alg` — `"sha256"`, `"sha384"`, `"sha512"`, `"sha1"`);
-  `crypto.hmac.Sum(alg, key, data)`.
+  `crypto.hmac.Sum(alg, key, data)`. SHA-256 на x86-64 с SHA-NI —
+  intrinsics `sha256rnds2`/`sha256msg1`/`sha256msg2` (выбор по cpuid,
+  `ZELL_NO_SHANI=1` отключает), иначе переносимый C.
 - `crypto.aes`: `GcmSeal(key, nonce, plaintext, aad) []byte!`
   (шифртекст + 16-байтовый тег), `GcmOpen(key, nonce, ciphertext, aad)
   []byte!` (`aes-gcm: message authentication failed`), `EncryptBlock`,

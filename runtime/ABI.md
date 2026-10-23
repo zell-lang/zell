@@ -2116,7 +2116,7 @@ ignored); an unknown one is the error `crypto: unknown hash "<name>" ...`.
 
 | File | Contents |
 |---|---|
-| `sha2.c` | SHA-256/384/512, SHA-1; streaming `zell_hash_ctx` (plain bytes, copyable); HMAC |
+| `sha2.c` | SHA-256/384/512, SHA-1; streaming `zell_hash_ctx` (plain bytes, copyable); HMAC. x86-64: SHA-256 compression with the SHA extensions (`sha256rnds2`/`msg1`/`msg2` intrinsics, `__attribute__((target))`) when cpuid reports SHA (leaf 7 EBX bit 29), SSSE3 and SSE4.1 (`zell__cpu_has_shani`); `ZELL_NO_SHANI=1` forces the portable path. Both paths give identical digests |
 | `hkdf.c` | HKDF-Extract/Expand (RFC 5869) |
 | `aes.c` | AES-128/192/256 encryption and GCM. Portable path: 64-bit bitsliced AES (4 blocks per call; Boyar-Peralta S-box circuit), GHASH by integer multiplication with holes (BearSSL `ctmul64` style). x86-64: AES-NI + PCLMULQDQ intrinsics (`__attribute__((target))`) when cpuid reports AES, PCLMULQDQ, SSSE3 and SSE4.1; `ZELL_NO_AESNI=1` forces the portable path. The key schedule always runs on the bitsliced S-box |
 | `chacha20poly1305.c` | ChaCha20, Poly1305 (26-bit limbs), the RFC 8439 AEAD |

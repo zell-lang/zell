@@ -54,7 +54,31 @@ bool zell__cpu_has_aesni(void) {
 }
 
 void zell__aes_force_portable(int on) { aes_forced_portable = on; }
+
+static int shani_state = -1;   /* -1 unknown, 0 no, 1 yes */
+static int sha_forced_portable;
+
+bool zell__cpu_has_shani(void) {
+    if (sha_forced_portable) return false;
+    int s = __atomic_load_n(&shani_state, __ATOMIC_RELAXED);
+    if (s < 0) {
+        unsigned a, b, c, d;
+        s = 0;
+        /* leaf 1 ECX: bit 19 SSE4.1, bit 9 SSSE3; leaf 7.0 EBX bit 29: SHA */
+        if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 19)) && (c & (1u << 9)) &&
+            __get_cpuid_count(7, 0, &a, &b, &c, &d))
+            s = (b & (1u << 29)) != 0;
+        const char *env = getenv("ZELL_NO_SHANI");
+        if (env && env[0] == '1') s = 0;
+        __atomic_store_n(&shani_state, s, __ATOMIC_RELAXED);
+    }
+    return s == 1;
+}
+
+void zell__sha_force_portable(int on) { sha_forced_portable = on; }
 #else
 bool zell__cpu_has_aesni(void) { return false; }
 void zell__aes_force_portable(int on) { (void)on; }
+bool zell__cpu_has_shani(void) { return false; }
+void zell__sha_force_portable(int on) { (void)on; }
 #endif

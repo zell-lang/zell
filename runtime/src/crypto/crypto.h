@@ -33,6 +33,11 @@ ZELL_CRYPTO_HIDDEN bool zell__crypto_random(uint8_t *buf, size_t n);
 ZELL_CRYPTO_HIDDEN bool zell__cpu_has_aesni(void);
 /* Forces the portable AES path on (1) or back to auto-detection (0). */
 ZELL_CRYPTO_HIDDEN void zell__aes_force_portable(int on);
+/* SHA-NI (with SSE4.1 and SSSE3) for SHA-256; ZELL_NO_SHANI=1 in the
+ * environment disables it. */
+ZELL_CRYPTO_HIDDEN bool zell__cpu_has_shani(void);
+/* Forces the portable SHA-256 path on (1) or back to auto-detection (0). */
+ZELL_CRYPTO_HIDDEN void zell__sha_force_portable(int on);
 
 static inline uint32_t zell__ld32be(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];

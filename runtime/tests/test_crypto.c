@@ -2,7 +2,8 @@
  * from the RFCs and NIST documents named next to each test, plus
  * Wycheproof-style negative cases (tampered tags and signatures, invalid
  * points, non-canonical encodings, small-order inputs). Both AES paths are
- * exercised (AES-NI when the CPU has it, and the bitsliced fallback). */
+ * exercised (AES-NI when the CPU has it, and the bitsliced fallback), and
+ * both SHA-256 paths (SHA-NI when available, and the portable code). */
 #include "test.h"
 #include "../src/crypto/crypto.h"
 #include "vectors/rsa2048.h"
@@ -60,6 +61,53 @@ TEST(sha2_fips180) {
     check_hex(d, 32, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
     assert(zell__hash_by_name("SHA-384", 7) == ZELL_HASH_SHA384);
     assert(zell__hash_by_name("md5", 3) == 0);
+}
+
+/* SHA-256 around the padding and block boundaries (expected digests from
+ * Python's hashlib), one-shot and streamed in uneven pieces, on the SHA-NI
+ * path when the CPU has it and on the portable path. */
+static void sha256_lengths(void) {
+    static const struct { size_t n; const char *want; } V[] = {
+        { 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+        { 1, "e77b9a9ae9e30b0dbdb6f510a264ef9de781501d7b6b92ae89eb059c5ab743db" },
+        { 55, "63c06c35402b73061b2b60338121fe8f4895640a178ed01c4b2e40ff8dcd1755" },
+        { 56, "86512867c0c0b58974d4a9f76fab04b3ed84c5ae5845bd807f809a7884ec24e5" },
+        { 63, "56547b4ccd1b089babcb872418aa6d3be61e3aba1b97e0eda0934d729ebe9e0c" },
+        { 64, "44aee5fa258a25ab9eeebaa630ea0ea92b017efb95fbce6f91c9c181e4d8ebe2" },
+        { 65, "75a506795a148c07e58b5579d08badc50e39e2e0092c23042a429401dc10d7bf" },
+        { 1000, "7994e00959d889b2edd138584884b26ecd04053d86779cb88d89202dea18e599" },
+        { 1000000, "2784a21b4c3200a3ba2e60fb6911faadeaba14f0587384bf1344a52fdc377556" },
+    };
+    static uint8_t m[1000000];
+    for (size_t i = 0; i < sizeof m; i++) m[i] = (uint8_t)(i * 13 + 5);
+    static const size_t pieces[] = { 1, 7, 63, 64, 65, 200, 4096 };
+    for (size_t v = 0; v < sizeof V / sizeof V[0]; v++) {
+        uint8_t d[32];
+        zell__hash(ZELL_HASH_SHA256, m, V[v].n, d);
+        check_hex(d, 32, V[v].want);
+        for (size_t pi = 0; pi < sizeof pieces / sizeof pieces[0]; pi++) {
+            if (V[v].n > 100000 && pieces[pi] < 64) continue;
+            zell_hash_ctx c;
+            zell__hash_init(&c, ZELL_HASH_SHA256);
+            for (size_t off = 0; off < V[v].n;) {
+                size_t k = V[v].n - off < pieces[pi] ? V[v].n - off : pieces[pi];
+                zell__hash_update(&c, m + off, k);
+                off += k;
+            }
+            zell__hash_final(&c, d);
+            check_hex(d, 32, V[v].want);
+        }
+    }
+}
+
+TEST(sha256_both_paths) {
+    int have_ni = zell__cpu_has_shani();
+    sha256_lengths();
+    zell__sha_force_portable(1);
+    assert(!zell__cpu_has_shani());
+    sha256_lengths();
+    zell__sha_force_portable(0);
+    printf("       (SHA-NI %s)\n", have_ni ? "available: both paths tested" : "not available: portable path only");
 }
 
 TEST(hmac_rfc4231) {
@@ -528,6 +576,7 @@ TEST(rsa_pkcs1_pss) {
 int main(void) {
     printf("test_crypto\n");
     RUN(sha2_fips180);
+    RUN(sha256_both_paths);
     RUN(hmac_rfc4231);
     RUN(hkdf_rfc5869);
     RUN(aes_gcm);

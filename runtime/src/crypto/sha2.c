@@ -1,7 +1,12 @@
 /* sha2.c - streaming SHA-256, SHA-384, SHA-512 (FIPS 180-4) and SHA-1
  * (FIPS 180-4, only for legacy formats), plus HMAC (RFC 2104) over them.
  * Contexts are plain bytes (zell_hash_ctx), so the Zell wrappers keep
- * them inside a []byte. */
+ * them inside a []byte.
+ *
+ * SHA-256 has two compression functions: the portable one, and on x86-64
+ * one built on the SHA extensions (sha256rnds2/msg1/msg2, compiled with a
+ * function-level target attribute) chosen at run time by cpuid
+ * (zell__cpu_has_shani; ZELL_NO_SHANI=1 forces the portable path). */
 #include "crypto.h"
 
 #include <string.h>
@@ -59,6 +64,76 @@ static void sha256_block(uint32_t *h, const uint8_t *p) {
         hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
     }
     h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define ZELL_HAVE_SHANI 1
+#include <immintrin.h>
+
+#define SHANI_TARGET __attribute__((target("sha,sse4.1,ssse3")))
+
+/* Four rounds 4g..4g+3 with message words m0 = W[4g..4g+3]; while g < 12
+ * also turns m0 into W[4g+16..4g+19] from m1 = W[4g+4..], m2, m3. */
+#define SHANI_QROUND(g, m0, m1, m2, m3)                                              \
+    do {                                                                             \
+        __m128i k_ = _mm_add_epi32(m0, _mm_loadu_si128((const __m128i *)(K256 + 4 * (g)))); \
+        s1 = _mm_sha256rnds2_epu32(s1, s0, k_);                                      \
+        if ((g) < 12)                                                                \
+            m0 = _mm_sha256msg2_epu32(                                               \
+                _mm_add_epi32(_mm_sha256msg1_epu32(m0, m1), _mm_alignr_epi8(m3, m2, 4)), m3); \
+        s0 = _mm_sha256rnds2_epu32(s0, s1, _mm_shuffle_epi32(k_, 0x0E));             \
+    } while (0)
+
+/* n consecutive 64-byte blocks. The state lives as ABEF/CDGH words, the
+ * layout sha256rnds2 works on. */
+SHANI_TARGET static void sha256_blocks_ni(uint32_t *h, const uint8_t *p, size_t n) {
+    const __m128i bswap = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
+    __m128i t = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)h), 0xB1);       /* CDAB */
+    __m128i s1 = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)(h + 4)), 0x1B); /* EFGH */
+    __m128i s0 = _mm_alignr_epi8(t, s1, 8);                                         /* ABEF */
+    s1 = _mm_blend_epi16(s1, t, 0xF0);                                              /* CDGH */
+    for (; n; n--, p += 64) {
+        __m128i abef = s0, cdgh = s1;
+        __m128i w0 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)p), bswap);
+        __m128i w1 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 16)), bswap);
+        __m128i w2 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 32)), bswap);
+        __m128i w3 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 48)), bswap);
+        SHANI_QROUND(0, w0, w1, w2, w3);
+        SHANI_QROUND(1, w1, w2, w3, w0);
+        SHANI_QROUND(2, w2, w3, w0, w1);
+        SHANI_QROUND(3, w3, w0, w1, w2);
+        SHANI_QROUND(4, w0, w1, w2, w3);
+        SHANI_QROUND(5, w1, w2, w3, w0);
+        SHANI_QROUND(6, w2, w3, w0, w1);
+        SHANI_QROUND(7, w3, w0, w1, w2);
+        SHANI_QROUND(8, w0, w1, w2, w3);
+        SHANI_QROUND(9, w1, w2, w3, w0);
+        SHANI_QROUND(10, w2, w3, w0, w1);
+        SHANI_QROUND(11, w3, w0, w1, w2);
+        SHANI_QROUND(12, w0, w1, w2, w3);
+        SHANI_QROUND(13, w1, w2, w3, w0);
+        SHANI_QROUND(14, w2, w3, w0, w1);
+        SHANI_QROUND(15, w3, w0, w1, w2);
+        s0 = _mm_add_epi32(s0, abef);
+        s1 = _mm_add_epi32(s1, cdgh);
+    }
+    t = _mm_shuffle_epi32(s0, 0x1B);                                        /* FEBA */
+    s1 = _mm_shuffle_epi32(s1, 0xB1);                                       /* DCHG */
+    _mm_storeu_si128((__m128i *)h, _mm_blend_epi16(t, s1, 0xF0));           /* DCBA */
+    _mm_storeu_si128((__m128i *)(h + 4), _mm_alignr_epi8(s1, t, 8));        /* HGFE */
+}
+#undef SHANI_QROUND
+#endif
+
+/* n consecutive SHA-256 blocks: SHA-NI when available, else portable. */
+static void sha256_blocks(uint32_t *h, const uint8_t *p, size_t n) {
+#ifdef ZELL_HAVE_SHANI
+    if (zell__cpu_has_shani()) {
+        sha256_blocks_ni(h, p, n);
+        return;
+    }
+#endif
+    for (; n; n--, p += 64) sha256_block(h, p);
 }
 
 static void sha512_block(uint64_t *h, const uint8_t *p) {
@@ -130,11 +205,12 @@ bool zell__hash_init(zell_hash_ctx *c, int alg) {
     }
 }
 
-static void compress(zell_hash_ctx *c, const uint8_t *blk) {
+/* n consecutive blocks of the context's algorithm. */
+static void compress(zell_hash_ctx *c, const uint8_t *blk, size_t n) {
     switch (c->alg) {
-    case ZELL_HASH_SHA256: sha256_block(c->h.h32, blk); break;
-    case ZELL_HASH_SHA1: sha1_block(c->h.h32, blk); break;
-    default: sha512_block(c->h.h64, blk); break;
+    case ZELL_HASH_SHA256: sha256_blocks(c->h.h32, blk, n); break;
+    case ZELL_HASH_SHA1: for (; n; n--, blk += 64) sha1_block(c->h.h32, blk); break;
+    default: for (; n; n--, blk += 128) sha512_block(c->h.h64, blk); break;
     }
 }
 
@@ -149,13 +225,14 @@ void zell__hash_update(zell_hash_ctx *c, const uint8_t *p, size_t n) {
         p += k;
         n -= k;
         if (c->buflen < bs) return;
-        compress(c, c->buf);
+        compress(c, c->buf, 1);
         c->buflen = 0;
     }
-    while (n >= bs) {
-        compress(c, p);
-        p += bs;
-        n -= bs;
+    if (n >= bs) {
+        size_t nb = n / bs;
+        compress(c, p, nb);
+        p += nb * bs;
+        n -= nb * bs;
     }
     if (n) {
         memcpy(c->buf, p, n);
