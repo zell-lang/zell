@@ -667,6 +667,45 @@ TEST(mutex_contention_1k) {
     zell_release(cmu);
 }
 
+/* ---- mutex: a slow Lock holding the queue guard of a mutex that was freed
+ * meanwhile (state == guard, not locked) owns the right to take it; a fast
+ * Lock/TryLock must not CAS the locked bit in under it (regression: both
+ * owned the lock, the second Unlock panicked `unlock of unlocked mutex`,
+ * seen under qemu-aarch64 in examples/channels.zl) ---- */
+
+static int64_t gm[3];
+static int64_t gm_returned;
+
+static void *gm_locker(void *arg) {
+    (void)arg;
+    zell_task *t = zell_task_mutex_lock(gm);   /* must wait for the guard */
+    __atomic_store_n(&gm_returned, 1, __ATOMIC_RELEASE);
+    return t;
+}
+
+TEST(mutex_fast_path_respects_guard) {
+    gm[0] = 2; gm[1] = gm[2] = 0;   /* MU_GUARD: a slow locker is mid-way */
+    gm_returned = 0;
+    assert(!zell_task_mutex_try_lock(gm));
+    assert(gm[0] == 2);
+    pthread_t th;
+    assert(pthread_create(&th, NULL, gm_locker, NULL) == 0);
+    struct timespec d = { 0, 20 * 1000 * 1000 };
+    nanosleep(&d, NULL);
+    assert(!__atomic_load_n(&gm_returned, __ATOMIC_ACQUIRE));
+    assert(__atomic_load_n(&gm[0], __ATOMIC_ACQUIRE) == 2);   /* no locked bit slipped in */
+    __atomic_store_n(&gm[0], 1, __ATOMIC_RELEASE);            /* the slow locker owns it, guard off */
+    void *r;
+    pthread_join(th, &r);
+    zell_task *t = r;
+    assert(!zell_task_is_done(t));   /* queued behind the owner */
+    zell_task_mutex_unlock(gm);      /* hands it to t */
+    assert(zell_task_is_done(t));
+    zell_task_mutex_unlock(gm);
+    assert(gm[0] == 0 && gm[1] == 0 && gm[2] == 0);
+    zell_release(t);
+}
+
 static void unlock_unlocked(void) {
     zell_mutex *m = zell_mutex_new();
     zell_mutex_unlock(m);
@@ -771,6 +810,7 @@ int main(int argc, char **argv) {
     RUN(await_wakes_one_thread);
     RUN(channel_cancel_waits);
     RUN(mutex_contention_1k);
+    RUN(mutex_fast_path_respects_guard);
     RUN(drop_in_job_teardown_starts_task);
 
     zell_runtime_shutdown();
