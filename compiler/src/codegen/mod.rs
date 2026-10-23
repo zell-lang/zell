@@ -388,8 +388,14 @@ pub(crate) struct FnState<'a, 'ctx> {
     pub ret_slot: Option<(PointerValue<'ctx>, TypeId)>,
     pub exit: Option<BasicBlock<'ctx>>,
     pub loops: Vec<LoopTarget<'ctx>>,
-    /// Defer array (`[64 x {ptr, ptr}]`) and count.
+    /// Defer array (`[64 x {ptr, ptr}]`) and count (heap `defer`s).
     pub defers: Option<(PointerValue<'ctx>, PointerValue<'ctx>)>,
+    /// Open-coded `defer`s ([`hir::StmtKind::Defer`]) in statement order:
+    /// the "armed" flag (an `i1` alloca, zeroed at entry, set by the
+    /// statement) and the call the exit block emits under it (a pointer
+    /// into the function's HIR, which outlives the codegen: the statement
+    /// emitters are not generic over the HIR lifetime).
+    pub open_defers: Vec<(PointerValue<'ctx>, *const hir::Expr)>,
     /// Zero-initialised slots released at exit (loop sequences).
     pub scoped: Vec<(PointerValue<'ctx>, TypeId)>,
     pub coro: Option<Coro<'ctx>>,
@@ -741,6 +747,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             exit: None,
             loops: Vec::new(),
             defers: None,
+            open_defers: Vec::new(),
             scoped: Vec::new(),
             coro: None,
             cleanups: Vec::new(),

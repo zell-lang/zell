@@ -1,0 +1,144 @@
+// test: open-coded defers (DESIGN.md "Память"): LIFO order, arguments evaluated at the defer statement, defers run on `?` error returns and in async functions, a defer in a nested block keeps its operands to the exit, the receiver stays alive until the deferred call, a deferred closure sees later writes, and a function with a defer in a loop keeps the heap path
+// status: passing
+// run-flags: --leak-check
+namespace spec.memory2.open_defer
+
+import io
+
+struct Counter {
+    N int
+    Name string
+    func Inc() {
+        this.N += 1
+        println("inc", this.Name, this.N)
+    }
+    func Drop() { println("drop", this.Name) }
+}
+
+const ErrBad = error("bad")
+
+// LIFO.
+func lifo() {
+    defer println("first")
+    defer println("second")
+    defer println("third")
+    println("lifo body")
+}
+
+// Arguments are evaluated at the defer statement.
+func early() {
+    var x = 1
+    defer println("x was", x)
+    x = 2
+    println("x is", x)
+}
+
+// A deferred call with a result: the result is discarded.
+func compute(x int) int {
+    println("compute", x)
+    return x * 2
+}
+
+func discard() {
+    defer compute(3)
+    println("discard body")
+}
+
+// `?` runs the defers of both functions.
+func fails(n int) int! {
+    defer println("fails exit", n)
+    if n > 1 {
+        return ErrBad
+    }
+    return n
+}
+
+func propagate(n int) int! {
+    defer println("propagate exit", n)
+    var v = fails(n)?
+    println("fails ok", v)
+    return v + 10
+}
+
+// A defer in a nested block (not a loop) keeps its operands alive to the exit.
+func nested(flag bool) {
+    if flag {
+        var s = "block " + "value"
+        defer println("deferred", s)
+        println("in block")
+    } else {
+        defer println("else branch")
+    }
+    switch flag {
+    case true:
+        defer println("case true")
+    default:
+        defer println("case false")
+    }
+    println("nested body", flag)
+}
+
+// The receiver of the deferred method stays alive after the variable moves on.
+func receiver() {
+    var c = new Counter{Name: "old"}
+    defer c.Inc()
+    c = new Counter{Name: "new"}
+    c.Inc()
+    println("receiver body")
+}
+
+// A struct value as receiver (address taken by the defer).
+func valueReceiver() {
+    var c = Counter{Name: "val"}
+    defer c.Inc()
+    c.N = 10
+    println("value body")
+}
+
+// A deferred closure captures variables, not values.
+func closure() {
+    var n = 1
+    defer func() { println("closure sees", n) }()
+    n = 5
+    println("closure body")
+}
+
+// A defer in a loop: the whole function uses the heap path, still LIFO.
+func loop() {
+    defer println("loop done")
+    for i in 0..3 {
+        defer println("iter", i)
+    }
+    println("loop body")
+}
+
+// Defers in an async function run when the body finishes, after its awaits.
+async func job(name string) int {
+    defer println("job cleanup", name)
+    await task.Delay(1)
+    println("job resumed", name)
+    return len(name)
+}
+
+async func main() {
+    defer println("main done")
+    lifo()
+    early()
+    discard()
+    try {
+        var a = propagate(1)?
+        println("got", a)
+        var b = propagate(2)?
+        println("got", b)
+    } catch err {
+        println("caught", err)
+    }
+    nested(true)
+    nested(false)
+    receiver()
+    valueReceiver()
+    closure()
+    loop()
+    var n = await job("alpha")
+    println("got", n)
+}

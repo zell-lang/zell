@@ -818,14 +818,17 @@ impl<'a> Sema<'a> {
 
     // -- defer --------------------------------------------------------------
 
-    /// `defer call`: arguments are evaluated now (spilled into captured
-    /// temporaries), the call runs in a synthesized thunk at function exit.
+    /// `defer call`: arguments are evaluated now (spilled into temporaries),
+    /// the call runs at function exit: open-coded (the call itself, reading
+    /// `DeferArg` temporaries) when [`open_defers_ok`] holds for the body,
+    /// else in a synthesized thunk closure capturing the temporaries.
     fn defer_stmt(&mut self, e: &ast::Expr, span: Span, out: &mut Vec<Stmt>) {
         let ast::ExprKind::Call { callee, args } = &expr::strip_parens(e).kind else {
             self.err("defer requires a function call", e.span);
             self.expr(e, None);
             return;
         };
+        let open = self.fcx().open_defers;
         if args.is_empty() {
             if let ast::ExprKind::Lambda { .. } = expr::strip_parens(callee).kind {
                 let c = self.value(callee, None);
@@ -833,6 +836,20 @@ impl<'a> Sema<'a> {
                     if !sig.params.is_empty() {
                         self.err("wrong number of arguments in deferred call", span);
                     }
+                }
+                if open && !self.tt.is_invalid(c.ty) {
+                    // Open-coded: the closure value waits in a frame slot
+                    // and is called at exit.
+                    let (ty, cspan) = (c.ty, c.span);
+                    let mut caps = Vec::new();
+                    let f = self.spill(c, &mut caps, out, true);
+                    let ret = match self.tt.get(ty) {
+                        Type::Func(sig) => sig.ret,
+                        _ => self.tt.void,
+                    };
+                    let call = mk(ExprKind::Call { callee: Callee::Value(Box::new(f)), args: Vec::new() }, ret, cspan);
+                    out.push(Stmt { kind: StmtKind::Defer(call), span });
+                    return;
                 }
                 out.push(Stmt { kind: StmtKind::Defer(c), span });
                 return;
@@ -853,29 +870,34 @@ impl<'a> Sema<'a> {
         let kind = match call.kind {
             ExprKind::Call { callee, args } => {
                 let callee = match callee {
-                    Callee::Value(v) => Callee::Value(Box::new(self.spill(*v, &mut caps, out))),
-                    Callee::Interface { recv, method } => Callee::Interface { recv: Box::new(self.spill(*recv, &mut caps, out)), method },
+                    Callee::Value(v) => Callee::Value(Box::new(self.spill(*v, &mut caps, out, open))),
+                    Callee::Interface { recv, method } => Callee::Interface { recv: Box::new(self.spill(*recv, &mut caps, out, open)), method },
                     c => c,
                 };
-                let args = args.into_iter().map(|a| self.spill(a, &mut caps, out)).collect();
+                let args = args.into_iter().map(|a| self.spill(a, &mut caps, out, open)).collect();
                 ExprKind::Call { callee, args }
             }
             ExprKind::Print(items) => ExprKind::Print(
                 items
                     .into_iter()
                     .map(|mut i| {
-                        i.arg = i.arg.map(|a| self.spill(a, &mut caps, out));
+                        i.arg = i.arg.map(|a| self.spill(a, &mut caps, out, open));
                         i
                     })
                     .collect(),
             ),
-            ExprKind::Builtin { op, args } => ExprKind::Builtin { op, args: args.into_iter().map(|a| self.spill(a, &mut caps, out)).collect() },
+            ExprKind::Builtin { op, args } => ExprKind::Builtin { op, args: args.into_iter().map(|a| self.spill(a, &mut caps, out, open)).collect() },
             _ => {
                 self.err("defer requires a function call", e.span);
                 return;
             }
         };
         let body_expr = mk(kind, ty, cspan);
+        if open {
+            // Open-coded: the call itself, reading the `DeferArg` temporaries.
+            out.push(Stmt { kind: StmtKind::Defer(body_expr), span });
+            return;
+        }
         let stmt = StmtKind::Expr(body_expr);
         let parent = self.fns.last().and_then(|f| f.func).expect("defer outside a function");
         let fid = FuncId(self.funcs.len() as u32);
@@ -899,17 +921,60 @@ impl<'a> Sema<'a> {
     }
 
     /// Stores a deferred argument in a temp; returns its upvalue reference
-    /// for the thunk body (constants stay inline).
-    fn spill(&mut self, e: hir::Expr, caps: &mut Vec<(LocalId, TypeId)>, out: &mut Vec<Stmt>) -> hir::Expr {
+    /// for the thunk body, or, for an open-coded `defer`, the
+    /// function-lifetime `DeferArg` temporary itself (constants stay inline).
+    fn spill(&mut self, e: hir::Expr, caps: &mut Vec<(LocalId, TypeId)>, out: &mut Vec<Stmt>, open: bool) -> hir::Expr {
         if matches!(e.kind, ExprKind::Const(_) | ExprKind::FuncRef(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::AttrConst { .. }) {
             return e;
         }
         let (ty, span) = (e.ty, e.span);
+        if open {
+            let l = self.declare_local("$defer", ty, LocalKind::DeferArg, span);
+            out.push(Stmt { kind: StmtKind::Let { local: l, init: Some(e) }, span });
+            return mk(ExprKind::Local(l), ty, span);
+        }
         let l = self.temp(ty, span);
         out.push(Stmt { kind: StmtKind::Let { local: l, init: Some(e) }, span });
         caps.push((l, ty));
         mk(ExprKind::Upvalue((caps.len() - 1) as u32), ty, span)
     }
+}
+
+/// Whether the `defer` statements of a body (not counting those of nested
+/// lambdas, which have their own bodies) can be open-coded: none is inside
+/// a loop and there are at most [`hir::MAX_OPEN_DEFERS`] of them. Off for
+/// the whole build with `ZELL_NO_OPEN_DEFER=1`.
+pub(crate) fn open_defers_ok(stmts: &[ast::Stmt]) -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OFF.get_or_init(|| std::env::var_os("ZELL_NO_OPEN_DEFER").is_some()) {
+        return false;
+    }
+    // `n` counts the defers seen so far; false once one is in a loop or
+    // the count exceeds the limit.
+    fn count(stmts: &[ast::Stmt], in_loop: bool, n: &mut usize) -> bool {
+        stmts.iter().all(|s| match &s.kind {
+            ast::StmtKind::Defer(_) => {
+                *n += 1;
+                !in_loop && *n <= hir::MAX_OPEN_DEFERS
+            }
+            ast::StmtKind::For(f) => count(&f.body.stmts, true, n),
+            ast::StmtKind::If(i) => if_ok(i, in_loop, n),
+            ast::StmtKind::Switch(sw) => sw.cases.iter().all(|c| count(&c.body, in_loop, n)) && sw.default.as_ref().is_none_or(|d| count(d, in_loop, n)),
+            ast::StmtKind::Block(b) => count(&b.stmts, in_loop, n),
+            ast::StmtKind::TryBlock { body, handler, .. } => count(&body.stmts, in_loop, n) && count(&handler.stmts, in_loop, n),
+            _ => true,
+        })
+    }
+    fn if_ok(i: &ast::IfStmt, in_loop: bool, n: &mut usize) -> bool {
+        count(&i.then.stmts, in_loop, n)
+            && match i.else_.as_deref() {
+                Some(ast::ElseBranch::If(e)) => if_ok(e, in_loop, n),
+                Some(ast::ElseBranch::Block(b)) => count(&b.stmts, in_loop, n),
+                None => true,
+            }
+    }
+    let mut n = 0;
+    count(stmts, false, &mut n)
 }
 
 // -- terminating statements ------------------------------------------------------

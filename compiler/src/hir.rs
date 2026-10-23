@@ -393,6 +393,10 @@ pub struct Local {
     pub span: Span,
 }
 
+/// Most `defer` statements a function may have for them to be open-coded
+/// (see [`StmtKind::Defer`]).
+pub const MAX_OPEN_DEFERS: usize = 8;
+
 /// Origin of a [`Local`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalKind {
@@ -406,8 +410,13 @@ pub enum LocalKind {
     PatternBinding,
     /// `catch err` variable (type `error`).
     CatchVar,
-    /// Compiler temporary (switch subject, deferred argument, ...).
+    /// Compiler temporary (switch subject, deferred argument of a heap
+    /// `defer`, ...).
     Temp,
+    /// Receiver or argument of an open-coded `defer` ([`StmtKind::Defer`]):
+    /// a temporary that lives to the function's exit (it is not released at
+    /// the end of its block) because the deferred call reads it there.
+    DeferArg,
 }
 
 /// A captured variable of a lambda.
@@ -554,11 +563,22 @@ pub enum StmtKind {
     Break(Label),
     /// Next iteration of the loop with this label.
     Continue(Label),
-    /// Push a deferred call. The operand is a closure value of type
-    /// `func()` whose captures already hold the evaluated arguments (sema
-    /// spills arguments into fresh temporaries before this statement).
-    /// Deferred closures run LIFO when the function returns by any path
-    /// (`return`, error return via `?`, falling off the end).
+    /// Push a deferred call. Deferred calls run LIFO when the function
+    /// returns by any path (`return`, error return via `?`, falling off the
+    /// end); a panic does not run them (it does not unwind).
+    ///
+    /// Two forms, chosen by sema per function:
+    /// * *heap*: the operand is a closure value of type `func()` whose
+    ///   captures already hold the evaluated arguments (sema spills them
+    ///   into fresh temporaries before this statement); codegen pushes it
+    ///   on the function's defer array.
+    /// * *open-coded* (every `defer` of the function is outside loops and
+    ///   there are at most [`MAX_OPEN_DEFERS`] of them; off with
+    ///   `ZELL_NO_OPEN_DEFER=1`): the operand is the call itself, whose
+    ///   receiver and arguments are constants or [`LocalKind::DeferArg`]
+    ///   temporaries assigned by the preceding `Let`s. Codegen sets a
+    ///   per-statement "armed" flag here and emits the call at the exit
+    ///   block, guarded by the flag, in reverse statement order.
     Defer(Expr),
     Block(Block),
     /// Block `try { body } catch err { handler }`. A [`ExprKind::Propagate`]

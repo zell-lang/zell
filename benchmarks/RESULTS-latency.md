@@ -214,6 +214,11 @@ The quiet run (tables above) confirms items 1-3.
    instructions. A defer of a direct call with already-evaluated arguments
    could store the receiver and arguments in the frame, with no closure
    (Go-style open-coded defers). The smoke run hinted at >10x Go.
+   **Done (2026-10-23):** defers outside loops (at most 8 per function)
+   are open-coded (DESIGN.md "Память"; `ZELL_NO_OPEN_DEFER=1` restores
+   the closure path). `defer_call` went from 365 883 µs (6.65x Go) to
+   18 438 µs (0.34x Go) on the same machine and run; the other rows did
+   not move.
 2. **Retain/release of a borrowed receiver around interface and closure
    calls.** `ops[i & 1].Apply(i)` emits `zell_ptr_retain(recv)`,
    `call vtable[..]`, `zell_ptr_release(recv)` per call, both out of line.
