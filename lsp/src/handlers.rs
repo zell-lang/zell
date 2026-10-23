@@ -424,13 +424,24 @@ impl Server {
     fn code_actions(&mut self, p: CodeActionParams) -> Reply<Option<CodeActionResponse>> {
         Ok(self.locate(&p.text_document, None).map(|(a, file, _)| {
             let span = assist::span_of(&a.files[file], &p.range);
-            assist::code_actions(&a, file, &p.text_document.uri, span, |d| self.to_lsp_diag(&a, d))
+            let only = p.context.only.as_deref();
+            let mut out = if only.is_none_or(|o| o.iter().any(|k| k.as_str() == "quickfix")) {
+                assist::code_actions(&a, file, &p.text_document.uri, span, |d| self.to_lsp_diag(&a, d))
+            } else {
+                Vec::new()
+            };
+            if !a.is_read_only(file) {
+                out.extend(crate::refactor::actions(&a, file, &p.text_document.uri, span, self.caps.resolve_edits, only));
+            }
+            out
         }))
     }
 
-    /// Quick fixes are cheap and always carry their edit: returned as is.
+    /// Quick fixes always carry their edit (returned as is); refactorings
+    /// listed lazily get theirs here.
     fn resolve_code_action(&mut self, action: CodeAction) -> Reply<CodeAction> {
-        Ok(action)
+        let Some(a) = self.analysis.clone() else { return Ok(action) };
+        Ok(crate::refactor::resolve(&a, |u| a.file_index(&path_of(u)), action))
     }
 
     fn code_lenses(&mut self, p: CodeLensParams) -> Reply<Option<Vec<CodeLens>>> {

@@ -1,0 +1,18 @@
+// status: passing
+// warning: hint[L0006]: parameter b is never used
+// warning: warning[L0007]: function helper is never used
+
+namespace main
+
+import io
+
+func add(a int, b int) int {
+    return a
+}
+
+func helper() {
+}
+
+func main() {
+    println(add(1, 2))
+}

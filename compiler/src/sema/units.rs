@@ -331,6 +331,7 @@ pub fn run_unit(files: &[&ast::File], texts: &[&str], full: Vec<bool>, index_ns:
     let mut diags = Diagnostics::new();
     let mut s = Sema::new(files, &mut diags);
     s.ide = Some(Box::default());
+    let lint_files = full.clone();
     s.unit = Some(Box::new(UnitState { full, ..Default::default() }));
     s.cancel = cancel;
     s.run();
@@ -344,6 +345,9 @@ pub fn run_unit(files: &[&ast::File], texts: &[&str], full: Vec<bool>, index_ns:
     let program = s.finish();
     let index = index::build_with(rec, extra, &program, texts, &names);
     let names: Vec<String> = names;
+    if !diags.has_errors() {
+        crate::sema::lint::check(&program, texts, &|f| lint_files.get(f).copied().unwrap_or(false), &mut diags);
+    }
     // Origins: own file, else the requesters of the node (transitively).
     let mut node_files: Vec<Option<BTreeSet<usize>>> = vec![None; unit.nodes.len()];
     fn files_of(n: usize, nodes: &[Vec<Req>], memo: &mut [Option<BTreeSet<usize>>], stack: &mut Vec<usize>) -> BTreeSet<usize> {

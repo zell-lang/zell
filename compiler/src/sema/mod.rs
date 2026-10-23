@@ -40,6 +40,7 @@ mod generics;
 mod ifaces;
 mod opover;
 pub mod index;
+pub mod lint;
 mod infer;
 mod iterate;
 mod litcheck;

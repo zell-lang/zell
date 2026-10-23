@@ -123,7 +123,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/completion`, `completionItem/resolve` | `completionProvider { triggerCharacters: ["."], resolveProvider }` | `features.rs` |
 | `textDocument/signatureHelp` | `signatureHelpProvider` (`(`, `,`) | `assist.rs` |
 | `textDocument/inlayHint`, `inlayHint/resolve` | `inlayHintProvider { resolveProvider }` | `assist.rs` |
-| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix], resolveProvider }` | `assist.rs` |
+| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix, refactor.extract, refactor.inline, source.organizeImports], resolveProvider }` | `assist.rs`, `refactor.rs` |
 | `textDocument/codeLens`, `codeLens/resolve` | `codeLensProvider { resolveProvider }` | `lens.rs` |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | `semanticTokensProvider { full: { delta: true }, range: true }` | `features.rs` |
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | `callHierarchyProvider` | `hierarchy.rs` |
@@ -186,7 +186,24 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
   версия анализа); `completionItem/resolve` добавляет `detail` и Markdown-
   документацию (тот же конвейер, что hover). Подсказки inlay — tooltip в
   `inlayHint/resolve`. Quick fix'ы дешёвые и сразу с правкой:
-  `codeAction/resolve` возвращает их как есть.
+  `codeAction/resolve` возвращает их как есть. Рефакторинги
+  (`lsp/src/refactor.rs`) при `codeAction.resolveSupport` с `edit` приходят
+  без правки, с `data` (вид, файл, выделение), и правка считается в
+  `codeAction/resolve`; иначе сразу с правкой.
+- **Рефакторинги** (code actions, фильтр `only` учитывается):
+  `refactor.extract` — «Extract variable» (выделенное выражение →
+  `var name = ...` перед оператором; имя из вызываемой функции/поля без
+  `Get`, уникальное в функции) и «Extract function» (выделенные целиком
+  операторы одного блока → новая функция после текущей; параметры —
+  внешние локальные переменные/параметры, которые читает диапазон;
+  результат — объявленные в диапазоне и используемые после него, один или
+  кортежем; `async` + `await` при `await`, `!` + `?` при `?`; диапазоны с
+  `return`/`break`/`continue` не предлагаются; в методе — метод и вызов
+  через `this.`); `refactor.inline` — «Inline variable» (локальная `var` с
+  инициализатором без присваиваний и `&x`: подстановка, в скобках если
+  нужно, и удаление объявления); `source.organizeImports` — сортировка
+  импортов и удаление неиспользуемых (`E0003`). Quick fix'ы инспекций — см.
+  «Инспекции».
 - **Code lens**: на `@test`/`@bench`-функциях «▶ Run test» (`zell.runTest`)
   и «Debug test» (`zell.debugTest`) с аргументами `[uri файла, имя]`, на
   `main` — «▶ Run» (`zell.run`, `[uri]`); на экспортируемых объявлениях
@@ -406,6 +423,55 @@ Aider, Zed, Copilot) Zell отдаётся двумя каналами; всё �
   `.zed/settings.json`, `.vscode/mcp.json`; для Claude Code —
   `.claude/settings.json` с маркетплейсом и включённым плагином.
   Существующие файлы дополняются, а не перезаписываются.
+
+## Инспекции (lints)
+
+Кроме ошибок компиляции sema проверяет программу инспекциями
+(`compiler/src/sema/lint.rs`): это проходы по типизированному HIR после
+успешного анализа, поэтому они точны (без эвристик по тексту) и работают
+одинаково в `zell check`/`build`/`run` и в LSP. Каждая находка — обычная
+диагностика с кодом `L00NN`, уровнем и, где правка механическая, исправлением
+(quick fix в редакторе, `zell check --fix` в терминале).
+
+| Код | Имя | Уровень | Что находит | Исправление |
+|---|---|---|---|---|
+| `L0001` | `unreachable` | warning | код после `return`/`break`/`continue`/`panic` | удалить |
+| `L0002` | `shadowed-err` | warning | внутренний `err` скрывает внешний (`catch err` во вложенном `catch err`, `var err`) | переименовать в `err2` |
+| `L0003` | `empty-catch` | warning | пустой `catch { }` проглатывает ошибку | `?` (в функции `T!`) или `panic(err.Message())` |
+| `L0004` | `self-assign` | warning | `x = x`, `a.f = a.f` | удалить |
+| `L0005` | `const-condition` | warning | сравнение литералов (`1 == 2`), сравнение значения с самим собой (`x == x`, кроме float) | заменить на `true`/`false` |
+| `L0006` | `unused-param` | hint | параметр приватной свободной функции, который тело не читает (функция не используется как значение) | переименовать в `_` |
+| `L0007` | `unused-func` | warning | приватная свободная функция без вызовов и ссылок (кроме `main`, `init` и функций с атрибутами) | удалить |
+| `L0008` | `defer-in-loop` | info | `defer` в цикле: выполнится при выходе из функции, и все `defer` функции уходят с open-coded пути в кучу | — |
+| `L0009` | `drop-capture` | warning | тип с `Drop` кладёт в своё поле замыкание, захватившее `this`: объект держит сам себя (уточнение `W0001`) | — |
+
+Не инспекции, а ошибки языка: необработанный результат `T!` (`E0002`, с
+исправлениями `?` и `try ... catch`) и неиспользуемые переменные, в том
+числе ключ/значение `for k, v in m` (`E0001`, исправление — `_`).
+
+Уровни: `error`, `warn`, `info`, `hint`, `off`. Настройка:
+
+- `zell check|build|run --lint=off|warn|error`: выключить все инспекции,
+  оставить их уровни (по умолчанию) или сделать все ошибками;
+  `--deny-warnings` делает ошибками и инспекции уровня warning.
+- `zell.toml`, таблица `[lints]` пакета (код или имя → уровень):
+  ```toml
+  [lints]
+  L0003 = "error"
+  unused-param = "off"
+  ```
+  Действует на файлы самого пакета; зависимости не инспектируются.
+- Подавление в коде: комментарий `// zell:allow L0004` (коды или имена
+  через пробел/запятую, `all` — все) на строке находки или на строке перед
+  ней. Это комментарий, а не синтаксис языка.
+- `--fix`: применить первое исправление каждой находки к файлам на диске
+  (пересекающиеся правки пропускаются) и сообщить, сколько применено.
+
+В выводе CLI код стоит в метке: `warning[L0001]: unreachable code`. В LSP
+у находок `code`, уровень (`Hint`/`Information` для `hint`/`info`) и тег
+`Unnecessary` у `L0001`, `L0004`, `L0006`, `L0007`; исправления приходят
+как code actions `quickfix`. В LSP уровни из `[lints]` пока не читаются
+(используются уровни по умолчанию), `// zell:allow` работает.
 
 ## Форматтер (`zell fmt`)
 

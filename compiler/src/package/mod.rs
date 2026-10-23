@@ -86,7 +86,12 @@ pub fn check(project: &Project, target: PkgId, dev: bool, diags: &mut Diagnostic
     let features = project.enabled_features(&closure);
     let feature_of = |i: usize| features[file_pkg[i]].clone();
     let env = crate::cfg::CfgEnv { target: crate::target::current(), features: Some(&feature_of) };
-    let mut program = crate::driver::check_with_policy(&files, diags, &policy, &env, |asts, d| check_namespaces(asts, &file_pkg, &scopes, d));
+    // Lints: the target package's files, with its `[lints]` levels.
+    let overrides = crate::sema::lint::parse_overrides(&project.packages[target].manifest.manifest.lints)?;
+    crate::sema::lint::update_config(|c| c.overrides.extend(overrides));
+    let target_pos = closure.iter().position(|&id| id == target);
+    let lint_files = |i: usize| Some(file_pkg[i]) == target_pos;
+    let mut program = crate::driver::check_with_policy(&files, diags, &policy, &env, |asts, d| check_namespaces(asts, &file_pkg, &scopes, d), &lint_files);
     let t = &project.packages[target];
     if let (Some(prog), Some(entry)) = (&program, t.entry()) {
         let entry = entry.canonicalize().unwrap_or(entry);

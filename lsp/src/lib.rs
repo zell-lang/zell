@@ -40,6 +40,7 @@ mod handlers;
 mod hierarchy;
 mod lens;
 mod nav;
+mod refactor;
 mod sync;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -101,6 +102,9 @@ struct ClientCaps {
     diagnostic_refresh: bool,
     /// `workspace.workspaceEdit.documentChanges`: edits carry document versions.
     document_changes: bool,
+    /// `codeAction.resolveSupport` covers `edit`: refactorings are listed
+    /// without their edits and computed by `codeAction/resolve`.
+    resolve_edits: bool,
 }
 
 impl ClientCaps {
@@ -111,6 +115,12 @@ impl ClientCaps {
             pull_diagnostics: c.text_document.as_ref().is_some_and(|t| t.diagnostic.is_some()),
             diagnostic_refresh: c.workspace.as_ref().and_then(|w| w.diagnostic.as_ref()).and_then(|d| d.refresh_support).unwrap_or(false),
             document_changes: c.workspace.as_ref().and_then(|w| w.workspace_edit.as_ref()).and_then(|e| e.document_changes).unwrap_or(false),
+            resolve_edits: c
+                .text_document
+                .as_ref()
+                .and_then(|t| t.code_action.as_ref())
+                .and_then(|ca| ca.resolve_support.as_ref())
+                .is_some_and(|r| r.properties.iter().any(|p| p == "edit")),
         }
     }
 }
@@ -234,7 +244,7 @@ pub fn capabilities() -> ServerCapabilities {
         }),
         inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(InlayHintOptions { resolve_provider: Some(true), work_done_progress_options: Default::default() }))),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR_EXTRACT, CodeActionKind::REFACTOR_INLINE, CodeActionKind::SOURCE_ORGANIZE_IMPORTS]),
             resolve_provider: Some(true),
             ..Default::default()
         })),
@@ -752,13 +762,16 @@ impl Server {
             severity: Some(match d.severity {
                 zell::diagnostics::Severity::Error => DiagnosticSeverity::ERROR,
                 zell::diagnostics::Severity::Warning => DiagnosticSeverity::WARNING,
+                zell::diagnostics::Severity::Info => DiagnosticSeverity::INFORMATION,
+                zell::diagnostics::Severity::Hint => DiagnosticSeverity::HINT,
             }),
             source: Some("zell".into()),
             code: d.code.map(|c| NumberOrString::String(c.into())),
             message,
             related_information: (!related.is_empty()).then_some(related),
             // Unused code is faded out by editors.
-            tags: matches!(d.code, Some(zell::diagnostics::codes::UNUSED_VARIABLE | zell::diagnostics::codes::UNUSED_IMPORT)).then(|| vec![DiagnosticTag::UNNECESSARY]),
+            tags: (matches!(d.code, Some(zell::diagnostics::codes::UNUSED_VARIABLE | zell::diagnostics::codes::UNUSED_IMPORT)) || d.code.and_then(zell::sema::lint::lint).is_some_and(|l| l.unnecessary))
+                .then(|| vec![DiagnosticTag::UNNECESSARY]),
             ..Default::default()
         }
     }

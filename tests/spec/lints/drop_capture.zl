@@ -1,0 +1,25 @@
+// status: passing
+// warning: warning[L0009]: Timer has Drop but stores a closure capturing this
+
+namespace main
+
+import io
+
+struct Timer {
+    OnTick func()
+    Count int
+
+    func Arm() {
+        this.OnTick = func() { this.Count += 1 }
+    }
+
+    func Drop() {
+        println("drop")
+    }
+}
+
+func main() {
+    var t = &Timer{Count: 0}
+    t.Arm()
+    println(t.Count)
+}

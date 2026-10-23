@@ -75,6 +75,10 @@ pub struct Manifest {
     /// `plugin`; docs/DEBUGGER.md).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub capabilities: IndexMap<String, bool>,
+    /// `[lints]`: lint code or name (`L0003`, `empty-catch`) -> level
+    /// (`off`, `hint`, `info`, `warn`, `error`); docs/TOOLING.md "Инспекции".
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub lints: IndexMap<String, String>,
 }
 
 /// `[package]`.

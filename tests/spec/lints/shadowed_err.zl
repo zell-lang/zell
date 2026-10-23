@@ -1,0 +1,19 @@
+// status: passing
+// warning: warning[L0002]: err shadows an outer err
+
+namespace main
+
+import io
+
+func f() int! {
+    return error("boom")
+}
+
+func main() {
+    try f() catch err {
+        try f() catch err {
+            println(err.Message())
+        }
+        println(err.Message())
+    }
+}

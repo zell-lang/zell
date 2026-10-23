@@ -81,7 +81,19 @@ pub fn check(files: &[SourceFile], diags: &mut Diagnostics) -> Option<Program> {
         return None;
     }
     let paths = files.iter().map(|f| f.path.clone()).collect();
-    sema::stdlib::with_source_paths(paths, || sema::analyze(&asts, diags)).map(|p| with_sources(p, files))
+    let p = sema::stdlib::with_source_paths(paths, || sema::analyze(&asts, diags)).map(|p| with_sources(p, files));
+    lint(p.as_ref(), files, &|_| true, diags);
+    p
+}
+
+/// Runs the lints ([`sema::lint`]) over a clean program's files that
+/// `wanted` selects.
+pub fn lint(p: Option<&Program>, files: &[SourceFile], wanted: &dyn Fn(usize) -> bool, diags: &mut Diagnostics) {
+    if let Some(p) = p {
+        let _t = crate::build::phase("lint");
+        let texts: Vec<&str> = files.iter().map(|f| f.text.as_str()).collect();
+        sema::lint::check(p, &texts, wanted, diags);
+    }
 }
 
 /// Records the source paths and line tables (error-trace sites).
@@ -100,6 +112,7 @@ pub fn check_with_policy(
     policy: &sema::ImportPolicy,
     env: &crate::cfg::CfgEnv,
     prepare: impl FnOnce(&[ast::File], &mut Diagnostics),
+    lint_files: &dyn Fn(usize) -> bool,
 ) -> Option<Program> {
     let mut asts = {
         let _t = crate::build::phase("parse");
@@ -113,5 +126,7 @@ pub fn check_with_policy(
         return None;
     }
     let paths = files.iter().map(|f| f.path.clone()).collect();
-    sema::stdlib::with_source_paths(paths, || sema::analyze_with_policy(&asts, diags, Some(policy))).map(|p| with_sources(p, files))
+    let p = sema::stdlib::with_source_paths(paths, || sema::analyze_with_policy(&asts, diags, Some(policy))).map(|p| with_sources(p, files));
+    lint(p.as_ref(), files, lint_files, diags);
+    p
 }

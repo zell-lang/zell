@@ -1,0 +1,16 @@
+// status: passing
+// warning: warning[L0003]: empty catch block swallows the error
+
+namespace main
+
+import io
+
+func f() int! {
+    return error("boom")
+}
+
+func main() {
+    try f() catch err {
+    }
+    println("swallowed")
+}

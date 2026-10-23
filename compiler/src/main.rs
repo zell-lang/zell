@@ -77,6 +77,8 @@ build options:
   --leak-check         report objects still alive at exit, exit non-zero
   --no-error-trace     do not record error return traces (errors.Trace is empty)
   --deny-warnings      treat warnings (W0001 reference cycles, ...) as errors
+  --lint=off|warn|error  disable the lints (L0001..., docs/TOOLING.md), keep their levels, or make them errors
+  --fix                apply the fixes of lint findings to the source files
   --emit=exe|obj|llvm-ir
   --workspace          all workspace members
   -p, --package <name> one workspace member (repeatable)
