@@ -693,7 +693,16 @@ bool zell_encoding_json_rt_bool(int64_t n) { return n && NODE(n)->type == ZELL__
 
 int64_t zell_encoding_json_rt_int(int64_t n) {
     if (!n || NODE(n)->type != ZELL__JSON_NUM) return 0;
-    return (NODE(n)->flags & ZELL__JSON_F_INT) ? NODE(n)->u.i : (int64_t)NODE(n)->u.f;
+    if (NODE(n)->flags & ZELL__JSON_F_INT) return NODE(n)->u.i;
+    /* A float node: the Zell side checks integrality and range through
+     * rtFloat first; here the conversion must still be defined for every
+     * value (the cast of an out-of-range or non-finite double is UB, found by
+     * the fuzzer), so saturate. */
+    double f = NODE(n)->u.f;
+    if (!(f == f)) return 0;
+    if (f >= 9223372036854775808.0) return INT64_MAX;
+    if (f <= -9223372036854775808.0) return INT64_MIN;
+    return (int64_t)f;
 }
 
 double zell_encoding_json_rt_float(int64_t n) {

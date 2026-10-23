@@ -20,12 +20,8 @@ static void walk(int64_t doc, int64_t n, int depth) {
     switch (kind) {
     case K_BOOL: sink += zell_encoding_json_rt_bool(n); break;
     case K_NUM:
-        /* rt_int on a float node outside the int64 range is UB (double ->
-         * int64 cast, std_json.c rt_int): found by this fuzzer, input in
-         * crashes/. Guarded here so the fuzzer can go on; remove the guard
-         * once rt_int saturates. */
         double f = zell_encoding_json_rt_float(n);
-        if (zell_encoding_json_rt_is_int(n) || (f > -9e18 && f < 9e18)) sink += zell_encoding_json_rt_int(n);
+        sink += zell_encoding_json_rt_int(n);   /* saturates for out-of-range floats */
         sink += f > 0;
         break;
     case K_STR: {
