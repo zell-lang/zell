@@ -155,6 +155,8 @@ struct App {
     server *net.http.Server
     listening bool
     checks []healthCheck
+    errMaps []errorMap
+    onError func(*Context, error) *ProblemDetails
 
     // IsDevelopment reports whether Environment is "development".
     func IsDevelopment() bool {
@@ -171,6 +173,27 @@ struct App {
     // Adds a middleware (outermost first).
     func Use(mw func(*Context, *Next) Task<void!>) *App {
         this.mws = append(this.mws, mw)
+        return this
+    }
+
+    // Maps errors of struct type E (found through wrappers with errors.As)
+    // to Problem Details with the given status; the error's Message() is
+    // the detail, as for web.Error. Mappings apply in registration order,
+    // after HttpError and the OnError hook.
+    func MapError<E>(status int) *App {
+        this.errMaps = append(this.errMaps, errorMap{status: status, matches: func(err error) bool {
+            var t E
+            return errors.As(err, &t)
+        }})
+        return this
+    }
+
+    // Sets the hook that sees every error of an endpoint or middleware
+    // before it becomes a response: a Problem to write (any status; 5xx
+    // are logged as usual), or nil for the default mapping (HttpError,
+    // MapError, then a generic 500).
+    func OnError(h func(*Context, error) *ProblemDetails) *App {
+        this.onError = h
         return this
     }
 
@@ -1076,15 +1099,38 @@ func Error(status int, detail string) HttpError {
 
 // Answers a handler error: Problem Details with its status (HttpError) or
 // 500 and the message; in development mode with errors.Trace.
+// An App.MapError registration.
+struct errorMap {
+    status int
+    matches func(error) bool
+}
+
 func writeError(c *Context, err error) {
     var status = 500
     var known = false
-    switch err {
-        case HttpError h:
-            status = h.Status
-            known = true
-    }
     var dev = c.App != nil && c.App.IsDevelopment()
+    var mapped *ProblemDetails = nil
+    if c.App != nil && c.App.onError != nil {
+        mapped = c.App.onError(c, err)
+    }
+    if mapped == nil {
+        switch err {
+            case HttpError h:
+                status = h.Status
+                known = true
+        }
+        if !known && c.App != nil {
+            for m in c.App.errMaps {
+                if m.matches(err) {
+                    status = m.status
+                    known = true
+                    break
+                }
+            }
+        }
+    } else {
+        status = mapped.Status
+    }
     // An error that is not a web.Error may carry internals (SQL, paths,
     // hosts): outside development the client gets a generic detail and
     // the message goes only to the log below.
@@ -1093,6 +1139,9 @@ func writeError(c *Context, err error) {
         detail = err.Message()
     }
     var p = problemFor(status, detail)
+    if mapped != nil {
+        p = *mapped
+    }
     if dev {
         p.Trace = errors.Trace(err)
     }

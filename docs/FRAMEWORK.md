@@ -345,7 +345,12 @@ async func main() {
   `"internal error"`, а настоящее сообщение уходит только в лог (утечка
   SQL, путей, хостов клиенту); при `ZELL_ENV=development` — настоящее
   сообщение и `trace` = `errors.Trace(err)`; 404/405 — тоже Problem
-  Details.
+  Details. Доменные ошибки отображаются один раз на приложение:
+  `app.MapError<NotFound>(404)` — ошибка типа `E` (и через обёртки
+  `?("ctx")`/`errors.Wrap`, `errors.As`) даёт Problem с этим статусом и
+  `Message()` в `detail`; `app.OnError(func(c *Context, err error)
+  *ProblemDetails)` видит каждую ошибку обработчика или middleware первым
+  и возвращает свой Problem либо `nil` для обычного отображения.
 - ✓ **OpenAPI 3.1**: `app.MapOpenApi("/openapi.json")` — документ из
   метаданных, которые генерирует компилятор вместе с таблицей маршрутов
   (параметры, тела и ответы со схемами `json.Schema<T>()`, теги по

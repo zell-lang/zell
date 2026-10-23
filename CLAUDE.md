@@ -96,9 +96,8 @@ repos in `zell-lang` (`zconf`, `example-web-service`, `example-cli`,
 
 Next, in this order:
 
-1. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md` items 17 (`web` error-mapping hook
-   `MapError<E>(status)`), 20
-   (generic/local type aliases), 25 (panic backtraces with `file:line` from
+1. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md` items 20
+   (generic/local type aliases) and 25 (panic backtraces with `file:line` from
    a compact pc table, usable stripped). Simplify the showcase repos to one
    package now that `zell test` builds dependencies.
 2. **Security tooling** — `zell audit` (OSV-format advisory DB

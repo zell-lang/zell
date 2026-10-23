@@ -49,12 +49,11 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
 16. `zell init --help` is an "unknown option".
 
 ## Framework (`web`)
-17. **Handler errors become Problem Details at the endpoint**
-    (`std/web/web_app.zl:581`, `writeError` at `:1079`): no middleware or hook
-    sees the original error, so domain-error → status mapping lives in every
-    controller action; and unknown errors return their message in `detail`
-    (500) — an information leak. Wanted: an error-mapping hook/middleware
-    (`app.MapError<ErrNotFound>(404)`) and a generic 500 body by default.
+17. **Fixed (2026-10-24):** `app.MapError<E>(status)` maps a domain error
+    type (also through wrappers) to a status once per application, and
+    `app.OnError(func(*Context, error) *ProblemDetails)` sees every error
+    first; unknown errors already answered a generic `"internal error"`
+    500 outside development.
 
 Not an obstacle but noted: OpenAPI 3.1 generation, `web.TestServer`, DI,
 request id / tracing / metrics middleware all worked as documented.
