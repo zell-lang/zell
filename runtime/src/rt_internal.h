@@ -171,6 +171,9 @@ ZELL_HIDDEN ZELL_CYC_WEAK void zell__cycles_flag(zell_object *o);
  * flag: room for the collector's hidden word after it (ABI.md 3.8). */
 ZELL_HIDDEN ZELL_CYC_WEAK int64_t zell__cycles_extra(int64_t size);
 ZELL_HIDDEN ZELL_CYC_WEAK int64_t zell__cycles_at_exit(void);
+/* A scheduler worker is about to park (task.c): it publishes its buffered
+ * possible roots, which would otherwise wait for its next record. */
+ZELL_HIDDEN ZELL_CYC_WEAK void zell__cycles_park(void);
 /* Runtime containers (slice.c, map.c): their type infos and visitors. */
 ZELL_HIDDEN extern const zell_type_info zell__backing_type;
 ZELL_HIDDEN void zell__backing_visit(void *obj, zell_cycle_cb cb, void *ctx);

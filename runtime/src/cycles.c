@@ -15,10 +15,13 @@
  * a buffered object's count reaches zero it is dropped at once (Drop timing
  * is unchanged) and becomes a ZOMBIE: its memory stays until the buffer's
  * owner sweeps it. Full local buffers are swept and published to a global
- * list; in auto mode a collection is due once `threshold` roots are
- * published, and it runs at the next allocation of a cyclic object by
- * compiled code (a safe point: the same place a callee could already run
- * any Drop), on that thread. Other threads keep running.
+ * list; in auto mode a collection is due once the threads together have
+ * recorded `threshold` roots since the last one was requested: the thread
+ * that trips the count publishes its buffer and requests the collection,
+ * the others publish theirs at their next record, and it runs at the next
+ * allocation of a cyclic object by compiled code (a safe point: the same
+ * place a callee could already run any Drop), on that thread. Other
+ * threads keep running.
  *
  * A collection (collect):
  *  0. g_collecting = 1 (seq_cst). From now on no flagged object's memory is
@@ -385,8 +388,8 @@ static CYC_TLS int64_t t_recorded;   /* folded into s_candidates by flush_local 
 static CYC_TLS int t_in_collect;
 /* Publication requests: in auto mode, once the roots recorded by all
  * threads since the last request reach the threshold, g_pub_req is bumped
- * and every thread publishes its buffer at its next record, so the next
- * collection (on whichever thread) sees them. */
+ * and g_want set (due_now); every other thread publishes its buffer at its
+ * next record, so the collection after this one sees them too. */
 static int g_pub_req;
 static int64_t g_unseen;
 static CYC_TLS int t_pub_req;
@@ -443,13 +446,43 @@ static void publish(vec *live) {
 
 static void flush_buf(lbuf *t, int all);
 
+/* Folds this thread's record count into the statistics and, in auto mode,
+ * into the roots recorded by all threads since the last publication
+ * request; true when they reached the threshold, which issues the request
+ * (the records are a proxy for the roots: entries that die before a
+ * collection are counted too, so the published set may be smaller). */
+static int count_recorded(void) {
+    int64_t n = t_recorded;
+    if (!n) return 0;
+    t_recorded = 0;
+    __atomic_add_fetch(&s_candidates, n, __ATOMIC_RELAXED);
+    if (mode() != ZELL_CYCLES_AUTO) return 0;
+    if (__atomic_add_fetch(&g_unseen, n, __ATOMIC_RELAXED) < __atomic_load_n(&g_threshold, __ATOMIC_RELAXED)) return 0;
+    __atomic_store_n(&g_unseen, 0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_pub_req, 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
+/* This thread tripped the threshold: a collection is due now. Its own
+ * roots are published at once and the collection is requested, whatever
+ * the published count is (the other threads' buffers reach the global
+ * list at their next record, and the next collection takes them). Waiting
+ * for `threshold` *published* roots instead let a collection slip a whole
+ * request period or more whenever part of the recorded entries had died
+ * or sat in other threads' buffers. */
+static void due_now(void) {
+    t_pub_req = __atomic_load_n(&g_pub_req, __ATOMIC_ACQUIRE);
+    if (t_buf.cap) flush_buf(t_bp, 1);
+    __atomic_store_n(&g_want, 1, __ATOMIC_RELAXED);
+}
+
 /* The buffer is full: drop its holes and zombies; keep it when that made
  * room, grow it while it is small, else publish its live entries (always
  * with `all`). */
 static void flush_local(int all) {
-    if (t_recorded) {
-        __atomic_add_fetch(&s_candidates, t_recorded, __ATOMIC_RELAXED);
-        t_recorded = 0;
+    if (count_recorded()) {
+        due_now();
+        return;
     }
     if (!t_buf.cap) return;
     flush_buf(t_bp, all);
@@ -510,14 +543,7 @@ __attribute__((noinline)) static void record_slow(void) {
 }
 
 __attribute__((noinline)) static void record_count(void) {
-    int64_t n = t_recorded;
-    t_recorded = 0;
-    __atomic_add_fetch(&s_candidates, n, __ATOMIC_RELAXED);
-    if (mode() == ZELL_CYCLES_AUTO &&
-        __atomic_add_fetch(&g_unseen, n, __ATOMIC_RELAXED) >= __atomic_load_n(&g_threshold, __ATOMIC_RELAXED)) {
-        __atomic_store_n(&g_unseen, 0, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&g_pub_req, 1, __ATOMIC_RELEASE);
-    }
+    if (count_recorded()) due_now();
 }
 
 /* Out of line, so the release fast path stays a few instructions and
@@ -1050,6 +1076,14 @@ int64_t zell_cycles_collect(void) {
     flush_local(1);
     int64_t n = collect(0, 1);
     return n < 0 ? 0 : n;
+}
+
+/* A worker about to park (task.c) publishes its roots: an idle thread
+ * makes no record, so they would stay out of every collection until it
+ * runs again (and an explicit CollectCycles() would miss them). */
+void zell__cycles_park(void) {
+    if (t_bp == &g_nobuf || t_in_collect) return;
+    flush_local(1);
 }
 
 int64_t zell__cycles_at_exit(void) {

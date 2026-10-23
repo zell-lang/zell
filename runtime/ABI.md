@@ -539,13 +539,15 @@ thread's buffer it leaves it and is freed, else it gets
 who frees the memory) and the buffer owner frees it when it sweeps. A
 full buffer is swept (zombies freed) and grows up to 2^18 entries; it is
 *published* to a global list when it holds a collection's worth of roots,
-when the thread exits, before a manual collection, and when another
-thread requests it (in auto mode, after `threshold` roots were recorded
-process-wide; each thread publishes at its next record). Published roots
-that die become zombies; the list is swept when it doubles.
+when the thread exits or its scheduler worker parks, before a manual
+collection, and when another thread requests it (in auto mode, after
+`threshold` roots were recorded process-wide: the thread that trips the
+count publishes at once, the others at their next record). Published
+roots that die become zombies; the list is swept when it doubles.
 
-**Triggers.** `ZELL_CYCLES=auto` (default): once `threshold` published
-roots are pending, the next `zell_cycles_new` on any thread runs a
+**Triggers.** `ZELL_CYCLES=auto` (default): once `threshold` roots were
+recorded process-wide since the last request (or `threshold` published
+roots are pending), the next `zell_cycles_new` on any thread runs a
 collection (one at a time; a thread that finds one running skips).
 `threshold` starts at 4096 and doubles (max 2^22) after a collection that
 freed fewer than 1/8 of its roots, halves (min 1024) after one that freed
