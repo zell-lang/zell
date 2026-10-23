@@ -966,7 +966,9 @@ typedef struct zell_error_frame {  // 16 bytes
 | Function | Semantics |
 |---|---|
 | `zell_error *zell_error_created(zell_error *err, const zell_error_site *site)` | **consumes** `err`, returns it (or its copy) owned. Sets the creation site unless one is already set. NULL err -> NULL. The compiler calls it after `error(..)` / `errors.New`, after boxing a struct as `error`, on the result of `errors.Wrap`, on errors returned by fallible stdlib externs (the call is the creation site), and on the value of `return err` (so a sentinel gets the site of its `return`) |
-| `zell_error *zell_error_returned(zell_error *err, const zell_error_site *site, const zell_string *ctx)` | **consumes** `err`, returns the error to propagate (owned). With `ctx` it first wraps (`zell_error_wrap`) and moves the trace into the wrapper; then it appends the frame `{site, ctx}`. Used by `e?` / `e?("ctx")` (also inside a block `try`) and by `try e catch err` before `err` is bound |
+| `zell_error *zell_error_returned(zell_error *err, const zell_error_site *site, const zell_string *ctx)` | **consumes** `err`, returns the error to propagate (owned). With `ctx` it first wraps (`zell_error_wrap`) and moves the trace (in the object or pending) into the wrapper; then it appends the frame `{site, ctx}`. Used by `e?` / `e?("ctx")` (also inside a block `try`) |
+| `zell_error *zell_error_caught(zell_error *err, const zell_error_site *site, int64_t keep)` | **consumes** `err`, returns the error to bind (owned): the end of a propagation. With `site` it first appends the frame `{site, NULL}` (like `zell_error_returned`). Then it *settles* a pending trace (below): `keep != 0` attaches it to the error (to `err` itself when uniquely owned, else to a copy-on-write copy), `keep == 0` drops it. Called by `try e catch err` before `err` is bound (`site` = the `try`, `keep` = the compiler's judgement whether the handler can observe the trace: any use of `err` other than `err.Message()` and `errors.Is(err, ..)`), by a block `try`'s catch binding (`site` NULL) and, with `site` NULL and `keep` 1, on the error of an async function's result before `zell_task_complete` publishes it (the record is thread-local) |
+| `void zell_error_discarded(zell_error *err)` | drops the pending trace of `err` (if any) and releases it: `try e else d`, `try e catch _ { }` |
 | `zell_string *zell_error_trace(const zell_error *err)` | owned trace text, `""` for NULL or no trace. Format below |
 | `void zell_error_frames(const zell_error *err, zell_slice *out)` | owned `[]errors.Frame`: one 32-byte record `{string File @0, int64 Line @8, string Func @16, string Context @24}` per trace line (`Context` is the `?("...")` text or NULL), elements owned via `zell_ops_error_frame` |
 | `zell_errors_trace` / `zell_errors_frames` | the `errors.Trace` / `Frames` externs (same functions) |
@@ -975,11 +977,24 @@ typedef struct zell_error_frame {  // 16 bytes
 - **Storage**: the first 8 frames live inline in the error object; more go to
   a growable raw array (`overflow`, doubling from 8). One `?` costs storing
   two pointers.
-- **Copy-on-write**: if `err` is shared (`refcount != 1`, including immortal
-  sentinels), both functions first make a shallow copy (message, inner,
-  payload retained; `origin` = the original's root, retained; the trace
-  copied) and release the original, so other holders never see a changed
-  trace. `zell_error_is` treats a copy as its `origin`.
+- **Shared errors, pending traces**: the trace of a *shared* error
+  (`refcount != 1`, including immortal sentinels) is never written into the
+  object. `zell_error_created` on a shared error without a trace pushes a
+  thread-local *pending record* `{err, created, sites[24]}` (a stack of 8
+  per thread: records nest when a defer or a handler propagates another
+  error while one is in flight); `zell_error_returned` of a shared error
+  with a record appends to it and returns `err` unchanged, so propagating a
+  sentinel allocates nothing. `zell_error_caught` settles the record (see
+  the table), `zell_error_trace`/`zell_error_frames` read it when the
+  object has no trace of its own. When the record stack is full or a trace
+  outgrows a record, the functions fall back to **copy-on-write**: a
+  shallow copy (message, inner, payload retained; `origin` = the original's
+  root, retained; the trace copied or moved from the record) replaces the
+  shared error. The same copy is made for a shared error without a record
+  (one stored elsewhere and returned again). Other holders never see a
+  changed trace; `zell_error_is` treats a copy as its `origin`. A unique
+  error (`refcount == 1`) that still has a record (its other holders went
+  away) adopts the record into the object first.
 - **Text** (`errors.Trace`): lines joined by `\n`, no trailing newline:
   `  created at   <loc>  <func>` (if there is a creation site), then for each
   frame, oldest first, `  returned via <loc>  <func>[  ?("<ctx>")]`, where

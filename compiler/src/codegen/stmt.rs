@@ -773,12 +773,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.push_scope();
         match err {
             Some(l) => {
+                let keep = self.handler_keeps_trace(handler, l);
+                let e = self.trace_caught(e, None, keep);
                 self.assign_local(l, Val::owned(e), true)?;
                 self.scope_local(l);
             }
-            None => {
-                self.call_rt("zell_release", &[e.into()]);
-            }
+            None => self.trace_discard(e),
         }
         self.block_stmts(handler)?;
         self.pop_scope(hd);
@@ -808,13 +808,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.push_scope();
         match err {
             Some(l) => {
-                let e = self.trace_returned(e.into(), te.span.start, None);
+                let keep = self.handler_keeps_trace(handler, l);
+                let e = self.trace_caught(e.into(), Some(te.span.start), keep);
                 self.assign_local(l, Val::owned(e), true)?;
                 self.scope_local(l);
             }
-            None => {
-                self.call_rt("zell_release", &[e.into()]);
-            }
+            None => self.trace_discard(e.into()),
         }
         self.block_stmts(handler)?;
         self.pop_scope(hd);
@@ -853,7 +852,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let isnull = self.b.build_is_null(e, "").unwrap();
         self.b.build_conditional_branch(isnull, ok, fail).unwrap();
         self.b.position_at_end(fail);
-        self.call_rt("zell_release", &[e.into()]);
+        self.trace_discard(e.into());
         let fd = self.depth();
         match fallback {
             TryFallback::Value(x) => {

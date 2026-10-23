@@ -5,8 +5,15 @@
 //! * Creation sites (`error(..)`, `errors.New`, `errors.Wrap`, a struct
 //!   converted to `error`, and `return err` of an error that has no site yet,
 //!   such as a sentinel) call `zell_error_created`.
-//! * Every `?` and every `try ... catch err` that binds the error call
-//!   `zell_error_returned` (which also wraps for `?("ctx")`).
+//! * Every `?` calls `zell_error_returned` (which also wraps for `?("ctx")`).
+//! * Where a propagation ends the runtime settles the *pending* trace of a
+//!   shared error (a sentinel propagates without being copied; its frames
+//!   live in a thread-local record, ABI.md §7.4): `try ... catch err` calls
+//!   `zell_error_caught` with its frame and `keep` = whether the handler can
+//!   observe the trace ([`CodeGen::handler_keeps_trace`]); a catch without a
+//!   binding and `try ... else` call `zell_error_discarded`; the result of
+//!   an async function that suspended is settled with `keep` before it is
+//!   published to the task.
 //! * With [`super::Options::no_error_trace`] no site is emitted and the calls
 //!   are elided (`?("ctx")` then calls `zell_error_wrap` directly).
 //!
@@ -14,6 +21,9 @@
 //! initialisers, so `return Sentinel` records the `return`).
 
 use super::CodeGen;
+use crate::hir::ownership::{walk_block, Pos};
+use crate::hir::{Block, Callee, CaptureSource, Expr, ExprKind, LocalId};
+use crate::types::Type;
 use inkwell::module::Linkage;
 use inkwell::values::{BasicValueEnum, PointerValue};
 
@@ -96,5 +106,61 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 None => err,
             },
         }
+    }
+
+    /// Ends a propagation at a `try ... catch` binding (or where an error
+    /// leaves the thread): records the frame at `offset` (if `Some`) and
+    /// settles a pending trace, attaching it to the error when `keep`.
+    /// Consumes and returns the owned error; unchanged without traces.
+    pub(crate) fn trace_caught(&mut self, err: BasicValueEnum<'ctx>, offset: Option<u32>, keep: bool) -> BasicValueEnum<'ctx> {
+        if self.opts.no_error_trace || self.f.as_ref().and_then(|f| f.hir).is_none() {
+            return err;
+        }
+        let site = match offset {
+            Some(o) => match self.error_site(o) {
+                Some(s) => s,
+                None => return err,
+            },
+            None => self.ptr_ty().const_null(),
+        };
+        let k = self.i64_ty().const_int(keep as u64, false);
+        self.when_error(err, |cg| cg.call_rt_v("zell_error_caught", &[err.into(), site.into(), k.into()]))
+    }
+
+    /// Releases an error whose propagation ends unobserved (`try ... else`,
+    /// a catch without a binding), dropping its pending trace.
+    pub(crate) fn trace_discard(&mut self, err: BasicValueEnum<'ctx>) {
+        if self.opts.no_error_trace {
+            self.call_rt("zell_release", &[err.into()]);
+        } else {
+            self.call_rt("zell_error_discarded", &[err.into()]);
+        }
+    }
+
+    /// Can the handler of `try ... catch local { handler }` observe the
+    /// error's trace? False when every use of `local` is the receiver of
+    /// `Message()` or an argument of `errors.Is`: the error then never
+    /// escapes the handler and its pending trace can be dropped instead of
+    /// attached (which would copy a shared error).
+    pub(crate) fn handler_keeps_trace(&self, handler: &Block, local: LocalId) -> bool {
+        let prog = self.prog;
+        let is_local = |e: &Expr| matches!(e.kind, ExprKind::Local(l) if l == local);
+        let mut uses: i64 = 0;
+        let mut safe: i64 = 0;
+        let mut captured = false;
+        walk_block(prog, handler, &mut |e, _pos: Pos| {
+            if is_local(e) {
+                uses += 1;
+            }
+            match &e.kind {
+                ExprKind::Call { callee: Callee::Interface { recv, method: 0 }, .. } if is_local(recv) && *prog.types.get(recv.ty) == Type::Error => safe += 1,
+                ExprKind::Call { callee: Callee::Extern(x), args } if prog.externs[x.0 as usize].path == "errors.Is" => {
+                    safe += args.iter().filter(|a| is_local(a)).count() as i64;
+                }
+                ExprKind::Closure { captures, .. } if captures.iter().any(|c| matches!(c, CaptureSource::Local(l) if *l == local)) => captured = true,
+                _ => {}
+            }
+        });
+        captured || uses > safe
     }
 }

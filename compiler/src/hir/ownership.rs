@@ -177,6 +177,12 @@ pub fn walk_function_stmts(p: &Program, func: &Function, f: &mut dyn FnMut(&Stmt
     w.block(&func.body);
 }
 
+/// Calls `f` for every expression of block `b` (nested blocks included).
+pub fn walk_block(p: &Program, b: &Block, f: &mut dyn FnMut(&Expr, Pos)) {
+    let mut w = Walker { p, f, s: None };
+    w.block(b);
+}
+
 /// Calls `f` for `e` (in position `pos`) and all its subexpressions.
 pub fn walk_expr(p: &Program, e: &Expr, pos: Pos, f: &mut dyn FnMut(&Expr, Pos)) {
     let mut w = Walker { p, f, s: None };

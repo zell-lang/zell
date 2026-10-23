@@ -444,11 +444,16 @@ zell_error *zell_error_unwrap(const zell_error *err);   /* owned inner or NULL *
 zell_string *zell_error_message(const zell_error *err); /* owned; full chain text */
 bool  zell_error_is(const zell_error *err, const zell_error *target);
 void *zell_error_as(const zell_error *err, const zell_type_info *type); /* [borrowed] payload */
-/* Error traces (ABI.md 7.4). Both take an OWNED err and return it (or its
- * copy-on-write replacement) OWNED; NULL err -> NULL. */
+/* Error traces (ABI.md 7.4). All take an OWNED err and return it (or its
+ * copy-on-write replacement) OWNED; NULL err -> NULL. A shared error (a
+ * sentinel) keeps its pending trace in a thread-local record until it is
+ * caught: `zell_error_caught` appends the frame `site` (if not NULL) and
+ * then attaches the record to a copy of the error (`keep`) or drops it. */
 zell_error *zell_error_created(zell_error *err, const zell_error_site *site);
 zell_error *zell_error_returned(zell_error *err, const zell_error_site *site,
                                   const zell_string *ctx);
+zell_error *zell_error_caught(zell_error *err, const zell_error_site *site, int64_t keep);
+void zell_error_discarded(zell_error *err);  /* drops the record, releases err */
 zell_string *zell_error_trace(const zell_error *err);              /* owned; "" if none */
 void zell_error_frames(const zell_error *err, zell_slice *out);    /* owned []errors.Frame */
 extern const zell_value_ops zell_ops_error_frame;  /* ops of a 32-byte errors.Frame */

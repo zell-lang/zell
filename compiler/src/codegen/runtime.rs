@@ -76,6 +76,8 @@ const RUNTIME: &[(&str, &str, bool)] = &[
     ("zell_error_as", "p:pp", false),
     ("zell_error_created", "p:pp", false),
     ("zell_error_returned", "p:ppp", false),
+    ("zell_error_caught", "p:ppl", false),
+    ("zell_error_discarded", "v:p", false),
     ("zell_error_report", "v:p", false),
     ("zell_panic", "v:p", true),
     ("zell_panic_str", "v:p", true),

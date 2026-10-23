@@ -150,7 +150,7 @@ static void frame_push(zell_error *e, const zell_error_site *site, const zell_st
     }
     zell_error_frame *f = frame_at(e, i);
     f->site = site;
-    zell_retain((void *)ctx);
+    if (ctx) zell_retain((void *)ctx);
     f->ctx = (zell_string *)ctx;
     e->nframes = i + 1;
 }
@@ -186,29 +186,160 @@ static zell_error *unshare(zell_error *err) {
     return c;
 }
 
+/* ---- pending traces of shared errors ----
+ * A shared error (a sentinel, or any error with other holders) is not
+ * copied while it propagates: its creation site and `returned via` frames
+ * go to a thread-local record keyed by the error pointer. The record is
+ * consumed where the propagation ends (zell_error_caught: `try ... catch`,
+ * the result of an async function, the error of `main`), either attached to
+ * a copy of the error or dropped when the handler never looks at the trace.
+ * Records nest (a defer or a handler may propagate another error while one
+ * is in flight); a full stack or a long trace falls back to the copy. */
+#define PEND_DEPTH 8
+#define PEND_FRAMES 24
+
+typedef struct {
+    const zell_error *err;
+    const zell_error_site *created;
+    int64_t n;
+    const zell_error_site *sites[PEND_FRAMES];   /* `?` frames, never with ctx */
+} pend_rec;
+
+/* One thread-local block (initial-exec: the runtime is linked into the
+ * executable, so the address is a constant offset, no __tls_get_addr). */
+static _Thread_local __attribute__((tls_model("initial-exec"))) struct {
+    int n;
+    pend_rec recs[PEND_DEPTH];
+} t_pend_tls;
+#define t_npend t_pend_tls.n
+#define t_pend t_pend_tls.recs
+
+/* Is `err` uniquely referenced? Fast for a fresh error (refcount word 1)
+ * and for a sentinel (immortal word); other words ask zell_refcount. */
+static inline bool unique(const zell_error *err) {
+    int64_t rc = __atomic_load_n(&err->hdr.refcount, __ATOMIC_RELAXED);
+    if (rc == 1) return true;
+    if (rc == ZELL_RC_IMMORTAL) return false;
+    return zell_refcount(err) == 1;
+}
+
+static pend_rec *pend_find(const zell_error *err) {
+    for (int i = t_npend - 1; i >= 0; i--)
+        if (t_pend[i].err == err) return &t_pend[i];
+    return NULL;
+}
+
+static void pend_remove(pend_rec *r) {
+    int i = (int)(r - t_pend);
+    if (i < t_npend - 1) memmove(r, r + 1, (size_t)(t_npend - 1 - i) * sizeof *r);
+    t_npend--;
+}
+
+/* Does the trace of `err` live in a pending record (no trace in the object)? */
+static inline bool trace_pending(const zell_error *err) {
+    return !err->created && err->nframes == 0 && t_npend > 0;
+}
+
+/* Moves the pending record `r` into `err` (uniquely owned, no trace of its
+ * own) and drops the record. */
+static void pend_adopt(zell_error *err, pend_rec *r) {
+    err->created = r->created;
+    for (int64_t i = 0; i < r->n; i++) frame_push(err, r->sites[i], NULL);
+    pend_remove(r);
+}
+
+/* Attaches the pending record `r` of `err` to the error itself: to `err`
+ * when it is uniquely owned, else to the copy-on-write copy the trace would
+ * have had. Consumes err, returns the owned error. */
+static zell_error *materialize(zell_error *err, pend_rec *r) {
+    if (!unique(err)) {
+        zell_retain(err);               /* makes unshare copy; consumes our ref below */
+        zell_error *c = unshare(err);
+        zell_release(err);
+        err = c;
+    }
+    pend_adopt(err, r);
+    return err;
+}
+
 zell_error *zell_error_created(zell_error *err, const zell_error_site *site) {
     if (!err || err->created || !site) return err;
-    err = unshare(err);
-    err->created = site;
+    if (unique(err)) {
+        pend_rec *r = trace_pending(err) ? pend_find(err) : NULL;
+        if (r) pend_adopt(err, r);      /* the record already holds the site */
+        else err->created = site;
+    } else if (err->nframes == 0 && t_npend < PEND_DEPTH) {
+        pend_rec *r = &t_pend[t_npend++];
+        r->err = err;
+        r->created = site;
+        r->n = 0;
+    } else {
+        err = unshare(err);
+        err->created = site;
+    }
     if (__atomic_load_n(&zell_dbg_on, __ATOMIC_RELAXED) && zell__dbg_error_fn) zell__dbg_error_fn(err);
     return err;
 }
 
-zell_error *zell_error_returned(zell_error *err, const zell_error_site *site, const zell_string *ctx) {
-    if (!err) return NULL;
+static inline zell_error *returned(zell_error *err, const zell_error_site *site, const zell_string *ctx) {
+    pend_rec *r = trace_pending(err) ? pend_find(err) : NULL;
     if (ctx) {
         zell_error *w = zell_error_wrap(err, ctx);
-        trace_copy(w, err);
+        if (r) pend_adopt(w, r);
+        else trace_copy(w, err);
         zell_release(err);
         err = w;
-    } else {
-        err = unshare(err);
+    } else if (!unique(err)) {
+        if (r && r->n < PEND_FRAMES) {
+            r->sites[r->n++] = site;
+            return err;
+        }
+        err = r ? materialize(err, r) : unshare(err);
+    } else if (r) {
+        pend_adopt(err, r);
     }
     frame_push(err, site, ctx);
     return err;
 }
 
-/* A growable byte buffer for building the trace text. */
+zell_error *zell_error_returned(zell_error *err, const zell_error_site *site, const zell_string *ctx) {
+    return err ? returned(err, site, ctx) : NULL;
+}
+
+zell_error *zell_error_caught(zell_error *err, const zell_error_site *site, int64_t keep) {
+    if (!err) return NULL;
+    if (site) err = returned(err, site, NULL);
+    pend_rec *r = trace_pending(err) ? pend_find(err) : NULL;
+    if (!r) return err;
+    if (keep) return materialize(err, r);
+    pend_remove(r);
+    return err;
+}
+
+void zell_error_discarded(zell_error *err) {
+    if (!err) return;
+    if (trace_pending(err)) {
+        pend_rec *r = pend_find(err);
+        if (r) pend_remove(r);
+    }
+    zell_release(err);
+}
+
+/* The error whose trace to print: `err`, or a temporary copy holding its
+ * pending record (the record stays). Owned when *tmp is set. */
+static const zell_error *trace_view(const zell_error *err, zell_error **tmp) {
+    *tmp = NULL;
+    if (!err || !trace_pending(err)) return err;
+    pend_rec *r = pend_find(err);
+    if (!r) return err;
+    zell_error *c = error_alloc();
+    c->created = r->created;
+    for (int64_t i = 0; i < r->n; i++) frame_push(c, r->sites[i], NULL);
+    *tmp = c;
+    return c;
+}
+
+/* ---- trace text ---- */
 typedef struct { char *p; size_t len, cap; } tbuf;
 
 static void tb_put(tbuf *b, const char *s, size_t n) {
@@ -235,6 +366,8 @@ static int loc_len(const zell_error_site *s) {
 
 zell_string *zell_error_trace(const zell_error *err) {
     if (!err) return zell_string_new("", 0);
+    zell_error *tmp;
+    err = trace_view(err, &tmp);
     int64_t n = err->nframes + (err->created ? 1 : 0);
     size_t maxloc = 0, maxfn = 0;
     for (int64_t i = 0; i < n; i++) {
@@ -269,6 +402,7 @@ zell_string *zell_error_trace(const zell_error *err) {
     }
     zell_string *r = zell_string_new(b.p ? b.p : "", (int64_t)b.len);
     zell_free(b.p);
+    zell_release(tmp);
     return r;
 }
 
@@ -292,6 +426,8 @@ static void frame_rec_release(void *slot) {
 const zell_value_ops zell_ops_error_frame = { frame_rec_retain, frame_rec_release, NULL };
 
 void zell_error_frames(const zell_error *err, zell_slice *out) {
+    zell_error *tmp;
+    err = trace_view(err, &tmp);
     int64_t n = err ? err->nframes + (err->created ? 1 : 0) : 0;
     zell_slice_new_ops(out, (int64_t)sizeof(frame_rec), n, n, &zell_ops_error_frame);
     for (int64_t i = 0; i < n; i++) {
@@ -307,6 +443,7 @@ void zell_error_frames(const zell_error *err, zell_slice *out) {
             r->ctx = fr->ctx;
         }
     }
+    zell_release(tmp);
 }
 
 void zell_error_report(const zell_error *err) {

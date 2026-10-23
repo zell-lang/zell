@@ -163,6 +163,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // Suspended at least once: publish the result through the task
         // (which retains it) and drop the frame's reference.
         self.b.position_at_end(fin_task);
+        if let Some(t) = rt {
+            self.settle_fallible_slot(t, slot);
+        }
         self.call_rt("zell_task_complete", &[own.into(), slot.into()]);
         if let Some(t) = rt {
             if self.needs_rc(t) {
@@ -418,5 +421,28 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let s = self.b.build_insert_value(s, err, 1, "").unwrap();
         let _ = IntPredicate::EQ;
         Ok(Val::owned(s.into_struct_value().into()))
+    }
+
+    /// Attaches the pending trace of the error in the `T!` result `slot`
+    /// (type `t`) to the error itself (`trace_caught` with `keep`): the
+    /// result is published to a task and may be awaited on another thread,
+    /// where the thread-local record is out of reach. No-op for other types.
+    fn settle_fallible_slot(&mut self, t: TypeId, slot: PointerValue<'ctx>) {
+        if self.opts.no_error_trace {
+            return;
+        }
+        let Type::Fallible(inner) = self.ty(t).clone() else { return };
+        if *self.ty(inner) == Type::Void {
+            let e = self.b.build_load(self.ptr_ty(), slot, "err").unwrap();
+            let e = self.trace_caught(e, None, true);
+            self.b.build_store(slot, e).unwrap();
+        } else {
+            let st = self.llty(t).into_struct_type();
+            let v = self.b.build_load(st, slot, "res").unwrap().into_struct_value();
+            let e = self.b.build_extract_value(v, 1, "err").unwrap();
+            let e = self.trace_caught(e, None, true);
+            let v = self.b.build_insert_value(v, e, 1, "").unwrap();
+            self.b.build_store(slot, v).unwrap();
+        }
     }
 }
