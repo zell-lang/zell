@@ -236,3 +236,27 @@ lazy tasks / 15 frames per round trip (`for msg in conn` -> `Next` ->
 await" cost as await_chain; register fds at socket creation. Windows
 `test_net` under wine fails on a Unix-socket `access()` check
 (`test_net.c:601`) — likely pre-existing, not confirmed on the base.
+
+
+## Evening batch (2026-10-23, all merged, master `5a107a5`)
+
+- ChaCha20-Poly1305: AVX2 8-block ChaCha with radix-2^44 Poly1305
+  interleaved into the round loop; 560 -> 2 559 MB/s (Go 4 360, **1.7x**,
+  was 7.8x). `ZELL_NO_AVX2=1`; fallback proven under `qemu -cpu Nehalem`.
+  Left for <= 1.5x: vectorised Poly1305 (26-bit limbs, 4-way AVX2) fused
+  with ChaCha, as OpenSSL/Go do.
+- `strconv.Itoa/FormatInt/FormatUint` straight to `zell_string_from_int`,
+  and `fmt.Format("{0}", x)` lowered to the plain string conversion:
+  `builder 100 MB` 645 -> 359 ms (Go 275, **1.3x**, was 5.1x this
+  morning). Left: `zell_string_from_int` double copy in `string.c`,
+  `fmt.Format` with one `{N}` plus literal text still builds the args
+  slice, `text.template` render path 2.6x (not profiled).
+- Toolchain: all workflows manual-only; prebuilt `toolchain-inputs` release
+  (targets + lld per host, keys from script/runtime hashes, `--prebuilt`);
+  macOS host build fixed (deployment target, archiver next to clang,
+  static-only LLVM shim so bin/zell depends on /usr/lib only); release dry
+  run green in ~10 min; `zell-0.1.0-macos-arm64.tar.xz` (26 MB) produced —
+  to be tested on a real Mac (ad-hoc signatures of lld output on Apple
+  Silicon, zell-lsp from the archive).
+- Fixed on the way: mutex fast path ignoring the queue guard (double owner,
+  "unlock of unlocked mutex" in the arm64 bundle smoke).
