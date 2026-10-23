@@ -296,16 +296,23 @@ async func recv(st *connState) Message! {
     if st.gotClose {
         return CloseError{Code: st.closeCode, Reason: st.closeReason}
     }
+    // The frame is parsed straight from the connection's read buffer
+    // (rc.b): the header, the extended length and the mask key are read
+    // in place, and the only await is a refill when the buffer runs short.
+    var c = st.rc.c
+    var b = st.rc.b
     for {
-        var hdr = try await st.rc.ReadExact(2) catch err {
-            st.gotClose = true
-            st.closeCode = 1006
-            st.tcpClosed = true
-            st.rc.Close()
-            return CloseError{Code: 1006}
+        if b.buffered() < 2 {
+            try await net.http.fillTo(c, b, 2) catch err {
+                st.gotClose = true
+                st.closeCode = 1006
+                st.tcpClosed = true
+                st.rc.Close()
+                return CloseError{Code: 1006}
+            }
         }
-        var b0 = int(hdr[0])
-        var b1 = int(hdr[1])
+        var b0 = int(b.buf[b.r])
+        var b1 = int(b.buf[b.r + 1])
         var fin = (b0 & 128) != 0
         var op = b0 & 15
         var masked = (b1 & 128) != 0
@@ -319,23 +326,35 @@ async func recv(st *connState) Message! {
             }
             return await failConn(st, 1002, "unmasked frame from the client")
         }
+        var hl = 2
         if n == 126 {
-            var ext = await st.rc.ReadExact(2)?
-            n = (int(ext[0]) << 8) | int(ext[1])
+            hl = 4
         } else if n == 127 {
-            var ext = await st.rc.ReadExact(8)?
+            hl = 10
+        }
+        if masked {
+            hl += 4
+        }
+        if b.buffered() < hl {
+            await net.http.fillTo(c, b, hl)?
+        }
+        var p = b.r + 2
+        if n == 126 {
+            n = (int(b.buf[p]) << 8) | int(b.buf[p + 1])
+            p += 2
+        } else if n == 127 {
             n = 0
             for i in 0..8 {
-                n = (n << 8) | int(ext[i])
+                n = (n << 8) | int(b.buf[p + i])
             }
+            p += 8
             if n < 0 {
                 return await failConn(st, 1009, "frame too large")
             }
         }
         var key = 0
         if masked {
-            var k = await st.rc.ReadExact(4)?
-            key = (int(k[0]) << 24) | (int(k[1]) << 16) | (int(k[2]) << 8) | int(k[3])
+            key = (int(b.buf[p]) << 24) | (int(b.buf[p + 1]) << 16) | (int(b.buf[p + 2]) << 8) | int(b.buf[p + 3])
         }
         if op >= 8 && (n > 125 || !fin) {
             return await failConn(st, 1002, "invalid control frame")
@@ -345,11 +364,16 @@ async func recv(st *connState) Message! {
         }
         var payload []byte = []
         if n > 0 {
-            payload = await st.rc.ReadExact(n)?
+            if b.buffered() < hl + n {
+                await net.http.fillTo(c, b, hl + n)?
+            }
+            var at = b.r + hl
+            payload = bytes.Clone(b.buf[at..at + n])
             if masked {
                 net.http.rtMask(payload, 0, n, key, 0)
             }
         }
+        b.skip(hl + n)
         switch op {
             case 8:
                 var code = 1005
