@@ -285,6 +285,15 @@ static bool queued_work(void) {
     return false;
 }
 
+/* Whether another worker's run-next slot is full (sequentially consistent
+ * loads: the parking protocol). */
+static bool any_runnext_full(worker *w) {
+    int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
+    for (int64_t i = 0; i < n; i++)
+        if (workers[i] != w && runnext_full(workers[i])) return true;
+    return false;
+}
+
 /* A run-next slot of another worker that stays full for the grace period
  * (its owner is busy with a long job rather than about to take it) is
  * taken by w: returns true with the record in *out. Owners normally take
@@ -461,14 +470,18 @@ static void *worker_main(void *arg) {
         /* spare threads retire once enough unblocked workers exist again */
         if (w->spare && q_alive - q_blocked > q_nworkers) break;
         __atomic_add_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
-        /* A poster stores its queue's tail, then reads q_idle; we raised
-         * q_idle and now read the queues: one of us sees the other. (A
-         * run-next slot is its owner's to take; one that lingers behind a
-         * long job is found by the next spinner.) */
-        if (queued_work()) {
+        /* A poster stores its queue's tail (or its run-next state), then
+         * reads q_idle; we raised q_idle and now read the queues: one of us
+         * sees the other. A run-next slot is its owner's to take, but a job
+         * that never yields (a loop that keeps finding completed tasks)
+         * would starve it with every other worker parked and nobody
+         * posting: so a full slot is given its grace period, outside the
+         * lock, and stolen if the owner has not taken it by then. */
+        if (queued_work() || any_runnext_full(w)) {
             STAT(recheck);
             __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
             zell__plat_mutex_unlock(&q_mu);
+            if (lingering_runnext(w, &j)) run_job(&j);
             continue;
         }
         if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == q_alive) zell__plat_cond_broadcast(&idle_cv);  /* drained */

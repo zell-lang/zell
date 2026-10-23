@@ -225,6 +225,39 @@ TEST(relay_handoffs) {
     zell_release(t);
 }
 
+/* ---- a run-next slot behind a job that never yields: the job completes a
+ * task (its awaiter lands in this worker's run-next slot) and then spins
+ * until that awaiter has run, which it only can if another worker steals
+ * the slot after the grace period (the select_many deadlock: a loop that
+ * keeps finding completed tasks never gives its worker back). ---- */
+
+static int64_t starved_ran;
+
+static void starved_cont(void *arg) { (void)arg; __atomic_store_n(&starved_ran, 1, __ATOMIC_RELEASE); }
+
+static void hog_job(zell_task *t, void *ctx) {
+    (void)ctx;
+    zell_task *w = zell_task_new_plain(0, NULL);
+    zell_task_add_continuation(w, starved_cont, NULL);
+    zell_task_complete(w, NULL);   /* the continuation goes to this worker's run-next slot */
+    zell_release(w);
+    int64_t t0 = now_ms();
+    while (!__atomic_load_n(&starved_ran, __ATOMIC_ACQUIRE)) {
+        assert(now_ms() - t0 < 5000);
+        for (volatile int i = 0; i < 1000; i++) {}   /* busy, never yields */
+    }
+    zell_task_complete(t, NULL);
+}
+
+TEST(runnext_stolen_from_busy_worker) {
+    for (int round = 0; round < 20; round++) {
+        starved_ran = 0;
+        zell_task *t = zell_task_spawn(hog_job, NULL);
+        zell_task_await(t);
+        zell_release(t);
+    }
+}
+
 /* ---- results with refcounted payloads ---- */
 
 static void make_str(zell_task *t, void *ctx) {
@@ -687,6 +720,7 @@ int main(int argc, char **argv) {
     RUN(relay_handoffs);
     RUN(work_stealing);
     RUN(runnext_fairness);
+    RUN(runnext_stolen_from_busy_worker);
     RUN(refcounted_result);
     RUN(mutex);
     RUN(channel_unbuffered);

@@ -1100,7 +1100,12 @@ built as `*_async` variants that return a `zell_task *`.
     most; a worker that found work while holding the token hands it to
     another parked worker if work is still queued. Posters and parkers
     use a store-then-load protocol (sequentially consistent) so a post is
-    never missed by a worker about to park.
+    never missed by a worker about to park; this covers run-next posts
+    too: a worker about to park that sees another worker's run-next slot
+    full gives it the grace period and steals it if its owner has not
+    taken it by then, so a job that never yields (a loop that keeps finding
+    completed tasks) cannot starve the continuation it posted while every
+    other worker sleeps.
   - A worker that blocks inside `zell_task_await` first moves its run-next
     job to its ring and wakes a worker to steal from it; a spare worker is
     started if nobody is idle (10.5). At most 1024 worker threads (core
