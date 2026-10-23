@@ -1,0 +1,41 @@
+lifo body
+third
+second
+first
+x is 2
+x was 1
+discard body
+compute 3
+fails exit 1
+fails ok 1
+propagate exit 1
+got 11
+fails exit 2
+propagate exit 2
+caught bad
+in block
+nested body true
+case true
+deferred block value
+nested body false
+case false
+else branch
+inc new 1
+receiver body
+inc old 1
+drop old
+drop new
+value body
+inc val 11
+drop val
+closure body
+closure sees 5
+loop body
+iter 2
+iter 1
+iter 0
+loop done
+job resumed alpha
+job cleanup alpha
+got 5
+main done

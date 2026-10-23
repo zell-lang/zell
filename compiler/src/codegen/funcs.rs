@@ -118,7 +118,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// The exit block: deferred calls, release of locals, return.
     fn emit_exit(&mut self) -> R<()> {
-        self.run_defers();
+        self.run_defers()?;
         self.release_locals();
         if self.fs().coro.is_some() {
             return self.coro_return();
@@ -241,9 +241,28 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
-    /// Runs the pending deferred closures, last first.
-    fn run_defers(&mut self) {
-        let Some((arr, n)) = self.fs().defers else { return };
+    /// Runs the deferred calls, last first: the open-coded ones (a function
+    /// has either kind, never both) each under its armed flag, then the
+    /// heap array.
+    fn run_defers(&mut self) -> R<()> {
+        let open = std::mem::take(&mut self.fs_mut().open_defers);
+        for (i, (armed, call)) in open.iter().enumerate().rev() {
+            // SAFETY: the pointer was taken from `fs().hir` (a `&'a
+            // hir::Function`) by `emit_defer` in this same function body.
+            let call: &hir::Expr = unsafe { &**call };
+            let run = self.block(&format!("defer{i}.run"));
+            let next = self.block(&format!("defer{i}.next"));
+            let a = self.b.build_load(self.ctx.bool_type(), *armed, "armed").unwrap().into_int_value();
+            self.b.build_conditional_branch(a, run, next).unwrap();
+            self.b.position_at_end(run);
+            let d = self.depth();
+            self.dbg_span(call.span);
+            self.expr_discard(call)?;
+            self.release_temps_from(d);
+            self.br(next);
+            self.b.position_at_end(next);
+        }
+        let Some((arr, n)) = self.fs().defers else { return Ok(()) };
         let check = self.block("defer.check");
         let run = self.block("defer.run");
         let done = self.block("defer.done");
@@ -265,12 +284,20 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.call_rt("zell_release", &[env.into()]);
         self.b.build_unconditional_branch(check).unwrap();
         self.b.position_at_end(done);
+        Ok(())
     }
 
-    /// `defer closure`.
+    /// `defer`: open-coded (the operand is the call) arms the statement's
+    /// flag; otherwise the closure is pushed on the defer array.
     pub(crate) fn emit_defer(&mut self, e: &hir::Expr) -> R<()> {
         if self.fs().hir.is_none() {
             return super::unsupported("defer outside a function body");
+        }
+        if !matches!(e.kind, hir::ExprKind::Closure { .. }) {
+            let armed = self.entry_alloca(self.ctx.bool_type().into(), "defer.armed", true);
+            self.b.build_store(armed, self.ctx.bool_type().const_int(1, false)).unwrap();
+            self.fs_mut().open_defers.push((armed, e as *const hir::Expr));
+            return Ok(());
         }
         let (arr, n) = match self.fs().defers {
             Some(d) => d,

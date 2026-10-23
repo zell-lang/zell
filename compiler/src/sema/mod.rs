@@ -254,6 +254,10 @@ pub(crate) struct FnCtx {
     /// The body has syntax errors (recovered by the parser): whole-body
     /// checks (unused variables, missing return) are skipped.
     pub recovering: bool,
+    /// The function's `defer` statements are open-coded
+    /// ([`hir::StmtKind::Defer`]): none is inside a loop and there are at
+    /// most [`hir::MAX_OPEN_DEFERS`]. Set by [`Sema::fn_body`].
+    pub open_defers: bool,
 }
 
 impl FnCtx {
@@ -272,6 +276,7 @@ impl FnCtx {
             next_label: 0,
             try_depth: 0,
             recovering: false,
+            open_defers: false,
         }
     }
 
@@ -662,7 +667,8 @@ impl<'a> Sema<'a> {
     /// Declares a new local in the innermost function and scope.
     pub fn declare_local(&mut self, name: &str, ty: TypeId, kind: LocalKind, span: Span) -> LocalId {
         let dup = self.fns.last().and_then(|f| f.scopes.last()).is_some_and(|s| s.iter().any(|(n, _)| n == name));
-        if dup && name != "_" && kind != LocalKind::Temp {
+        let temp = matches!(kind, LocalKind::Temp | LocalKind::DeferArg);
+        if dup && name != "_" && !temp {
             let prev = self.fns.last().and_then(|f| {
                 f.scopes.last()?.iter().rev().find(|(n, _)| n == name).and_then(|(_, e)| match e {
                     ScopeEntry::Local(l) => Some(f.locals[l.0 as usize].span),
@@ -680,7 +686,7 @@ impl<'a> Sema<'a> {
         // Parameters, pattern bindings, catch variables and temps never count
         // as unused.
         f.used.push(!matches!(kind, LocalKind::Var | LocalKind::LoopVar));
-        if kind != LocalKind::Temp && name != "_" {
+        if !temp && name != "_" {
             f.scopes.last_mut().unwrap().push((name.to_string(), ScopeEntry::Local(id)));
             self.ide_def_local(name, id, span);
         }
@@ -916,6 +922,7 @@ impl<'a> Sema<'a> {
 
     /// Checks a function body block and the missing-return rule.
     pub fn fn_body(&mut self, body: &ast::Block, ret: TypeId, name_span: Span) -> hir::Block {
+        self.fcx().open_defers = stmt::open_defers_ok(&body.stmts);
         let block = self.block(body);
         let needs_return = !matches!(self.tt.get(ret), Type::Void | Type::Invalid)
             && !matches!(self.tt.fallible_inner(ret).map(|t| self.tt.get(t)), Some(Type::Void));

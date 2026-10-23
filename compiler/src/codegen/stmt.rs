@@ -80,7 +80,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     }
                     None => self.zero_local(*local)?,
                 }
-                self.scope_local(*local);
+                // An open-coded defer's operand lives to the exit block.
+                if self.fs().hir.unwrap().locals[local.0 as usize].kind != crate::hir::LocalKind::DeferArg {
+                    self.scope_local(*local);
+                }
                 Ok(())
             }
             StmtKind::LetTuple { locals, init } => {

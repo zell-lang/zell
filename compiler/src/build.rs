@@ -793,7 +793,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
         set_sections(&part);
         let mut h = Sha256::new();
         h.update(compiler.as_bytes());
-        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none()).as_bytes());
+        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0open_defer={}\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none(), std::env::var_os("ZELL_NO_OPEN_DEFER").is_none()).as_bytes());
         h.update(format!("agent={}\0", opts.debug_agent_on()).as_bytes());
         h.update(part.print_to_string().to_bytes());
         let key = lock::hex(&h.finalize()[..8]);
