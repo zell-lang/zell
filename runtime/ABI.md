@@ -2197,6 +2197,7 @@ per-thread scratch buffer for heads and the per-thread result of
 | `rtHasToken(v, token) bool` | `zell_net_http_rt_has_token` | comma-separated token membership, ASCII case-insensitive, `;params` ignored |
 | `rtStatusText(code)`, `rtDate()`, `rtHttpTime(sec)`, `rtParseHttpTime(s) int` | `zell_net_http_rt_status_text`, `_date`, `_http_time`, `_parse_http_time` | reason phrases; the cached IMF-fixdate; Unix seconds to/from HTTP dates (IMF-fixdate, RFC 850, asctime; -1 if invalid) |
 | `rtItoa(n)`, `rtAtoi(s) int` | `zell_net_http_rt_itoa`, `_atoi` | decimal; a non-negative decimal of at most 18 digits or -1 |
+| `strconv.rtItoa(n int)`, `rtUtoa(n uint) string` | `zell_strconv_rt_itoa`, `_utoa` | base-10 digits written straight into the result (`zell_string_from_int/uint`); +1 |
 | `rtMask(b, off, n, key, phase)` | `zell_net_http_rt_mask` | WebSocket masking in place with a big-endian 32-bit key starting at key byte `phase` (8 bytes per step) |
 | `net.http.hpack.rtHuffLen(s) int`, `rtHuffEncode(s) []byte`, `rtHuffDecode(b, off, n) string!` | `zell_net_http_hpack_rt_huff_len`, `_encode`, `_decode` | the HPACK Huffman code of RFC 7541 appendix B (padding with EOS bits; decoding rejects EOS, padding over 7 bits or not all ones) |
 

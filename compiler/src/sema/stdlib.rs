@@ -1057,8 +1057,8 @@ pub const FUNCS: &[StdFunc] = &[
     f!("net.tls", "rtAeadSeal", "[]byte, []byte, []byte, []byte", "[]byte", "zell_net_tls_rt_aead_seal"),
     f!("net.tls", "rtAeadOpen", "[]byte, []byte, []byte, []byte", "[]byte!", "zell_net_tls_rt_aead_open"),
     // tier 0/1 stdlib (docs/STDLIB.md): strconv (std_strconv.c), unicode (std_unicode.c)
-    f!("strconv", "rtItoa", "int", "string", "zell_string_from_int"),
-    f!("strconv", "rtUtoa", "uint", "string", "zell_string_from_uint"),
+    f!("strconv", "rtItoa", "int", "string", "zell_strconv_rt_itoa"),
+    f!("strconv", "rtUtoa", "uint", "string", "zell_strconv_rt_utoa"),
     f!("strconv", "rtFormatFloat","float, int, int", "string", "zell_strconv_rt_format_float"),
     f!("strconv", "rtParseFloat", "string", "float!", "zell_strconv_rt_parse_float"),
     f!("unicode", "IsLetter", "char", "bool", "zell_unicode_is_letter"),

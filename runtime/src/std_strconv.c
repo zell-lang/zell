@@ -96,3 +96,8 @@ double zell_strconv_rt_parse_float(const zell_string *s, zell_error **err) {
     }
     return v;
 }
+
+/* strconv.Itoa / FormatInt / FormatUint in base 10: the string's digits are
+ * written straight into the result (string.c). +1 return. */
+zell_string *zell_strconv_rt_itoa(int64_t n) { return zell_string_from_int(n); }
+zell_string *zell_strconv_rt_utoa(uint64_t n) { return zell_string_from_uint(n); }
