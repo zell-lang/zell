@@ -182,44 +182,58 @@ func newConn(rc net.http.RawConn, client bool, proto string) Conn {
 
 // ---- framing ------------------------------------------------------------------
 
-// The frame header (and masked copy of the payload for clients).
+// The whole frame (header, mask key for clients, payload masked for
+// clients) in one buffer of its exact size.
 func encodeFrame(st *connState, op int, data []byte, fin bool) []byte {
-    var h []byte = []
+    var n = len(data)
+    var hl = 2
+    if n >= 65536 {
+        hl = 10
+    } else if n >= 126 {
+        hl = 4
+    }
+    if st.client {
+        hl += 4
+    }
+    var out = net.MakeBuffer(hl + n)
     var b0 = op
     if fin {
         b0 = b0 | 128
     }
-    h = append(h, byte(b0))
+    out[0] = byte(b0)
     var maskBit = 0
     if st.client {
         maskBit = 128
     }
-    var n = len(data)
+    var p = 2
     if n < 126 {
-        h = append(h, byte(maskBit | n))
+        out[1] = byte(maskBit | n)
     } else if n < 65536 {
-        h = append(h, byte(maskBit | 126))
-        h = append(h, byte(n >> 8))
-        h = append(h, byte(n & 255))
+        out[1] = byte(maskBit | 126)
+        out[2] = byte(n >> 8)
+        out[3] = byte(n & 255)
+        p = 4
     } else {
-        h = append(h, byte(maskBit | 127))
+        out[1] = byte(maskBit | 127)
         var shift = 56
         for shift >= 0 {
-            h = append(h, byte((n >> shift) & 255))
+            out[p] = byte((n >> shift) & 255)
+            p += 1
             shift -= 8
         }
     }
+    if n > 0 {
+        _ = net.rtCopyBytes(out, hl, data, 0, n)
+    }
     if !st.client {
-        return net.rtJoin(h, data, n)
+        return out
     }
     var key = random.Int() & 4294967295
-    h = append(h, byte((key >> 24) & 255))
-    h = append(h, byte((key >> 16) & 255))
-    h = append(h, byte((key >> 8) & 255))
-    h = append(h, byte(key & 255))
-    var off = len(h)
-    var out = net.rtJoin(h, data, n)
-    net.http.rtMask(out, off, n, key, 0)
+    out[p] = byte((key >> 24) & 255)
+    out[p + 1] = byte((key >> 16) & 255)
+    out[p + 2] = byte((key >> 8) & 255)
+    out[p + 3] = byte(key & 255)
+    net.http.rtMask(out, hl, n, key, 0)
     return out
 }
 
@@ -244,7 +258,20 @@ async func writeFrame(st *connState, op int, data []byte, fin bool) void! {
     if op >= 8 && len(data) > 125 {
         return error("websocket: control frame payload over 125 bytes")
     }
-    await sendRaw(st, encodeFrame(st, op, data, fin))?
+    // sendRaw inlined (one coroutine frame less per message); an
+    // uncontended Lock returns the runtime's finished task, no allocation.
+    var frame = encodeFrame(st, op, data, fin)
+    await st.wmu.Lock()
+    var failed error
+    try {
+        _ = await st.rc.Write(frame)?
+    } catch err {
+        failed = err
+    }
+    st.wmu.Unlock()
+    if failed != nil {
+        return failed
+    }
 }
 
 async func writeFragments(st *connState, typ int, parts [][]byte) void! {
