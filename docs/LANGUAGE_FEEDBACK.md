@@ -98,3 +98,15 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     prints `main.go:10`. Wanted: a compact pc→file:line table in the binary
     (works stripped, no DWARF reader at run time), used by the panic printer and
     by error traces.
+
+26. **Known red test: `compiler/tests/reflection.rs::no_reflection_without_use`.**
+    Every program, even `println(1)`, loads `reflect` and type-checks ~755
+    stdlib instances. Root cause (traced 2026-10-23): stdlib interfaces are
+    registered eagerly from the module summaries and `resolve_signatures`
+    resolves every stdlib interface method signature up front;
+    `net.http.Handler.Serve(req *Request, …)` forces the `Request` template,
+    whose fields force `RequestBody`, `net.sock`, `time`, `log` … down to
+    `strings.Builder` and `reflect`. Fix: resolve stdlib interface signatures
+    (or struct fields of forced templates) lazily, on first use of the
+    interface. `zell check hello.zl` still takes 0.05 s, so this is about
+    pruning/intent, not speed.
