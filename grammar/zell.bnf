@@ -102,7 +102,7 @@ struct_member ::= attribute* (method_decl | field_decl | embed_decl) eos?
 // `Port int = 8080`: a default value (attribute structs, options).
 // A field may be named by a keyword (`enum string`, `default string`),
 // except FUNC, STATIC and ASYNC, which start a method.
-field_decl ::= field_name type (ASSIGN expr)?
+field_decl ::= field_name (COMMA field_name)* type (ASSIGN expr)?
 field_name ::= IDENTIFIER | NAMESPACE | IMPORT | AS | STRUCT | INTERFACE | ENUM | AWAIT | VAR | CONST | IF | ELSE | FOR | SWITCH | CASE | DEFAULT | RETURN | BREAK | CONTINUE | DEFER | TRY | CATCH | NEW | NIL | TRUE | FALSE | MAP | THIS
 embed_decl ::= type
 method_decl ::= STATIC? func_decl

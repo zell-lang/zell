@@ -2507,7 +2507,7 @@ interface   = [ "sealed" ] "interface" ident "{" { type | ifacemethod } "}" ;   
 ifacemethod = { attribute } [ "async" ] "func" ident "(" [ params ] ")" [ type ] [ block ] ;  (* block: default method *)
 enum        = "enum" ident [ generics ] [ "implements" type { "," type } ] "{" variant { ( "," | newline ) variant } { method } "}" ;
 variant     = { attribute } ident [ "(" params ")" ] ;
-field       = { attribute } name type [ "=" expr ] ;   (* name: not "func", "static", "async" *)
+field       = { attribute } name { "," name } type [ "=" expr ] ;   (* name: not "func", "static", "async" *)
 method      = [ "static" ] func ;
 func        = [ "async" ] "func" ident [ generics ] "(" [ params ] ")" [ type ] block ;
 externfunc  = "extern" "func" ident "(" [ params ] ")" [ type ] ;   (* только в std/**/*_extern.zl *)
