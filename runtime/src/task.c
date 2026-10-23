@@ -1,7 +1,8 @@
-/* task.c - thread-pool scheduler, tasks, timers, mutex, channels, the
- * per-task context slot and small primitives for task (signals, spin
- * locks, yield). Threads, the CPU count and the clock come from the platform
- * layer (platform/platform.h); the I/O poller is in task_io.c. */
+/* task.c - thread-pool scheduler, tasks, timers, the per-task context slot
+ * and small primitives for task (signals, spin locks, yield). Threads, the
+ * CPU count and the clock come from the platform layer
+ * (platform/platform.h); the I/O poller is in task_io.c, channels and
+ * mutexes in task_sync.c. */
 #include "rt_internal.h"
 #include "platform/platform.h"
 
@@ -686,6 +687,9 @@ struct zell_task {
     const zell_value_ops *ops; /* applied at slot + ops_offset */
     int64_t ops_offset;
     cont *conts;                /* LIFO; reversed when fired */
+    /* The first continuation lives in the task (the common case is one
+     * awaiter, so no node is allocated); cont0.fn is NULL while unused. */
+    cont cont0;
     /* Task tree for cancellation (10.11), guarded by mu (children lists by
      * the parent's mu). Only tasks made by zell_task_new / scopes have it. */
     zell_task *parent;         /* owned until the task is freed */
@@ -743,6 +747,7 @@ static void task_drop(void *obj) {
         t->ops->release(t->slot + t->ops_offset);
     cont *c = t->conts;
     while (c) { cont *n = c->next; zell_release(c->ctx); zell_release(c->cur); free(c); c = n; }
+    if (t->cont0.fn) { zell_release(t->cont0.ctx); zell_release(t->cont0.cur); }
     hook *h = t->hooks;
     while (h) { hook *n = h->next; hook_free(h); h = n; }
     if (t->ctx_saved) zell_release(t->caller_ctx);
@@ -876,6 +881,8 @@ static bool task_complete(zell_task *t, const void *result) {
     __atomic_store_n(&t->state, TASK_DONE, __ATOMIC_SEQ_CST);
     cont *c = t->conts, *rev = NULL;
     t->conts = NULL;
+    cont first = t->cont0;   /* copied out: t may be freed once unlocked */
+    t->cont0.fn = NULL;
     /* A waiter increments `waiters` before it checks the state (both
      * sequentially consistent), and checks it under g_await_mu, which the
      * broadcast takes: it either sees DONE or is woken. */
@@ -887,11 +894,15 @@ static bool task_complete(zell_task *t, const void *result) {
     task_unlock(t);
     restore_parent(t);  /* a coroutine returning: the code after it is its parent's */
     zell_release(t);
-    /* After this point `t` may be freed; use only `rev`. */
+    /* After this point `t` may be freed; use only `first` and `rev`. */
     while (c) { cont *n = c->next; c->next = rev; rev = c; c = n; }
     /* The first continuation runs next on this worker (the common case is
      * one awaiter); the others queue behind the ring in registration order. */
     bool next = true;
+    if (first.fn) {
+        sched_post_ctx(first.fn, first.frame, first.ctx, first.cur, true);
+        next = false;
+    }
     while (rev) {
         cont *n = rev->next;
         sched_post_ctx(rev->fn, rev->frame, rev->ctx, rev->cur, next);
@@ -923,18 +934,24 @@ bool zell_task_is_done(const zell_task *t) {
 static bool add_cont(zell_task *t, zell_resume_fn fn, void *frame, bool suspend) {
     if (!t || !fn) zell_panic_nil();
     if (zell_task_is_done(t)) return false;
-    cont *c = malloc(sizeof *c);
-    if (!c) zell_panic("out of memory (continuation)");
+    task_lock(t);
+    if (t->state == TASK_DONE) {
+        task_unlock(t);
+        return false;
+    }
+    cont *c;
+    if (!t->cont0.fn) {
+        c = &t->cont0;   /* the first continuation: no allocation */
+    } else {
+        c = malloc(sizeof *c);
+        if (!c) zell_panic("out of memory (continuation)");
+        c->next = t->conts;
+        t->conts = c;
+    }
     c->fn = fn;
     c->frame = frame;
     c->ctx = t_ctx;
     c->cur = t_cur;
-    task_lock(t);
-    if (t->state == TASK_DONE) {
-        task_unlock(t);
-        free(c);
-        return false;
-    }
     zell_retain(c->ctx);
     zell_retain(c->cur);
     zell_object *drop_ctx = NULL;
@@ -947,8 +964,6 @@ static bool add_cont(zell_task *t, zell_resume_fn fn, void *frame, bool suspend)
         cur->caller_ctx = NULL;
         cur->ctx_saved = 0;
     }
-    c->next = t->conts;
-    t->conts = c;
     task_unlock(t);
     zell_release(drop_ctx);
     return true;
@@ -1320,291 +1335,6 @@ zell_task *zell_task_any(zell_task *const *tasks, int64_t n) {
     }
     any_unref(st);
     return r;
-}
-
-/* ======================================================================
- * Mutex (async-aware: waiters are tasks, unlock hands ownership over)
- * ====================================================================== */
-
-typedef struct waiter {
-    zell_task *task;      /* owned */
-    struct waiter *next;
-    unsigned char elem[];  /* channel senders: owned element copy */
-} waiter;
-
-typedef struct wqueue { waiter *head, *tail; } wqueue;
-
-static void wq_push(wqueue *q, waiter *w) {
-    w->next = NULL;
-    if (q->tail) q->tail->next = w; else q->head = w;
-    q->tail = w;
-}
-
-static waiter *wq_pop(wqueue *q) {
-    waiter *w = q->head;
-    if (w) { q->head = w->next; if (!q->head) q->tail = NULL; }
-    return w;
-}
-
-struct zell_mutex {
-    zell_object hdr;
-    zell__plat_mutex mu;
-    int32_t locked;
-    wqueue waiters;
-};
-
-static void mutex_drop(void *obj) {
-    zell_mutex *m = obj;
-    waiter *w;
-    while ((w = wq_pop(&m->waiters))) { zell_release(w->task); free(w); }
-    zell__plat_mutex_destroy(&m->mu);
-}
-
-static const zell_type_info mutex_type = { "Mutex", (int64_t)sizeof(struct zell_mutex), mutex_drop };
-
-zell_mutex *zell_mutex_new(void) {
-    zell_mutex *m = zell_object_new(&mutex_type, (int64_t)sizeof(struct zell_mutex));
-    zell__plat_mutex_init(&m->mu);
-    return m;
-}
-
-zell_task *zell_mutex_lock_async(zell_mutex *m) {
-    if (!m) zell_panic_nil();
-    zell_task *t = task_new_ex(0, NULL, 0);
-    zell__plat_mutex_lock(&m->mu);
-    if (!m->locked) {
-        m->locked = 1;
-        zell__plat_mutex_unlock(&m->mu);
-        zell_task_complete(t, NULL);
-        return t;
-    }
-    waiter *w = malloc(sizeof *w);
-    if (!w) zell_panic("out of memory (mutex)");
-    zell_retain(t);
-    w->task = t;
-    wq_push(&m->waiters, w);
-    zell__plat_mutex_unlock(&m->mu);
-    return t;
-}
-
-void zell_mutex_lock(zell_mutex *m) {
-    zell_task *t = zell_mutex_lock_async(m);
-    zell_task_await(t);
-    zell_release(t);
-}
-
-bool zell_mutex_try_lock(zell_mutex *m) {
-    if (!m) zell_panic_nil();
-    zell__plat_mutex_lock(&m->mu);
-    bool ok = !m->locked;
-    if (ok) m->locked = 1;
-    zell__plat_mutex_unlock(&m->mu);
-    return ok;
-}
-
-void zell_mutex_unlock(zell_mutex *m) {
-    if (!m) zell_panic_nil();
-    zell__plat_mutex_lock(&m->mu);
-    if (!m->locked) { zell__plat_mutex_unlock(&m->mu); zell_panic("unlock of unlocked mutex"); }
-    waiter *w = wq_pop(&m->waiters);
-    if (!w) m->locked = 0;           /* else: ownership passes directly to w */
-    zell__plat_mutex_unlock(&m->mu);
-    if (w) {
-        zell_task_complete(w->task, NULL);
-        zell_release(w->task);
-        free(w);
-    }
-}
-
-/* ======================================================================
- * Channels
- * ====================================================================== */
-
-struct zell_chan {
-    zell_object hdr;
-    zell__plat_mutex mu;
-    int64_t elem_size;
-    const zell_value_ops *ops;
-    int64_t capacity;
-    int64_t count, head;     /* ring buffer of `capacity` elements */
-    unsigned char *buf;
-    int32_t closed;
-    wqueue senders;          /* waiter.elem holds the (owned) value */
-    wqueue receivers;
-};
-
-static void val_retain(zell_chan *c, void *v) { if (c->ops && c->ops->retain) c->ops->retain(v); }
-static void val_release(zell_chan *c, void *v) { if (c->ops && c->ops->release) c->ops->release(v); }
-
-static void chan_drop(void *obj) {
-    zell_chan *c = obj;
-    for (int64_t i = 0; i < c->count; i++)
-        val_release(c, c->buf + ((c->head + i) % c->capacity) * c->elem_size);
-    waiter *w;
-    while ((w = wq_pop(&c->senders))) { val_release(c, w->elem); zell_release(w->task); free(w); }
-    while ((w = wq_pop(&c->receivers))) { zell_release(w->task); free(w); }
-    zell_free(c->buf);
-    zell__plat_mutex_destroy(&c->mu);
-}
-
-static const zell_type_info chan_type = { "Channel", (int64_t)sizeof(struct zell_chan), chan_drop };
-
-zell_chan *zell_chan_new(int64_t elem_size, const zell_value_ops *ops, int64_t capacity) {
-    if (elem_size < 0 || capacity < 0) zell_panic("zell_chan_new: invalid size");
-    zell_chan *c = zell_object_new(&chan_type, (int64_t)sizeof(struct zell_chan));
-    zell__plat_mutex_init(&c->mu);
-    c->elem_size = elem_size;
-    c->ops = ops;
-    c->capacity = capacity;
-    c->buf = capacity ? zell_alloc(capacity * (elem_size ? elem_size : 1)) : NULL;
-    return c;
-}
-
-int64_t zell_chan_len(const zell_chan *c) {
-    if (!c) return 0;
-    zell__plat_mutex_lock((zell__plat_mutex *)&c->mu);
-    int64_t n = c->count;
-    zell__plat_mutex_unlock((zell__plat_mutex *)&c->mu);
-    return n;
-}
-
-/* Complete a receive task with {ok, value}. value is borrowed (task retains). */
-static void finish_recv(zell_chan *c, zell_task *t, int64_t ok, const void *value) {
-    unsigned char tmp[8 + 256];
-    int64_t sz = 8 + c->elem_size;
-    unsigned char *r = (size_t)sz <= sizeof tmp ? tmp : zell_alloc(sz);
-    memset(r, 0, (size_t)sz);
-    *(int64_t *)r = ok;
-    if (value) memcpy(r + 8, value, (size_t)c->elem_size);
-    zell_task_complete(t, r);
-    if (r != tmp) zell_free(r);
-}
-
-static zell_task *recv_task_new(zell_chan *c) {
-    return task_new_ex(8 + c->elem_size, c->ops, 8);
-}
-
-zell_task *zell_chan_send_async(zell_chan *c, const void *elem) {
-    if (!c) zell_panic_nil();
-    zell_task *done = task_new_ex(0, NULL, 0);
-    waiter *sw = malloc(sizeof(waiter) + (size_t)c->elem_size);  /* holds owned copy */
-    if (!sw) zell_panic("out of memory (channel)");
-    memcpy(sw->elem, elem, (size_t)c->elem_size);
-    val_retain(c, sw->elem);
-
-    zell__plat_mutex_lock(&c->mu);
-    if (c->closed) {
-        zell__plat_mutex_unlock(&c->mu);
-        zell_panic("send on closed channel");
-    }
-    waiter *rw = wq_pop(&c->receivers);
-    if (rw) {
-        zell__plat_mutex_unlock(&c->mu);
-        finish_recv(c, rw->task, 1, sw->elem);
-        zell_release(rw->task);
-        free(rw);
-        val_release(c, sw->elem);
-        free(sw);
-        zell_task_complete(done, NULL);
-        return done;
-    }
-    if (c->count < c->capacity) {
-        memcpy(c->buf + ((c->head + c->count) % c->capacity) * c->elem_size, sw->elem,
-               (size_t)c->elem_size);  /* ownership moves into the buffer */
-        c->count++;
-        zell__plat_mutex_unlock(&c->mu);
-        free(sw);
-        zell_task_complete(done, NULL);
-        return done;
-    }
-    zell_retain(done);
-    sw->task = done;
-    wq_push(&c->senders, sw);
-    zell__plat_mutex_unlock(&c->mu);
-    return done;
-}
-
-zell_task *zell_chan_recv_async(zell_chan *c) {
-    if (!c) zell_panic_nil();
-    zell_task *t = recv_task_new(c);
-    unsigned char tmp[256];
-    unsigned char *v = (size_t)c->elem_size <= sizeof tmp ? tmp : zell_alloc(c->elem_size);
-    waiter *sender = NULL;
-
-    zell__plat_mutex_lock(&c->mu);
-    if (c->count > 0) {
-        unsigned char *slot = c->buf + c->head * c->elem_size;
-        memcpy(v, slot, (size_t)c->elem_size);   /* take ownership */
-        c->head = (c->head + 1) % c->capacity;
-        c->count--;
-        sender = wq_pop(&c->senders);
-        if (sender) {   /* refill the buffer from a blocked sender */
-            memcpy(c->buf + ((c->head + c->count) % c->capacity) * c->elem_size, sender->elem,
-                   (size_t)c->elem_size);
-            c->count++;
-        }
-    } else if ((sender = wq_pop(&c->senders))) {
-        memcpy(v, sender->elem, (size_t)c->elem_size);  /* direct hand-off (unbuffered) */
-    } else if (c->closed) {
-        zell__plat_mutex_unlock(&c->mu);
-        finish_recv(c, t, 0, NULL);
-        if (v != tmp) zell_free(v);
-        return t;
-    } else {
-        waiter *w = malloc(sizeof *w);
-        if (!w) zell_panic("out of memory (channel)");
-        zell_retain(t);
-        w->task = t;
-        wq_push(&c->receivers, w);
-        zell__plat_mutex_unlock(&c->mu);
-        if (v != tmp) zell_free(v);
-        return t;
-    }
-    zell__plat_mutex_unlock(&c->mu);
-    finish_recv(c, t, 1, v);
-    val_release(c, v);
-    if (v != tmp) zell_free(v);
-    if (sender) {
-        zell_task_complete(sender->task, NULL);
-        zell_release(sender->task);
-        free(sender);
-    }
-    return t;
-}
-
-void zell_chan_send(zell_chan *c, const void *elem) {
-    zell_task *t = zell_chan_send_async(c, elem);
-    zell_task_await(t);
-    zell_release(t);
-}
-
-bool zell_chan_recv(zell_chan *c, void *out) {
-    zell_task *t = zell_chan_recv_async(c);
-    unsigned char *r = zell_task_await(t);
-    bool ok = *(int64_t *)r != 0;
-    if (out) {
-        memcpy(out, r + 8, (size_t)c->elem_size);
-        val_retain(c, out);
-    }
-    zell_release(t);
-    return ok;
-}
-
-void zell_chan_close(zell_chan *c) {
-    if (!c) zell_panic_nil();
-    zell__plat_mutex_lock(&c->mu);
-    if (c->closed) { zell__plat_mutex_unlock(&c->mu); zell_panic("close of closed channel"); }
-    if (c->senders.head) { zell__plat_mutex_unlock(&c->mu); zell_panic("send on closed channel"); }
-    c->closed = 1;
-    wqueue rs = c->receivers;
-    c->receivers.head = c->receivers.tail = NULL;
-    zell__plat_mutex_unlock(&c->mu);
-    waiter *w;
-    while ((w = wq_pop(&rs))) {
-        finish_recv(c, w->task, 0, NULL);
-        zell_release(w->task);
-        free(w);
-    }
 }
 
 /* ======================================================================

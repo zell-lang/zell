@@ -39,6 +39,19 @@ ZELL_HIDDEN extern void (*zell__dbg_error_fn)(const zell_error *err);
 ZELL_HIDDEN void zell__cancel_hook(void (*fn)(zell_task *), zell_task *w);
 /* The same with a word of data passed to fn (task_io.c: the fd of the wait). */
 ZELL_HIDDEN void zell__cancel_hook_data(void (*fn)(zell_task *, uintptr_t), zell_task *w, uintptr_t data);
+/* Runs fn(w) when w itself is cancelled (task.Any cancelling a pending
+ * Recv); the hook holds no reference to w. */
+ZELL_HIDDEN void zell__cancel_hook_self(zell_task *w, void (*fn)(zell_task *));
+/* Task internals for task_sync.c (channels, mutexes; ABI.md 10.6, 10.7):
+ * a plain task whose slot has slot_bytes (>= result_size, so a pending
+ * wait keeps its queue links there) with ops applied at slot + ops_off;
+ * the slot itself; the task's short spin lock; completion of a task that
+ * nobody else has seen, whose result is already in the slot. */
+ZELL_HIDDEN zell_task *zell__task_new_slot(int64_t result_size, const zell_value_ops *ops, int64_t ops_off, int64_t slot_bytes);
+ZELL_HIDDEN void *zell__task_slot(zell_task *t);
+ZELL_HIDDEN void zell__task_lock(zell_task *t);
+ZELL_HIDDEN void zell__task_unlock(zell_task *t);
+ZELL_HIDDEN void zell__task_mark_done(zell_task *t);
 /* Stops the resolver pool (std_net.c); called by zell__io_stop. Queued
  * lookups are dropped without completing, like pending I/O waits. */
 ZELL_HIDDEN void zell__net_stop(void);

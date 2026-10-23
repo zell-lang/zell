@@ -9,7 +9,8 @@
 //! An iterator has `func Next() (T, bool)` (the builtin interface
 //! `Iterator<T>`, matched structurally), `func Next() (K, V, bool)` (two
 //! loop variables: key and value) or `func Next() *T` (`nil` ends the
-//! loop). `async func Next()` iterators (`Channel<T>`) are awaited, so the
+//! loop). `async func Next()` iterators, and `func Next() Task<...>` ones
+//! (`Channel<T>`), are awaited, so the
 //! loop must be inside an async function. With one-value iterators,
 //! `for i, x in v` numbers the elements from 0.
 //!
@@ -122,6 +123,12 @@ impl<'a> Sema<'a> {
         let Some((params, ret, is_async)) = self.value_method_sig(it_ty, "Next") else {
             self.err_help(format!("cannot iterate over {tname}: its iterator {itn} has no method Next"), sp, "give the iterator `func Next() (T, bool)`");
             return Ok(StmtKind::Block(hir::Block { stmts, span }));
+        };
+        // `func Next() Task<(T, bool)>` is an async Next too (the task is
+        // awaited), like a `Task<T>` method of an interface.
+        let (ret, is_async) = match *self.tt.get(ret) {
+            Type::Task(inner) if !is_async => (inner, true),
+            _ => (ret, is_async),
         };
         let shape = match self.tt.get(ret).clone() {
             Type::Tuple(ts) if ts.len() == 2 && ts[1] == self.tt.bool_ => Some(NextShape::One(ts[0])),

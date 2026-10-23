@@ -76,3 +76,35 @@ extern func rtGetCtx() map[string]any
 // Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_task_set_ctx (runtime/src/std_*.c).
 extern func rtSetCtx(a map[string]any)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_chan_release (runtime/src/std_*.c).
+extern func rtChanRelease(a int)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_chan_close (runtime/src/std_*.c).
+extern func rtChanClose(a int)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_chan_len (runtime/src/std_*.c).
+extern func rtChanLen(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_chan_cap (runtime/src/std_*.c).
+extern func rtChanCap(a int) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_chan_is_closed (runtime/src/std_*.c).
+extern func rtChanIsClosed(a int) bool
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_mutex_lock (runtime/src/std_*.c).
+extern func rtMutexLock(a *int) Task<void>
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_mutex_try_lock (runtime/src/std_*.c).
+extern func rtMutexTryLock(a *int) bool
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_task_mutex_unlock (runtime/src/std_*.c).
+extern func rtMutexUnlock(a *int)

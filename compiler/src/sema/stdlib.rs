@@ -367,6 +367,18 @@ pub enum Special {
     /// `arena.rtArenaAlloc<T>(h int, n int) []T` (internal, used by
     /// `Arena.Alloc<T>`) → [`crate::hir::Builtin::ArenaSlice`].
     ArenaAlloc,
+    /// `task.rtChanNew<T>(capacity int) int` (internal, used by
+    /// `Channel<T>.New`) → [`crate::hir::Builtin::ChanNew`]: a runtime
+    /// channel of `T`, given the layouts of `T`, `T!` and `(T, bool)`.
+    ChanNew,
+    /// `task.rtChanSend<T>(h int, v T) Task<void>` →
+    /// [`crate::hir::Builtin::ChanSend`].
+    ChanSend,
+    /// `task.rtChanRecv<T>(h int) Task<T!>` → [`crate::hir::Builtin::ChanRecv`].
+    ChanRecv,
+    /// `task.rtChanNext<T>(h int) Task<(T, bool)>` →
+    /// [`crate::hir::Builtin::ChanNext`] (the iteration protocol).
+    ChanNext,
 }
 
 /// Special functions by namespace and name.
@@ -382,6 +394,10 @@ pub const SPECIALS: &[(&str, &str, Special)] = &[
     ("errors", "Frames", Special::ErrorsFrames),
     ("arena", "rtArenaNew", Special::ArenaNew),
     ("arena", "rtArenaAlloc", Special::ArenaAlloc),
+    ("task", "rtChanNew", Special::ChanNew),
+    ("task", "rtChanSend", Special::ChanSend),
+    ("task", "rtChanRecv", Special::ChanRecv),
+    ("task", "rtChanNext", Special::ChanNext),
 ];
 
 /// Builtin stdlib struct types: (namespace, name, fields as (name, type)).
@@ -721,6 +737,16 @@ pub const FUNCS: &[StdFunc] = &[
     f!("task", "rtUnlock", "*int", "void", "zell_task_spin_unlock"),
     f!("task", "rtGetCtx", "", "map[string]any", "zell_task_get_ctx"),
     f!("task", "rtSetCtx", "map[string]any", "void", "zell_task_set_ctx"),
+    // task.Channel<T> and task.Mutex (runtime/src/task_sync.c, ABI.md 10.6, 10.7);
+    // rtChanNew/Send/Recv/Next are typed specials (SPECIALS)
+    f!("task", "rtChanRelease", "int", "void", "zell_task_chan_release"),
+    f!("task", "rtChanClose", "int", "void", "zell_task_chan_close"),
+    f!("task", "rtChanLen", "int", "int", "zell_task_chan_len"),
+    f!("task", "rtChanCap", "int", "int", "zell_task_chan_cap"),
+    f!("task", "rtChanIsClosed", "int", "bool", "zell_task_chan_is_closed"),
+    f!("task", "rtMutexLock", "*int", "Task<void>", "zell_task_mutex_lock"),
+    f!("task", "rtMutexTryLock", "*int", "bool", "zell_task_mutex_try_lock"),
+    f!("task", "rtMutexUnlock", "*int", "void", "zell_task_mutex_unlock"),
     // strings (more)
     f!("strings", "Fields", "string", "[]string", "zell_strings_fields"),
     f!("strings", "Count", "string, string", "int", "zell_strings_count"),

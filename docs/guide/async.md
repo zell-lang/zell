@@ -278,18 +278,21 @@ async func main() {
 
 ## What things cost
 
-Rough costs on a 4-core x86-64 machine, from the async benchmarks
-(`benchmarks/README.md`, "Async benchmarks"; preliminary single runs on a
-busy machine, before the timer and wake-up fixes made with them):
+Rough costs on a 16-core x86-64 machine, from the async benchmarks
+(`benchmarks/README.md`, "Async benchmarks", the per-worker run queue and
+runtime channel/mutex pass):
 
 | Operation | Zell | Go equivalent |
 |---|---|---|
 | a suspended task (memory) | ~0.8 KB | ~2.6 KB per parked goroutine |
-| `async` call that does not suspend | ~160 ns | ~9 ns function call |
-| uncontended `task.Mutex` lock + unlock | ~100 ns | ~16 ns `sync.Mutex` |
-| unbuffered channel message, one worker | ~1.3 us | ~0.2 us |
+| `async` call that does not suspend | ~55 ns | ~1 ns function call |
+| uncontended `task.Mutex` lock + unlock | ~6 ns | ~4 ns `sync.Mutex` |
+| contended `task.Mutex` (8 tasks), per increment | ~55 ns | ~20 ns |
+| unbuffered channel message (ping-pong) | ~130 ns | ~90 ns |
+| resuming a suspended `await` | ~75 ns | ~6 ns goroutine switch |
 
-Tasks are cheap to keep around in large numbers; hand-offs between tasks
-(channel messages, a contended mutex, resuming after `await`) are the
-expensive part, so prefer batching work per message and buffered channels
-on hot paths.
+Tasks are cheap to keep around in large numbers, and a hand-off between
+tasks (a channel message, a mutex passed to a waiter) runs the woken task
+next on the same worker without a queue in between; resuming after an
+`await` is still the expensive part next to a plain call, so prefer
+batching work per message and buffered channels on hot paths.

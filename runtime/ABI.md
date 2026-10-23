@@ -1255,39 +1255,99 @@ with `clang -O2` and runs it. It contains two async functions (one awaiting
 
 ### 10.6 Mutex
 
-`zell_mutex *` is an opaque refcounted object. It is **async-aware**: waiters are
-tasks, and unlocking hands ownership directly to the oldest waiter (FIFO, fair).
-It is not re-entrant.
+`task.Mutex` lives in `src/task_sync.c`. The Zell struct is three `int`
+words, all zero when unlocked, that the runtime owns:
+
+```text
+struct Mutex { state int; waitHead int; waitTail int }
+  state    bit 0: locked; bit 1: the guard (a short spin lock) of the queue
+  waitHead, waitTail: the FIFO of waiting tasks, linked through their slots
+```
+
+The compiled code passes `&m.state` (so the three words must stay in this
+order, 8 bytes each). It is **async-aware**: waiters are tasks, and
+unlocking hands ownership directly to the oldest waiter (FIFO, fair, no
+barging), whose continuation then runs next on the unlocking worker (10.1).
+It is not re-entrant. A `Mutex` must not be copied while in use, and one
+dropped with waiters leaks them (they never complete anyway).
+
+| Function | Semantics |
+|---|---|
+| `zell_task *zell_task_mutex_lock(int64_t *m)` | `Task<void>` that completes once the caller **owns** the lock. A free mutex is taken with one compare-and-swap and `zell_task_done()` is returned (no allocation; the `await` takes the 10.3 fast path). Otherwise a waiter task is queued, +1 |
+| `bool zell_task_mutex_try_lock(int64_t *m)` | takes the lock if it is free |
+| `void zell_task_mutex_unlock(int64_t *m)` | releases the lock or completes the oldest waiter's task, which owns it from then on. Panics `unlock of unlocked mutex` |
+
+**C API**: `zell_mutex *` is an opaque refcounted object around the same
+three words (released waiters when dropped).
 
 | Function | Semantics |
 |---|---|
 | `zell_mutex_new()` | unlocked mutex, +1 |
-| `zell_task *zell_mutex_lock_async(m)` | `Task<void>` that completes once the caller **owns** the lock. It is already completed if the mutex was free. Lowering of `await m.Lock()`: await it with the 10.3 protocol, then release the task |
+| `zell_task *zell_mutex_lock_async(m)` | `zell_task_mutex_lock` on the object's words |
 | `zell_mutex_lock(m)` | blocking lock (`lock_async` + `zell_task_await`), for non-async code |
 | `bool zell_mutex_try_lock(m)` | takes the lock if it is free |
 | `zell_mutex_unlock(m)` | releases the lock or hands it to the next waiter. Panics `unlock of unlocked mutex` |
 
 ### 10.7 Channels
 
-`zell_chan *` is an opaque refcounted object (`Channel<T>`). The element type is
-given by `elem_size` and `ops`. Elements are copied and retained on send.
+`task.Channel<T>` lives in `src/task_sync.c`: a refcounted `zell_chan`
+object with a ring buffer of `capacity` elements (copied and retained with
+the element type's ops on send, moved out on receive) and two FIFOs of
+waiting tasks, senders and receivers, **each woken exactly once**: a send
+that finds a waiting receiver completes that receiver's task with the value
+directly (an unbuffered channel is a pure rendezvous: a sender waits in the
+queue with its value until a receiver takes it); a receive that frees a
+buffer slot refills it from the oldest waiting sender and completes that
+sender. A waiting task's result slot holds its queue links (and a sender's
+value) until it is dequeued, so a wait costs one task and no other
+allocation; an operation that does not have to wait returns a completed
+task (`zell_task_done()` for a send, a task completed before it is
+returned for a receive).
+
+The Zell side (`stdlib_src/task.zl`) is `struct Channel<T> { st *chanRef }`,
+copies sharing the `chanRef { h int }` box, which releases the channel
+(`zell_task_chan_release`) when the last copy is dropped. The handle `h` is
+the channel object's address. `Channel<T>.New`, `Send`, `Recv` and `Next`
+call the typed intrinsics `rtChanNew<T>`, `rtChanSend<T>`, `rtChanRecv<T>`
+and `rtChanNext<T>` (`sema/arena.rs`, `codegen/ops.rs`), which pass the
+element type's size and ops and the **compiled layouts of the two receive
+results**: `T!` (`{T @0; ptr err @fal_err_off}`, `void!` being just the
+error pointer) for `Recv` and `(T, bool)` (`{T @0; i1 ok @tup_ok_off}`) for
+`Next`, each with its size, ops and the offset of the status word. The
+runtime writes a receive's result in that layout straight into the task's
+slot: the value (moved in) at 0 and the status at the given offset.
+
+| Function | Semantics |
+|---|---|
+| `int64_t zell_task_chan_new(capacity, elem_size, elem_ops, fal_size, fal_ops, fal_err_off, tup_size, tup_ops, tup_ok_off)` | a channel, its handle (+1, owned by the box). `capacity == 0`: unbuffered |
+| `void zell_task_chan_release(h)` | drops the box's reference (buffered values are released with the channel) |
+| `zell_task *zell_task_chan_send(h, const void *elem)` | `Task<void>` that completes once the value (borrowed; copied and retained) has been handed to a receiver or buffered: `zell_task_done()` when that happened at once. Panics `send on closed channel`. In a **cancelled** task (10.11) a send that would have to wait returns done without sending |
+| `zell_task *zell_task_chan_recv(h)` | `Task<T!>`: the value, or the immortal error `channel closed` once the channel is closed and drained, or `task.ErrCancelled` when the receiving task is cancelled (before waiting, or while queued). +1 |
+| `zell_task *zell_task_chan_next(h)` | `Task<(T, bool)>`: `(value, true)`, or `(zero, false)` where `recv` would fail (the iteration protocol: `for v in ch`). +1 |
+| `void zell_task_chan_close(h)` | wakes every pending receiver with the closed error. Panics `close of closed channel`, and `send on closed channel` if senders are blocked |
+| `int64_t zell_task_chan_len(h)` / `zell_task_chan_cap(h)` | buffered elements / the capacity |
+| `bool zell_task_chan_is_closed(h)` | whether `Close` was called |
+
+A queued wait registers two cancel hooks (10.11): on the task that started
+it (a `Recv` inside a cancelled scope fails with `task.ErrCancelled`) and on
+its own task (`task.Any` cancels its losers), both idempotent; the wait holds
+a reference to the channel while queued, so a channel with waiters is never
+freed.
+
+**C API** (tests and C code; receives have the `{ int64_t ok @0; T value @8 }`
+layout, `result_size = 8 + elem_size`; `ok = 1` means a value was received and
+the slot owns it, `ok = 0` means closed and drained or cancelled, and the value
+is all zero):
 
 | Function | Semantics |
 |---|---|
 | `zell_chan_new(elem_size, ops, capacity)` | `capacity == 0` creates an unbuffered (rendezvous) channel; otherwise it has a buffer of `capacity` elements. +1 |
-| `zell_task *zell_chan_send_async(ch, const void *elem)` | `Task<void>` that completes once the value has been handed to a receiver or buffered. Panics `send on closed channel` |
-| `zell_task *zell_chan_recv_async(ch)` | task whose result slot has this layout: **`{ int64_t ok @0; T value @8 }`** (`result_size = 8 + elem_size`). `ok = 1` means a value was received, and the slot owns it (copy and retain it). `ok = 0` means the channel is closed and drained, and the value is all zero |
+| `zell_task *zell_chan_send_async(ch, const void *elem)` | as `zell_task_chan_send` |
+| `zell_task *zell_chan_recv_async(ch)` | a receive in the C layout, +1 |
 | `zell_chan_send(ch, elem)` | blocking send |
 | `bool zell_chan_recv(ch, void *out)` | blocking receive. Writes an **owned** copy to `*out` (the caller releases it) and returns `ok` |
-| `zell_chan_close(ch)` | wakes all pending receivers with `ok = 0`. Panics `close of closed channel`, and panics `send on closed channel` if senders are blocked |
+| `zell_chan_close(ch)` | as `zell_task_chan_close` |
 | `int64_t zell_chan_len(ch)` | number of buffered elements |
-
-Buffered values are released when the channel is freed.
-
-(The Zell `task.Channel<T>` and `task.Mutex` are written in Zell on
-top of the primitives of 10.10, not on `zell_chan`/`zell_mutex`, because their
-zero values must work without a constructor and the element type is only known
-to the compiler. `zell_chan`/`zell_mutex` remain for C code and tests.)
 
 ### 10.8 Task context
 
@@ -1415,14 +1475,8 @@ Rules and guarantees:
 `task.Delay`, `task.All`, `task.Any` and `task.Yield` are runtime functions; the
 rest of `task` is Zell (`compiler/src/sema/stdlib_src/task.zl`):
 
-- `Mutex`: `{ guard int; locked bool; waiters []Task<void> }`. `Lock()` returns a
-  completed task if the mutex was free, else a signal queued in `waiters`;
-  `Unlock()` hands ownership to the oldest waiter by firing its signal (FIFO).
-- `Channel<T>`: a handle to a heap `chanState<T>` (copies share it) with the
-  values in a `[]T` and waiting receivers/senders as signals; waiters re-check
-  their condition after waking, so wake-ups are never lost (a signal fired
-  before it is awaited is simply already complete). Unbuffered channels admit
-  one value at a time and the sender waits until a receiver took it.
+- `Mutex` and `Channel<T>` are the runtime's (10.6, 10.7): the Zell structs
+  only hold the three mutex words and the channel handle box.
 - `WaitGroup`, `Spawn`/`Go` (`await task.Yield()` then call), `Timeout` (a delay
   that a watcher task cancels with `zell_task_rt_fire` when the watched task
   finishes), `Key`/`Get`/`With`/`CurrentContext`/`RunWith`/`SpawnWith` (10.8),

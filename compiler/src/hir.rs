@@ -821,6 +821,19 @@ pub enum Builtin {
     /// `args = [arena handle, n]`: `n` zeroed `T` in the arena; the type is
     /// `[]T` (runtime `zell_arena_slice`).
     ArenaSlice,
+    /// `args = [capacity]`: a runtime channel of `elem` (runtime
+    /// `zell_task_chan_new`), its handle as an `int`. `fallible` is `T!`
+    /// and `tuple` is `(T, bool)`: the result layouts of [`Self::ChanRecv`]
+    /// and [`Self::ChanNext`], whose sizes, ops and status offsets the
+    /// runtime is told.
+    ChanNew { elem: TypeId, fallible: TypeId, tuple: TypeId },
+    /// `args = [handle, value]`: `Task<void>` (runtime `zell_task_chan_send`;
+    /// the value is copied and retained by the runtime).
+    ChanSend,
+    /// `args = [handle]`: `Task<T!>` (runtime `zell_task_chan_recv`).
+    ChanRecv,
+    /// `args = [handle]`: `Task<(T, bool)>` (runtime `zell_task_chan_next`).
+    ChanNext,
 }
 
 /// One primitive print operation of a lowered `println`.
