@@ -3,9 +3,8 @@
 # Enable it once: Settings -> Pages -> Source: GitHub Actions.
 name: docs
 
+# Manual only: start from the Actions tab or `gh workflow run docs.yml`.
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
 
 permissions:

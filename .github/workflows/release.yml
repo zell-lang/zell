@@ -21,9 +21,8 @@
 #   SHA256SUMS, VERSION
 name: release
 
+# Manual only (workflow_dispatch; a tag push no longer releases by itself).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:

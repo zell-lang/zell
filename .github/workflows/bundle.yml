@@ -16,10 +16,8 @@
 #   bundle-windows   the Linux-cross-built Windows executables run on windows-latest
 name: bundle
 
+# Manual only: start from the Actions tab or `gh workflow run bundle.yml`.
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
 
 env:
