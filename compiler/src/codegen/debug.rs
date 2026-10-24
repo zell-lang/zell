@@ -87,6 +87,8 @@ pub(crate) struct DebugInfo {
     types: HashMap<TypeId, Meta>,
     named: HashMap<&'static str, Meta>,
     stack: Vec<FnDbg>,
+    /// Full debug info; `false`: line tables only ([`super::Options::line_tables`]).
+    full: bool,
 }
 
 fn s(x: &str) -> (*const libc_char, usize) {
@@ -100,7 +102,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// Creates the compile units (one per source file) when debug info is
     /// requested and the program has sources.
     pub(crate) fn init_debug(&mut self) {
-        if !self.opts.debug_info || self.prog.sources.is_empty() {
+        if !(self.opts.debug_info || self.opts.line_tables) || self.prog.sources.is_empty() {
             return;
         }
         let m = self.module.as_mut_ptr();
@@ -129,7 +131,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     0,
                     std::ptr::null(),
                     0,
-                    di::LLVMDWARFEmissionKind::LLVMDWARFEmissionKindFull,
+                    if self.opts.debug_info { di::LLVMDWARFEmissionKind::LLVMDWARFEmissionKindFull } else { di::LLVMDWARFEmissionKind::LLVMDWARFEmissionKindLineTablesOnly },
                     0,
                     0,
                     0,
@@ -158,7 +160,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 llc::LLVMAddModuleFlag(m, llvm_sys::LLVMModuleFlagBehavior::LLVMModuleFlagBehaviorWarning, k.as_ptr() as *const _, k.len(), dv);
             }
         }
-        self.dbg = Some(Box::new(DebugInfo { units, types: HashMap::new(), named: HashMap::new(), stack: Vec::new() }));
+        self.dbg = Some(Box::new(DebugInfo { units, types: HashMap::new(), named: HashMap::new(), stack: Vec::new(), full: self.opts.debug_info }));
     }
 
     /// Describes the globals and finalises every `DIBuilder`.
@@ -166,7 +168,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         if self.dbg.is_none() {
             return;
         }
-        for (i, g) in self.prog.globals.iter().enumerate() {
+        let full = self.dbg.as_ref().unwrap().full;
+        for (i, g) in self.prog.globals.iter().enumerate().filter(|_| full) {
             if crate::sema::stdlib::is_std_namespace(&g.full_name) || g.file >= self.prog.sources.len() {
                 continue;
             }
@@ -181,6 +184,30 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let expr = di::LLVMDIBuilderCreateExpression(u.b, std::ptr::null_mut(), 0);
                 let gve = di::LLVMDIBuilderCreateGlobalVariableExpression(u.b, u.file, np, nl, lp, ll, u.file, line, ty, 1, expr, std::ptr::null_mut(), 0);
                 llvm_sys::core::LLVMGlobalSetMetadata(gv.as_value_ref(), llc::LLVMGetMDKindIDInContext(self.ctx.raw(), c"dbg".as_ptr(), 3), gve);
+            }
+        }
+        // Calls emitted without a location (prologues, helpers' callers)
+        // get line 0 in their function: the verifier requires a location on
+        // every call to a function with a subprogram, which helpers have.
+        unsafe {
+            let mut f = llc::LLVMGetFirstFunction(self.module.as_mut_ptr());
+            while !f.is_null() {
+                let sp = di::LLVMGetSubprogram(f);
+                if !sp.is_null() {
+                    let loc = di::LLVMDIBuilderCreateDebugLocation(self.ctx.raw(), 0, 0, sp, std::ptr::null_mut());
+                    let mut bb = llc::LLVMGetFirstBasicBlock(f);
+                    while !bb.is_null() {
+                        let mut i = llc::LLVMGetFirstInstruction(bb);
+                        while !i.is_null() {
+                            if (!llc::LLVMIsACallInst(i).is_null() || !llc::LLVMIsAInvokeInst(i).is_null()) && di::LLVMInstructionGetDebugLoc(i).is_null() {
+                                di::LLVMInstructionSetDebugLoc(i, loc);
+                            }
+                            i = llc::LLVMGetNextInstruction(i);
+                        }
+                        bb = llc::LLVMGetNextBasicBlock(bb);
+                    }
+                }
+                f = llc::LLVMGetNextFunction(f);
             }
         }
         let d = self.dbg.take().unwrap();
@@ -218,13 +245,32 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let saved_loc = unsafe { llc::LLVMGetCurrentDebugLocation2(bref) };
         let f = hir.filter(|f| self.has_source(f));
         let Some(f) = f else {
-            unsafe { llc::LLVMSetCurrentDebugLocation2(bref, std::ptr::null_mut()) };
-            self.dbg.as_mut().unwrap().stack.push(FnDbg { sp: None, unit: 0, scopes: Vec::new(), declared: Vec::new(), saved_loc });
+            // Helpers and stdlib functions get an artificial subprogram at
+            // line 0, so that Zell code inlined into them keeps its
+            // locations (LLVM drops the locations of code inlined into a
+            // function without a subprogram), e.g. `main` into C `main`.
+            let name = func.get_name().to_string_lossy().into_owned();
+            let (unit, line) = (0, 0);
+            let d = self.dbg.as_ref().unwrap();
+            let u = &d.units[unit];
+            let sp = unsafe {
+                let st = di::LLVMDIBuilderCreateSubroutineType(u.b, u.file, std::ptr::null_mut(), 0, di::LLVMDIFlagArtificial);
+                let (np, nl) = s(&name);
+                let sp = di::LLVMDIBuilderCreateFunction(u.b, u.file, np, nl, np, nl, u.file, line, st, 1, 1, line, di::LLVMDIFlagArtificial, (self.opts.optimized) as i32);
+                di::LLVMSetSubprogram(func.as_value_ref(), sp);
+                let loc = di::LLVMDIBuilderCreateDebugLocation(self.ctx.raw(), line, 0, sp, std::ptr::null_mut());
+                llc::LLVMSetCurrentDebugLocation2(bref, loc);
+                sp
+            };
+            self.dbg.as_mut().unwrap().stack.push(FnDbg { sp: None, unit, scopes: vec![sp], declared: Vec::new(), saved_loc });
             return;
         };
-        let mut tys = vec![if f.is_async { self.di_named_task(f.ret) } else { self.di_ret(f.ret) }];
-        for p in &f.params {
-            tys.push(self.di_type(f.locals[p.0 as usize].ty));
+        let mut tys = Vec::new();
+        if self.dbg.as_ref().unwrap().full {
+            tys.push(if f.is_async { self.di_named_task(f.ret) } else { self.di_ret(f.ret) });
+            for p in &f.params {
+                tys.push(self.di_type(f.locals[p.0 as usize].ty));
+            }
         }
         let (line, _) = self.line_col(f.file, f.span.start);
         let d = self.dbg.as_ref().unwrap();
@@ -303,7 +349,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// Declares the parameters of the current function (after the slots exist).
     pub(crate) fn dbg_params(&mut self, f: &hir::Function) {
-        if self.cur_fn().is_none() {
+        if self.cur_fn().is_none_or(|(_, d)| !d.full) {
             return;
         }
         for (k, p) in f.params.iter().enumerate() {
@@ -359,7 +405,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     fn dbg_declare_as(&mut self, l: LocalId, arg: Option<u32>) {
-        let Some((fd, _)) = self.cur_fn() else { return };
+        let Some((fd, d)) = self.cur_fn() else { return };
+        if !d.full {
+            return;
+        }
         if fd.declared.get(l.0 as usize).copied().unwrap_or(true) {
             return;
         }

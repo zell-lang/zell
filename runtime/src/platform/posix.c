@@ -298,9 +298,17 @@ static void bt_frame_buf(char *buf, size_t cap, size_t *len, uintptr_t pc) {
     buf[*len] = 0;
 }
 
+static bool bt_lines(uintptr_t pc, const char **file, uint32_t *ln, const char **func);
 static int bt_format(uintptr_t pc, char *line, size_t cap) {
     char sym[256];
     uintptr_t start = 0;
+    const char *file, *func;
+    uint32_t ln;
+    /* Zell code: "  file:line function" from the line table (ABI.md 8.2) */
+    if (bt_lines(pc - 1, &file, &ln, &func)) {
+        if (!func) func = bt_symbolize(pc - 1, sym, sizeof sym, &start) ? sym : "?";
+        return snprintf(line, cap, "  %s:%u %s\n", zell__lines_shown(file), (unsigned)ln, func);
+    }
     const char *mod = "";
     Dl_info di;
     if (dladdr((void *)pc, &di) && di.dli_fname) mod = di.dli_fname;
@@ -694,6 +702,71 @@ bool zell__plat_symbolize(uintptr_t pc, char *buf, size_t cap, uintptr_t *start)
 }
 
 static bool bt_symbolize(uintptr_t pc, char *buf, size_t cap, uintptr_t *start) { return zell__plat_symbolize(pc, buf, cap, start); }
+
+/* -- the `.zell_lines` table (ABI.md 8.2): a non-allocated ELF section,
+ * read from the executable file once (it survives strip(1)) -- */
+static unsigned char *g_lines;
+static size_t g_lines_len;
+static uintptr_t g_lines_bias;
+static int g_lines_state;  /* 0 not loaded, 1 loading, 2 loaded */
+
+#if defined(__linux__)
+static int lines_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    *(uintptr_t *)data = (uintptr_t)info->dlpi_addr;
+    return 1;  /* the first object is the main program */
+}
+
+static void load_lines(void) {
+    dl_iterate_phdr(lines_phdr_cb, &g_lines_bias);
+    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(ElfW(Ehdr))) {
+        close(fd);
+        return;
+    }
+    size_t len = (size_t)st.st_size;
+    unsigned char *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) return;
+    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)m;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) == 0 && eh->e_shoff && eh->e_shstrndx < eh->e_shnum &&
+        eh->e_shoff + (size_t)eh->e_shnum * sizeof(ElfW(Shdr)) <= len) {
+        const ElfW(Shdr) *sh = (const ElfW(Shdr) *)(m + eh->e_shoff);
+        const ElfW(Shdr) *ss = &sh[eh->e_shstrndx];
+        for (int i = 0; i < eh->e_shnum && ss->sh_offset + ss->sh_size <= len; i++) {
+            if (sh[i].sh_name >= ss->sh_size || sh[i].sh_offset + sh[i].sh_size > len) continue;
+            const char *nm = (const char *)m + ss->sh_offset + sh[i].sh_name;
+            if (strncmp(nm, ".zell_lines", ss->sh_size - sh[i].sh_name) != 0) continue;
+            g_lines = malloc(sh[i].sh_size ? sh[i].sh_size : 1);
+            if (g_lines) {
+                memcpy(g_lines, m + sh[i].sh_offset, sh[i].sh_size);
+                g_lines_len = sh[i].sh_size;
+            }
+            break;
+        }
+    }
+    munmap(m, len);
+}
+#else
+static void load_lines(void) {}  /* Mach-O: no table yet (ABI.md 8.2) */
+#endif
+
+static bool bt_lines(uintptr_t pc, const char **file, uint32_t *ln, const char **func) {
+    if (getenv("ZELL_NO_LINES")) return false;
+    int st = __atomic_load_n(&g_lines_state, __ATOMIC_ACQUIRE);
+    if (st == 0) {
+        int expect = 0;
+        if (__atomic_compare_exchange_n(&g_lines_state, &expect, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            load_lines();
+            __atomic_store_n(&g_lines_state, 2, __ATOMIC_RELEASE);
+            st = 2;
+        }
+    }
+    if (st != 2 || !g_lines) return false;  /* another thread is loading it: symbol+offset */
+    return zell__lines_lookup(g_lines, g_lines_len, (uint64_t)(pc - g_lines_bias), file, ln, func);
+}
 
 void zell__plat_symbolize_done(void) {
     free(g_syms);

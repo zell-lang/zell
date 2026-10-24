@@ -14,6 +14,7 @@ pub mod driver;
 pub mod fmt;
 pub mod hir;
 pub mod lexer;
+pub mod lines;
 pub mod package;
 pub mod parcodegen;
 pub mod parser;

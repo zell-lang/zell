@@ -241,6 +241,12 @@ ZELL_PLAT_HIDDEN void zell__plat_backtrace(int fd, int skip);
  * only where ZELL_PLAT_HAS_PANIC_CAPTURE (a contained task panic keeps its
  * trace, ABI.md 8). */
 ZELL_PLAT_HIDDEN void zell__plat_backtrace_buf(char *buf, size_t cap, int skip);
+/* The `.zell_lines` table (ABI.md 8.2; lines.c): source file, line and
+ * Zell function (NULL if unknown) of link-time address `vaddr` of table
+ * `t`; false if the address has no line. */
+ZELL_PLAT_HIDDEN bool zell__lines_lookup(const unsigned char *t, size_t len, uint64_t vaddr, const char **file, uint32_t *line, const char **func);
+/* `file` as printed: relative to the working directory when under it. */
+ZELL_PLAT_HIDDEN const char *zell__lines_shown(const char *file);
 
 /* ---- CPU profiling (posix.c; diag, runtime/src/profile.c) ---------
  * A process-wide CPU-time timer (SIGPROF on POSIX) calls `fn` from the
