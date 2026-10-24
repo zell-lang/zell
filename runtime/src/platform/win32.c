@@ -539,6 +539,35 @@ char *zell__plat_temp_dir(void) {
 
 char zell__plat_path_sep(void) { return '\\'; }
 
+int zell__plat_path_fold(void) { return 1; }
+
+/* GetFinalPathNameByHandleW resolves symlinks and junctions; its `\\?\`
+ * (or `\\?\UNC\`) prefix is dropped, as compiler/src/paths.rs does. */
+char *zell__plat_path_canon(const char *path) {
+    if (!path || !*path) return NULL;
+    wchar_t *w = zell__w32_wpath(path);
+    if (!w) return NULL;
+    HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    wchar_t buf[4096];
+    DWORD n = GetFinalPathNameByHandleW(h, buf, (DWORD)(sizeof buf / sizeof buf[0]), FILE_NAME_NORMALIZED);
+    CloseHandle(h);
+    if (n == 0 || n >= sizeof buf / sizeof buf[0]) return NULL;
+    const wchar_t *p = buf;
+    wchar_t unc[4096];
+    if (wcsncmp(p, L"\\\\?\\UNC\\", 8) == 0) {
+        unc[0] = L'\\';
+        unc[1] = L'\\';
+        wcscpy(unc + 2, p + 8);
+        p = unc;
+    } else if (wcsncmp(p, L"\\\\?\\", 4) == 0) {
+        p += 4;
+    }
+    return zell__w32_utf8(p, -1);
+}
+
 /* ---- signals: console control events ----------------------------------------------- */
 
 #define NSIG_MAX 65

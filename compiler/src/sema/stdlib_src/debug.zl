@@ -29,7 +29,49 @@ struct breakpoint {
     cond    string
     log     string
     hits    int
-    hitCond int
+    hitOp   string // "" none, "==", ">=", ">", "<", "<=", "%"
+    hitN    int
+}
+
+// Parses a DAP hitCondition: `== N`, `>= N`, `> N`, `< N`, `<= N`,
+// `% N` (every N-th hit) or a bare `N` (== N, as VS Code documents).
+// Returns the operator ("" when the text is not one of these) and N.
+func parseHitCond(text string) (string, int) {
+    var s = strings.Trim(text)
+    var op = "=="
+    for p in [">=", "<=", "==", ">", "<", "%", "="] {
+        if strings.HasPrefix(s, p) {
+            op = p
+            s = strings.Trim(strings.TrimPrefix(s, p))
+            break
+        }
+    }
+    if op == "=" {
+        op = "=="
+    }
+    var n = try strconv.Atoi(s) else -1
+    if n < 0 || op == "%" && n == 0 {
+        return ("", 0)
+    }
+    return (op, n)
+}
+
+// Whether the hits-th hit (counting from 1) satisfies op N.
+func hitOk(op string, n int, hits int) bool {
+    if op == "==" {
+        return hits == n
+    } else if op == ">=" {
+        return hits >= n
+    } else if op == ">" {
+        return hits > n
+    } else if op == "<" {
+        return hits < n
+    } else if op == "<=" {
+        return hits <= n
+    } else if op == "%" {
+        return hits % n == 0
+    }
+    return true
 }
 
 // What a variablesReference stands for: kind 1 the locals of frame
@@ -201,7 +243,7 @@ struct Agent {
                 }
                 if ok {
                     bp.hits += 1
-                    if bp.hitCond > 0 && bp.hits < bp.hitCond {
+                    if bp.hitOp != "" && !hitOk(bp.hitOp, bp.hitN, bp.hits) {
                         ok = false
                     }
                 }
@@ -393,6 +435,8 @@ struct Agent {
             }
         } else if c == "variables" {
             this.variables(req)
+        } else if c == "setVariable" {
+            this.setVariable(req)
         } else if c == "evaluate" {
             this.evaluateReq(req)
         } else if c == "continue" {
@@ -468,17 +512,24 @@ struct Agent {
     }
 
     // The file index of a DAP source path (exact path, else a path suffix).
+    // The table file a breakpoint path names: the same file after
+    // canonicalisation (symlinks resolved; on Windows case- and
+    // separator-insensitive, runtime/src/debug.c), else the file whose
+    // tail the path is, else one with the same base name.
     func fileIndex(path string) int {
-        for i in 0..len(this.t.files) {
-            if this.t.files[i] == path {
-                return i
-            }
-        }
+        var canon = rtPathCanon(path)
         var best = -1
+        var score = 0
         for i in 0..len(this.t.files) {
-            var f = this.t.files[i]
-            if strings.HasSuffix(f, "/" + path) ||
-                strings.HasSuffix(path, "/" + baseName(f)) && baseName(f) == baseName(path) {
+            var m = rtPathMatch(this.t.files[i], canon)
+            if canon != path {
+                var m2 = rtPathMatch(this.t.files[i], path)
+                if m2 > m {
+                    m = m2
+                }
+            }
+            if m > score {
+                score = m
                 best = i
             }
         }
@@ -570,17 +621,19 @@ struct Agent {
             bp.cond = try b.Get("condition").String() else ""
             bp.log = try b.Get("logMessage").String() else ""
             var hc = try b.Get("hitCondition").String() else ""
-            if hc != "" {
-                bp.hitCond = try strconv.Atoi(
-                    strings.TrimPrefix(strings.Trim(hc), ">="),
-                ) else 0
+            var hcBad = false
+            if strings.Trim(hc) != "" {
+                var (op, n) = parseHitCond(hc)
+                bp.hitOp = op
+                bp.hitN = n
+                hcBad = op == ""
             }
             for st in at {
                 this.bps[st] = bp
                 stmts = append(stmts, st)
                 rtSetBp(st, true)
             }
-            results = append(results, obj([
+            var kv = [
                 "id",
                 strconv.Itoa(id),
                 "verified",
@@ -589,7 +642,12 @@ struct Agent {
                 strconv.Itoa(bp.line),
                 "source",
                 obj(["path", q(this.t.fileName(file))]),
-            ]))
+            ]
+            if hcBad {
+                kv = append(kv, "message")
+                kv = append(kv, q("bad hit condition (use N, == N, >= N, > N, < N, <= N or % N): ignored"))
+            }
+            results = append(results, obj(kv))
         }
         if file >= 0 {
             this.fileBps[file] = stmts
@@ -682,8 +740,11 @@ struct Agent {
     }
 
     func taskName(task int) string {
+        // A thread is a task (a logical await chain, docs/DEBUGGER.md):
+        // named after the function at its bottom, which changes when a
+        // coroutine takes the record over or hands it back.
         var fn = this.t.funcShort(rtTaskFunc(task))
-        if task == 1 || fn == "main" {
+        if fn == "main" || task == 1 && fn == "?" {
             return "main"
         }
         return "task " + strconv.Itoa(task) + " " + fn
@@ -792,6 +853,55 @@ struct Agent {
             }
         }
         this.respond(req, obj(["variables", "[" + strings.Join(items, ",") + "]"]))
+    }
+
+    // DAP setVariable: a local or a child (field, element) of a scalar type
+    // (integers, floats, bool, char, string) gets the value parsed from
+    // the client's text; a string is quoted ("...") or taken as written.
+    func setVariable(req request) {
+        var id = argInt(req, "variablesReference")
+        var name = try req.args.Get("name").String() else ""
+        var text = try req.args.Get("value").String() else ""
+        if id <= 0 || id > len(this.refs) {
+            this.fail(req, "unknown variablesReference")
+            return
+        }
+        var r = this.refs[id - 1]
+        var addr = 0
+        var ti = 0
+        if r.kind == 1 {
+            for l in frameLocals(this.t, r.frame) {
+                if l.name == name {
+                    addr = l.addr
+                    ti = l.ti
+                    break
+                }
+            }
+        } else {
+            for c in children(r.addr, r.ti, 0, -1) {
+                if c.name == name {
+                    addr = c.addr
+                    ti = c.ti
+                    break
+                }
+            }
+        }
+        if addr == 0 || ti == 0 {
+            this.fail(req, "no variable " + name)
+            return
+        }
+        try writeScalar(addr, ti, strings.Trim(text)) catch err {
+            this.fail(req, err.Message())
+            return
+        }
+        this.respond(req, obj([
+            "value",
+            q(format(addr, ti, 2)),
+            "type",
+            q(tiName(ti)),
+            "variablesReference",
+            "0",
+        ]))
     }
 
     func evaluateReq(req request) {
@@ -903,6 +1013,8 @@ func capabilities() string {
         "true",
         "supportsHitConditionalBreakpoints",
         "true",
+        "supportsSetVariable",
+        "true",
         "supportsLogPoints",
         "true",
         "supportsFunctionBreakpoints",
@@ -918,6 +1030,56 @@ func capabilities() string {
         "exceptionBreakpointFilters",
         filters,
     ])
+}
+
+// Stores the value written as text into the scalar at addr of type ti.
+func writeScalar(addr int, ti int, text string) void! {
+    var k = tiKind(ti)
+    var bad = "not a " + tiName(ti) + ": " + text
+    if k == kBool() {
+        var b = try strconv.ParseBool(text) catch err {
+            return error(bad)
+        }
+        var v = 0
+        if b {
+            v = 1
+        }
+        unsafe.WriteInt(addr, 1, v)
+    } else if k >= kInt() && k <= kInt32() {
+        var bits = [64, 8, 16, 32][k - kInt()]
+        var n = try strconv.ParseIntBits(text, 0, bits) catch err {
+            return error(bad)
+        }
+        unsafe.WriteInt(addr, tiSize(ti), n)
+    } else if k >= kUint() && k <= kUint32() {
+        var bits = [64, 8, 16, 32][k - kUint()]
+        var n = try strconv.ParseUintBits(text, 0, bits) catch err {
+            return error(bad)
+        }
+        unsafe.WriteInt(addr, tiSize(ti), int(n))
+    } else if k == kFloat() || k == kFloat32() {
+        var f = try strconv.ParseFloat(text) catch err {
+            return error(bad)
+        }
+        rtWriteFloat(addr, tiSize(ti), f)
+    } else if k == kChar() {
+        var u = try strconv.Unquote(text) else text
+        var rs = strings.Runes(u)
+        if len(rs) != 1 {
+            return error(bad)
+        }
+        unsafe.WriteInt(addr, 4, int(rs[0]))
+    } else if k == kString() {
+        var v = text
+        if strings.HasPrefix(text, "\"") {
+            v = try strconv.Unquote(text) catch err {
+                return error("bad string literal: " + text)
+            }
+        }
+        rtSetString(addr, v)
+    } else {
+        return error("cannot set a value of type " + tiName(ti) + " (only integers, floats, bool, char and string)")
+    }
 }
 
 func baseName(p string) string {

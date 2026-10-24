@@ -19,6 +19,22 @@ extern func rtSetExitHook(a func(int))
 extern func rtSetBp(a int, b bool)
 
 // Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_debug_rt_path_canon (runtime/src/std_*.c).
+extern func rtPathCanon(a string) string
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_debug_rt_path_match (runtime/src/std_*.c).
+extern func rtPathMatch(a string, b string) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_debug_rt_write_float (runtime/src/std_*.c).
+extern func rtWriteFloat(a int, b int, c float)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_debug_rt_set_string (runtime/src/std_*.c).
+extern func rtSetString(a int, b string)
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_debug_rt_on_error (runtime/src/std_*.c).
 extern func rtOnError(a bool)
 

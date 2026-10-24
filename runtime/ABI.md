@@ -2835,6 +2835,24 @@ own task), or (step in) in a callee of the frame. Without `single` the
 freeze ends and every stopped task goes on (a task still deciding in its
 hook is not released by another task's resume).
 
+**Task records and ids** (the DAP `threadId`). A record is made when code
+first stops (a hook that reports to the agent) or when a task suspends at
+an `await`; statement hooks never make one. Code with no current task (the
+main thread) uses the main record (id 1 at first). The id lives in
+`zell_task.dbg_id` and stays with the task object across all its awaits.
+Before its first suspension a coroutine runs in its caller's task (10.3),
+so it is observed under the caller's record; at that first suspension
+(`zell_dbg_suspend` finds the task without an id), if a step is under way
+in that very frame the coroutine's new task **takes over** that record
+(the caller, or the main thread, loses it and gets a fresh record if it
+stops again), otherwise the task gets a fresh record. A taken-over record
+goes on, when its task completes (`zell_dbg_leave` of the bottom async
+frame), with the **awaiter** (the current task of the first continuation
+registered on the task, `zell__task_awaiter`): the awaiter's own record,
+made when it suspended, is retired unless it ever reported a stop. So one
+logical await chain keeps one id. `zell__task_parent`, `zell__task_awaiter`
+(task.c, borrowed results) serve this.
+
 ### 22.4 What debug reads
 
 Values are read with `unsafe` through the tables, frames (22.1, 22.2)
@@ -2863,6 +2881,9 @@ vtable header (`vtable[0]` type, `vtable[1]` boxed), `any` its type word;
 | `rtTaskDone(t)`, `rtTaskSlot(t)`, `rtSymName(fn)`, `rtTypeName(ti)` | | `Task<T>` state and result slot; symbol of a code address |
 | `rtListen(host, port) int!`, `rtSockPort(fd)`, `rtAccept(fd)`, `rtRecv(fd, max) []byte`, `rtSend(fd, s) bool`, `rtClose(fd)` | | blocking TCP on a private poller: the agent thread is no scheduler task and must answer while every worker is blocked in a stopped task |
 | `rtEprint(s)`, `rtExit(code)`, `rtNowMs()` | | unbuffered stderr, `_exit` after flushing, monotonic ms |
+| `rtPathCanon(path) string` | `zell_debug_rt_path_canon` | a breakpoint path's canonical spelling (`zell__plat_path_canon`: `realpath`; Windows `GetFinalPathNameByHandleW` without `\\?\`), the path itself (retained) if it does not exist |
+| `rtPathMatch(file, path) int` | `zell_debug_rt_path_match` | 3 same file, 2 `path` is a tail of `file` on a `/` boundary, 1 same base name, 0 none; with `zell__plat_path_fold()` (Windows) case-insensitive and `\` = `/` (`zell__dbg_path_match`, tested in `runtime/tests/test_debug.c`) |
+| `rtWriteFloat(addr, size, f)`, `rtSetString(addr, s)` | | `setVariable`: a 4/8-byte float; a `string` slot takes `s` (borrowed, retained for the slot) and releases its old value. Integers, `bool` and `char` are written with `unsafe.WriteInt` |
 
 ### 22.5 unsafe
 

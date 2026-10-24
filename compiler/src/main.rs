@@ -24,6 +24,8 @@ commands:
   test [path] [--filter re] [--json] [--bench] [-v] [--parallel n] [options]
                                  run the @test functions (and @test benchmarks
                                  taking *testing.B with --bench), see testing
+                                 (--debug [--port N] [--wait]: all selected tests in one
+                                 process under the debug agent, for an editor to attach)
   doc [path|namespace|symbol] [--html dir] [--json] [--check [--min N]] [--private]
                                  documentation from doc comments: `zell doc strings.Split`,
                                  `zell doc std --html out/` (the stdlib reference), --check: coverage

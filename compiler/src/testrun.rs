@@ -23,6 +23,13 @@
 //! standard output compared with the comment (surrounding white space
 //! trimmed; `// Unordered output:` compares the lines as a multiset).
 //!
+//! `zell test --debug [--port N] [--wait] [--filter F]` runs the selected
+//! tests in one process (the driver's `--in-process`: each test is a task
+//! of its own, so a panic or `t.FailNow()` ends only that test) built with
+//! the debug agent and started with `ZELL_DEBUG=127.0.0.1:N[,wait]`, the
+//! conventions of `zell debug run --headless`: the agent announces its
+//! port on stderr and an editor attaches to it. Examples are not run.
+//!
 //! `zell test std` (or a directory inside the standard library, like
 //! `zell test std/strings`) runs the tests and examples of the stdlib's
 //! `*_test.zl` files: only those files are compiled as user code, the
@@ -53,11 +60,24 @@ pub fn run(args: &[String]) -> i32 {
     let mut path: Option<String> = None;
     let mut pass: Vec<String> = Vec::new();
     let mut build_args: Vec<String> = Vec::new();
+    let mut debug = false;
+    let mut debug_wait = false;
+    let mut debug_port = 0u16;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
             "--json" | "--bench" | "-v" | "--verbose" => pass.push(a.clone()),
+            "--debug" => debug = true,
+            "--wait" => debug_wait = true,
+            "--port" => {
+                let Some(p) = args.get(i + 1).and_then(|p| p.parse().ok()) else {
+                    eprintln!("error: --port needs a number");
+                    return 2;
+                };
+                debug_port = p;
+                i += 1;
+            }
             "--filter" | "--run" | "--benchtime" | "--parallel" => {
                 let Some(v) = args.get(i + 1) else {
                     eprintln!("error: {a} needs a value");
@@ -98,6 +118,14 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
     opts.input = Some(root.clone());
+    if (debug_wait || debug_port != 0) && !debug {
+        eprintln!("error: --port and --wait need --debug");
+        return 2;
+    }
+    if debug {
+        opts.debug_agent = Some(true);
+        pass.push("--in-process".into());
+    }
     let src_root = if root.join("src").is_dir() && (root.join("zell.toml").is_file() || root.join("zell.json").is_file() || root.join("zell.yaml").is_file()) {
         root.join("src")
     } else {
@@ -224,7 +252,13 @@ pub fn run(args: &[String]) -> i32 {
             let tests_code = if total == 0 {
                 0
             } else {
-                match std::process::Command::new(&exe).args(&pass).status() {
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.args(&pass);
+                if debug {
+                    let spec = if debug_wait { format!("127.0.0.1:{debug_port},wait") } else { format!("127.0.0.1:{debug_port}") };
+                    cmd.env("ZELL_DEBUG", spec);
+                }
+                match cmd.status() {
                     Ok(st) => st.code().unwrap_or(1),
                     Err(e) => {
                         eprintln!("error: cannot run {}: {e}", exe.display());
@@ -232,7 +266,7 @@ pub fn run(args: &[String]) -> i32 {
                     }
                 }
             };
-            let ex_code = run_examples(&exe, &examples, &pass);
+            let ex_code = if debug { 0 } else { run_examples(&exe, &examples, &pass) };
             if tests_code != 0 {
                 tests_code
             } else {

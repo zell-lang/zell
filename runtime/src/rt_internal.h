@@ -316,6 +316,8 @@ ZELL_HIDDEN void zell__dbg_task_drop(int32_t id);
 ZELL_HIDDEN zell_task *zell__task_cur(void);
 ZELL_HIDDEN int32_t zell__task_dbg_id(const zell_task *t);
 ZELL_HIDDEN void zell__task_set_dbg_id(zell_task *t, int32_t id);
+ZELL_HIDDEN zell_task *zell__task_parent(zell_task *t);
+ZELL_HIDDEN zell_task *zell__task_awaiter(zell_task *t);
 
 #define ZELL_ROUND8(n) (((n) + 7) & ~(int64_t)7)
 

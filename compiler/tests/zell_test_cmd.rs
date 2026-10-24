@@ -145,3 +145,78 @@ fn package_with_dependency_and_async_tests() {
     }
     assert!(!stderr.contains("zellUserMain__"), "{stderr}");
 }
+
+/// `zell test --debug --wait`: the selected tests run in one process under
+/// one debug agent; a client attaches, a breakpoint in a test stops it,
+/// and both tests still run and report.
+#[test]
+fn debug_runs_tests_in_one_process_under_the_agent() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::time::Duration;
+    let _ = zell_test(&["--filter", "^TestDiv$"]); // builds the runtime if needed
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zell"))
+        .args(["test", "compiler/tests/fixtures/testing", "--debug", "--wait", "-v", "--filter", "^TestAdd$|^TestDiv$"])
+        .current_dir(repo())
+        .env("ZELL_NO_BACKTRACE", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("cannot run zell");
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    let addr = loop {
+        line.clear();
+        assert!(err.read_line(&mut line).unwrap() > 0, "no agent announced");
+        if let Some(a) = line.trim_end().strip_prefix(zell::dap::LISTENING) {
+            break a.to_string();
+        }
+    };
+    std::thread::spawn(move || {
+        let mut sink = String::new();
+        let _ = err.read_to_string(&mut sink);
+    });
+    let mut c = zell::dap::Client::connect(&addr, Duration::from_secs(10)).expect("agent not reachable");
+    let src = repo().join("compiler/tests/fixtures/testing/calc_test.zl");
+    let text = std::fs::read_to_string(&src).unwrap();
+    let bp = text.lines().position(|l| l.contains("testing.Equal(t, q, 3)")).unwrap() as i64 + 1;
+    let path = src.to_string_lossy().to_string();
+    c.handshake(|c| {
+        let r = c.request("setBreakpoints", serde_json::json!({"source": {"path": path}, "breakpoints": [{"line": bp}]}))?;
+        assert_eq!(r["breakpoints"][0]["verified"], true, "{r}");
+        Ok(())
+    })
+    .unwrap();
+    let ev = c.wait_event("stopped", Duration::from_secs(30)).expect("the breakpoint in TestDiv was not hit");
+    let t = ev["body"]["threadId"].as_i64().unwrap();
+    let frames = c.stack(t).unwrap();
+    assert_eq!(frames[0]["line"].as_i64(), Some(bp), "{frames:?}");
+    assert!(frames[0]["name"].as_str().unwrap().ends_with("TestDiv"), "{frames:?}");
+    let locals = c.locals(frames[0]["id"].as_i64().unwrap()).unwrap();
+    assert!(locals.iter().any(|v| v["name"] == "q" && v["value"] == "3"), "{locals:?}");
+    c.request("continue", serde_json::json!({"threadId": t})).unwrap();
+    c.wait_event("terminated", Duration::from_secs(30)).expect("the run did not end");
+    let mut out = String::new();
+    child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+    let st = child.wait().unwrap();
+    assert_eq!(st.code(), Some(0), "{out}");
+    assert!(out.contains("--- PASS: TestAdd (") && out.contains("--- PASS: TestDiv ("), "{out}");
+    assert!(out.contains("ok  \t2 passed, 0 failed, 0 skipped ("), "{out}");
+}
+
+/// In-process runs keep the report of child-process runs: a panic,
+/// `t.Fatal` and `t.Skip` end only their test.
+#[test]
+fn debug_without_client_reports_like_children() {
+    let (code, out) = zell_test(&["--debug"]);
+    assert_eq!(code, 1, "{out}");
+    for want in [
+        "    stop here\n--- FAIL: TestFatalStops (",
+        "    panic: runtime error: index out of range [3] with length 0\n--- FAIL: TestPanics (",
+        "--- SKIP: TestSkipped (",
+        "--- PASS: TestPanicsOK (",
+        "FAIL\nFAIL\t6 passed, 4 failed, 1 skipped (",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    assert!(!out.contains("never printed"), "{out}");
+}

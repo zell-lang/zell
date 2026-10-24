@@ -1814,6 +1814,26 @@ zell_task *zell__task_cur(void) { return t_cur; }
 int32_t zell__task_dbg_id(const zell_task *t) { return t ? __atomic_load_n(&t->dbg_id, __ATOMIC_ACQUIRE) : 0; }
 void zell__task_set_dbg_id(zell_task *t, int32_t id) { __atomic_store_n(&t->dbg_id, id, __ATOMIC_RELEASE); }
 
+/* debug.c: the task t was attached under (borrowed; NULL for none). */
+zell_task *zell__task_parent(zell_task *t) {
+    if (!t) return NULL;
+    task_lock(t);
+    zell_task *p = t->parent;
+    task_unlock(t);
+    return p;
+}
+
+/* debug.c: the current task of the code whose continuation was registered
+ * first on pending task t (borrowed: the continuation holds it until it
+ * runs, after t completes), or NULL. */
+zell_task *zell__task_awaiter(zell_task *t) {
+    if (!t) return NULL;
+    task_lock(t);
+    zell_task *w = t->cont0.fn ? t->cont0.cur : NULL;
+    task_unlock(t);
+    return w;
+}
+
 zell_task *zell_task_current(void) {
     zell_retain(t_cur);
     return t_cur;

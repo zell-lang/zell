@@ -1,0 +1,23 @@
+namespace app
+
+import io
+
+// Debug-agent fixture: DAP setVariable on scalar locals and fields.
+
+struct Point {
+    X int
+    Y float
+}
+
+func main() {
+    var n = 1
+    var small int8 = 3
+    var ratio = 0.5
+    var ok = false
+    var name = "old"
+    var ch = 'a'
+    var p = Point{X: 1, Y: 2.0}
+    var nums = [1, 2, 3]
+    println("start") // BREAK set
+    println(n, small, ratio, ok, name, ch, p.X, p.Y, nums)
+}
