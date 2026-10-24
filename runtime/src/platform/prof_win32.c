@@ -280,40 +280,64 @@ void zell__plat_symbolize_done(void) {
 
 /* ---- backtraces ------------------------------------------------------------------ */
 
-/* Format of glibc's backtrace_symbols_fd: module(function+0xoff) [0xaddr],
- * or module(+0xoff) [0xaddr] without a symbol. */
+/* One frame: "  file:line function" from the line table (ABI.md 8.2) for
+ * Zell code, else glibc's backtrace_symbols_fd format module(function+0xoff)
+ * [0xaddr], or module(+0xoff) [0xaddr] without a symbol. */
+static int bt_format(uintptr_t pc, char *line, size_t cap) {
+    char sym[400];
+    uintptr_t start = 0;
+    const char *file, *func;
+    uint32_t ln;
+    /* return addresses point after the call: look up pc - 1 */
+    if (zell__lines_find(pc - 1, &file, &ln, &func)) {
+        if (!func) func = zell__plat_symbolize(pc - 1, sym, sizeof sym, &start) ? sym : "?";
+        return snprintf(line, cap, "  %s:%u %s\n", zell__lines_shown(file), (unsigned)ln, func);
+    }
+    HMODULE mod = NULL;
+    wchar_t wpath[MAX_PATH];
+    const char *name = "?";
+    char *u = NULL;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)pc, &mod) &&
+        GetModuleFileNameW(mod, wpath, MAX_PATH)) {
+        u = zell__w32_utf8(wpath, -1);
+        if (u) {
+            char *b = strrchr(u, '\\');
+            name = b ? b + 1 : u;
+        }
+    }
+    int k;
+    if (!getenv("ZELL_NO_SYMBOLS") && zell__plat_symbolize(pc - 1, sym, sizeof sym, &start) && start <= pc)
+        k = snprintf(line, cap, "%s(%s+0x%llx) [0x%llx]\n", name, sym, (unsigned long long)(pc - start), (unsigned long long)pc);
+    else
+        k = snprintf(line, cap, "%s(+0x%llx) [0x%llx]\n", name, (unsigned long long)(pc - (uintptr_t)mod), (unsigned long long)pc);
+    free(u);
+    return k;
+}
+
 void zell__plat_backtrace(int fd, int skip) {
     void *frames[62];
     USHORT n = CaptureStackBackTrace((DWORD)(skip > 0 ? skip : 0), 62, frames, NULL);
-    bool symbols = !getenv("ZELL_NO_SYMBOLS");
     for (USHORT i = 0; i < n && frames[i]; i++) {
         char line[800];
-        HMODULE mod = NULL;
-        wchar_t wpath[MAX_PATH];
-        const char *name = "?";
-        char *u = NULL;
-        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               (LPCWSTR)frames[i], &mod) &&
-            GetModuleFileNameW(mod, wpath, MAX_PATH)) {
-            u = zell__w32_utf8(wpath, -1);
-            if (u) {
-                char *b = strrchr(u, '\\');
-                name = b ? b + 1 : u;
-            }
-        }
-        uintptr_t pc = (uintptr_t)frames[i];
-        char sym[400];
-        uintptr_t start = 0;
-        int k;
-        /* return addresses point after the call: look up pc - 1 */
-        if (symbols && zell__plat_symbolize(pc - 1, sym, sizeof sym, &start) && start <= pc)
-            k = snprintf(line, sizeof line, "%s(%s+0x%llx) [0x%llx]\n", name, sym, (unsigned long long)(pc - start),
-                         (unsigned long long)pc);
-        else
-            k = snprintf(line, sizeof line, "%s(+0x%llx) [0x%llx]\n", name, (unsigned long long)(pc - (uintptr_t)mod),
-                         (unsigned long long)pc);
-        free(u);
+        int k = bt_format((uintptr_t)frames[i], line, sizeof line);
         if (k > 0) zell__plat_write_all(fd, line, k < (int)sizeof line ? k : (int)sizeof line - 1);
+    }
+}
+
+void zell__plat_backtrace_buf(char *buf, size_t cap, int skip) {
+    void *frames[62];
+    size_t len = 0;
+    if (cap) buf[0] = 0;
+    USHORT n = CaptureStackBackTrace((DWORD)(skip > 0 ? skip : 0), 62, frames, NULL);
+    for (USHORT i = 0; i < n && frames[i]; i++) {
+        char line[800];
+        int k = bt_format((uintptr_t)frames[i], line, sizeof line);
+        if (k <= 0) continue;
+        if (k >= (int)sizeof line) k = (int)sizeof line - 1;
+        if (len + (size_t)k >= cap) break;
+        memcpy(buf + len, line, (size_t)k);
+        len += (size_t)k;
+        buf[len] = 0;
     }
 }
 

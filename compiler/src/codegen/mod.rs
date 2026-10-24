@@ -230,12 +230,21 @@
 //! globals are released (reverse initialisation order) before
 //! `zell_runtime_shutdown`, which reports live objects.
 //!
-//! **Line table** (ABI.md 8.2). With [`Options::line_tables`] (every ELF
-//! build) the module carries DWARF line tables even without `-g`; every
-//! function, helpers and C `main` included, has a subprogram, and calls
-//! without a location get line 0. `crate::lines` turns the linked
-//! executable's `.debug_line` into the `.zell_lines` section the runtime's
-//! backtrace printer reads.
+//! **Line table** (ABI.md 8.2). With [`Options::line_tables`] (every
+//! DWARF target: ELF, Mach-O, MinGW COFF) the module carries DWARF line
+//! tables even without `-g`; every function, helpers and C `main`
+//! included, has a subprogram, and calls without a location get line 0.
+//! After optimisation `crate::lines::expose` gives internal functions
+//! hidden external linkage; before the link `crate::lines::write_object`
+//! turns the objects' `.debug_line` into a second object holding the
+//! `zell_lines` table (function addresses as 32-bit offsets from the table,
+//! resolved by the linker) and a constructor calling
+//! `zell_lines_register(table, len)`, which the runtime's backtrace
+//! printer reads.
+//!
+//! **Task panics** (ABI.md 8.1): the `zell_coro_chain` pushes and pops are
+//! emitted for every target (the thread-local is native TLS everywhere,
+//! MinGW included).
 
 mod async_;
 mod cleanup;
@@ -362,8 +371,9 @@ pub struct Options {
     pub debug_info: bool,
     /// Without [`Options::debug_info`]: emit DWARF line tables only
     /// (`LineTablesOnly`: subprograms and statement locations), which the
-    /// build turns into the `.zell_lines` table of panic backtraces
-    /// (runtime/ABI.md 8.2) and then drops. Does not change the code.
+    /// build turns into the `zell_lines` table of panic backtraces
+    /// (runtime/ABI.md 8.2); stripped builds drop the DWARF. Does not
+    /// change the code.
     pub line_tables: bool,
     /// The module will be optimised (`DW_AT_..._optimized` in the debug info).
     pub optimized: bool,

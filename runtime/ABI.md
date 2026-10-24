@@ -1049,8 +1049,8 @@ attribute and follow the call with `unreachable`.
 | `zell_panic_slice_bounds(int64 lo, int64 hi, int64 cap)` | `runtime error: slice bounds out of range [lo:hi] with capacity cap` |
 
 Behaviour of a panic that ends the process (on the main thread, on a
-thread outside the scheduler, in a job without a current task, on
-Windows, or a panic while unwinding another one):
+thread outside the scheduler, in a job without a current task, or a
+panic while unwinding another one):
 
 1. `stdout` is flushed, so output printed before the panic is not lost.
 2. `panic: <msg>\n` is written to stderr.
@@ -1058,7 +1058,8 @@ Windows, or a panic while unwinding another one):
    `backtrace (most recent call first):`, then one line per frame: Zell
    code found in the line table (8.2) as `  <file>:<line> <function>`,
    anything else as `module(symbol+0xoff)[0xaddr]` (glibc
-   `backtrace_symbols_fd` format; `module(+0xoff)[0xaddr]` without symbols).
+   `backtrace_symbols_fd` format; `module(+0xoff)[0xaddr]` without symbols;
+   Windows: `module(symbol+0xoff) [0xaddr]`).
 4. The process exits immediately with **exit code 2** (`_Exit`). No `defer`, no
    destructors, no atexit handlers.
 
@@ -1069,12 +1070,18 @@ with `out of memory (...)`.
 ### 8.1 Task panics (DESIGN.md "Паника")
 
 A panic in a scheduler job whose thread has a current task (10.11) ends
-that task only (not on Windows: `ZELL_PLAT_HAS_PANIC_CAPTURE` 0 keeps the
-behaviour above):
+that task only, on every platform:
 
-1. **Unwind point.** `run_job` (task.c) runs every job under a
-   `__builtin_setjmp` buffer (`zell__job_unwind`, thread-local, with the
-   value of `zell_coro_chain` at the job's start).
+1. **Unwind point.** `run_job` (task.c) runs every job under a jump
+   buffer (`zell__job_unwind`, thread-local, with the value of
+   `zell_coro_chain` at the job's start). The jump restores registers
+   only, without SEH or DWARF unwinding and without touching the signal
+   mask (`zell__plat_setjmp` / `zell__plat_longjmp`, platform.h):
+   `__builtin_setjmp` on x86-64 POSIX, `_setjmp` / `_longjmp` on arm64
+   (which has no `__builtin_longjmp`), and on Windows `_setjmp(buf, NULL)`
+   with `longjmp`, which for a NULL frame restores the registers without
+   an SEH unwind (`__builtin_setjmp` is miscompiled for Win64 frames,
+   whose frame pointer is offset from the frame address).
 2. **Frame chain.** `_Thread_local void *zell_coro_chain` (exported, read
    and written by compiled code) lists the coroutine frames running on
    the thread, innermost first. A node is `{ ptr prev; ptr hdl }` in the
@@ -1086,8 +1093,10 @@ behaviour above):
    `zell_task_add_continuation`-returned-false edge); it pops it right
    before `coro.save` (so before `zell_task_add_continuation`: the frame
    may resume elsewhere at once) and at the start of the return path
-   (after the defers and the release of the locals). Not emitted for
-   Windows targets.
+   (after the defers and the release of the locals). Emitted for every
+   target; on Windows the compiled code reaches the runtime's
+   `_Thread_local` through native TLS (`_tls_index`), which is why the
+   MinGW runtime is built by clang, not GCC (emulated TLS).
 3. **The panic** (`die` in panic.c, after the debug agent's panic stop):
    the message and the backtrace as text (`zell__plat_backtrace_buf`) are
    kept thread-locally, then every frame on the chain down to the job's
@@ -1170,34 +1179,57 @@ of the calling thread's last captured panic (+1, `""` if none).
 
 ---
 
-### 8.2 Line table (`.zell_lines`)
+### 8.2 Line table (`zell_lines`)
 
 Panic backtraces (8, 8.1 `PanicTrace`) print `file:line` from a table in
-the executable, also in stripped `--release` builds; no DWARF is read at
-run time.
+the executable, also in stripped `--release` builds, the same way on ELF
+(Linux, FreeBSD), Mach-O (macOS) and COFF (MinGW Windows); no DWARF is
+read at run time. Like Go's pclntab, the table is ordinary read-only data
+that goes through the linker.
 
-**Producer** (`compiler/src/lines.rs`, ELF64 little-endian targets:
-linux/freebsd amd64/arm64). Codegen always emits DWARF line tables
-(`LineTablesOnly` without `-g`; every function, helpers included, has a
-subprogram, so Zell code inlined into C `main` or a helper keeps its
-lines). After the link the compiler reads `.debug_line` of the executable,
-writes the table into a non-allocated `PROGBITS` section `.zell_lines`,
-then removes the `.debug_*` sections unless the build emits debug info and
-the symbol table of stripped builds (`--release` without `-g`, `--strip`:
-the compiler strips ELF executables itself instead of passing `-s` to the
-linker). Being data, not symbols, the section survives `strip` (binutils)
-and `objcopy --strip-debug`; `llvm-strip --strip-all` removes all
-non-allocated sections (keep it with `--keep-section=.zell_lines`).
+**Producer** (`compiler/src/lines.rs`, `build.rs` `link`). Codegen always
+emits DWARF line tables (`LineTablesOnly` without `-g`; every function,
+helpers included, has a subprogram, so Zell code inlined into C `main` or
+a helper keeps its lines). After optimisation, every internal or private
+function definition gets external linkage with hidden visibility
+(`lines::expose`; package objects append `.<package>` to those names), so
+another object can refer to it; the symbols stay out of the dynamic symbol
+table and stripped builds drop them. Before the link, the compiler reads
+`.debug_line` (`__debug_line` on Mach-O) of each program object, resolves
+its relocations to (section, offset) addresses, maps every row to the
+global function symbol holding it, and writes one more object for the same
+target (an LLVM module of its own):
 
-**Layout** (little-endian):
+- `zell_lines` (hidden, constant, 4-byte aligned): the table below, in an
+  allocated read-only section (`.rodata` on ELF, `__TEXT,__const` or
+  `__DATA_CONST,__const` on Mach-O, `.rdata` on COFF);
+- `zell_lines_len` (`i64`, hidden): its size in bytes;
+- a constructor (`llvm.global_ctors`: `.init_array`, `__mod_init_func`,
+  `.ctors`) calling `void zell_lines_register(const void *table, int64_t
+  len)` (lines.c), which keeps the pointer (a table without the `ZLN2`
+  magic is ignored). The constructor is what keeps the table alive under
+  `--gc-sections` / `-dead_strip`; programs without it (C tests, ThinLTO
+  builds, whose bitcode objects have no DWARF to read) simply have no
+  table.
+
+The table is data, not symbols or debug sections, so every `strip`
+(`-s` / `-S -x` passed to the linker again, `llvm-strip --strip-all`) keeps
+it. Each function's address is stored as a 32-bit offset from the field
+itself (`ptrtoint(@f) - ptrtoint(&field)`), which the static linker
+resolves (`R_X86_64_PC32` / `R_AARCH64_PREL32`, `IMAGE_REL_AMD64_REL32`,
+`ARM64_RELOC_SUBTRACTOR` + `UNSIGNED`): the values are run-time addresses
+in a PIE or ASLR image too, so the runtime applies **no load slide** and
+reads no file.
+
+**Layout** (little-endian, 4-byte fields):
 
 | Offset | Field |
 |---|---|
-| 0 | magic `"ZLN1"` |
-| 4 | `u32 nfiles`, `u32 nlines`, `u32 nfuncs`, `u32 strsize`, `u32 0` |
-| 24 | `u64 base`: link-time address of the first line entry |
-| 32 | `u32 files[nfiles]`: offsets into `str` of the source paths, spelled as the compiler was given them (like error-trace sites, 7) |
-| | `{u32 off; u32 fl} lines[nlines]`: sorted by `off` (address − `base`); `fl = file << 20 \| line`; an entry covers addresses up to the next one; `file` `0xfff` = no line (non-Zell code, line 0, gaps) |
+| 0 | magic `"ZLN2"` |
+| 4 | `u32 nfiles`, `u32 nlines`, `u32 nfuncs`, `u32 strsize`, `u32 ncode` |
+| 24 | `{i32 rel; u32 size; u32 first} code[ncode]`: one per function with lines; its code is `[&rel + rel, &rel + rel + size)`; its line entries are `lines[first .. next code entry's first)` (`nlines` for the last) |
+| | `u32 files[nfiles]`: offsets into `str` of the source paths, spelled as the compiler was given them (like error-trace sites, 7) |
+| | `{u32 off; u32 fl} lines[nlines]`: per function, sorted by `off` (address − the function's start); `fl = file << 20 \| line`; an entry covers addresses up to the next one of its function; `file` `0xfff` = no line (non-Zell code, line 0) |
 | | `{u32 fl; u32 last; u32 name} funcs[nfuncs]`: source range of each Zell function (`file << 20 \| first line`, last line) and its name as in error traces (namespace stripped) |
 | | `char str[strsize]`: NUL-terminated strings |
 
@@ -1205,15 +1237,15 @@ One line entry per location in DWARF's line program (one per statement,
 call and `await`), consecutive duplicates merged. At most 4095 files and
 lines up to 2^20 − 1 are described.
 
-**Consumer** (`runtime/src/lines.c`, `platform/posix.c`): on the first
-backtrace the runtime reads `.zell_lines` from `/proc/self/exe`, computes
-the load bias from `dl_iterate_phdr`, and for each return address `pc`
-looks up `pc - 1 - bias`: the last line entry at or below it gives file and
+**Consumer** (`runtime/src/lines.c` `zell__lines_find`, called by the
+backtrace printers of `platform/posix.c` and `platform/prof_win32.c`): on
+the first lookup the runtime sorts the code ranges by address; for each
+return address `pc` it looks up `pc - 1`: the code range holding it, the
+last line entry of that function at or below the offset gives file and
 line, the innermost `funcs` range holding that line gives the function
-(exact with inlining; without one, the symbol name). An absolute file under
-the working directory prints relative to it. `ZELL_NO_LINES=1` falls back
-to symbol+offset frames. Not found, other platforms (Mach-O, Windows/COFF):
-the symbol+offset format of 8.
+(exact with inlining; without one, the symbol name). An absolute file
+under the working directory prints relative to it. `ZELL_NO_LINES=1`
+falls back to symbol+offset frames, as does an address outside the table.
 
 Inlined calls have no frame of their own: in an optimised build a frame
 shows the innermost inlined line only.

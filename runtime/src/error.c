@@ -170,7 +170,7 @@ static void trace_copy(zell_error *dst, const zell_error *src) {
 /* Copy-on-write: an error that is referenced elsewhere (or immortal) is
  * copied before its trace changes. Consumes err, returns an owned error
  * that is uniquely referenced. */
-static zell_error *unshare(zell_error *err) {
+static zell_error *err_unshare(zell_error *err) {
     if (zell_refcount(err) == 1) return err;
     zell_error *c = zell_object_new(&zell_type_error, (int64_t)sizeof(zell_error));
     zell_retain(err->message);
@@ -257,7 +257,7 @@ static void pend_adopt(zell_error *err, pend_rec *r) {
 static zell_error *materialize(zell_error *err, pend_rec *r) {
     if (!unique(err)) {
         zell_retain(err);               /* makes unshare copy; consumes our ref below */
-        zell_error *c = unshare(err);
+        zell_error *c = err_unshare(err);
         zell_release(err);
         err = c;
     }
@@ -277,7 +277,7 @@ zell_error *zell_error_created(zell_error *err, const zell_error_site *site) {
         r->created = site;
         r->n = 0;
     } else {
-        err = unshare(err);
+        err = err_unshare(err);
         err->created = site;
     }
     if (__atomic_load_n(&zell_dbg_on, __ATOMIC_RELAXED) && zell__dbg_error_fn) zell__dbg_error_fn(err);
@@ -297,7 +297,7 @@ static inline zell_error *returned(zell_error *err, const zell_error_site *site,
             r->sites[r->n++] = site;
             return err;
         }
-        err = r ? materialize(err, r) : unshare(err);
+        err = r ? materialize(err, r) : err_unshare(err);
     } else if (r) {
         pend_adopt(err, r);
     }

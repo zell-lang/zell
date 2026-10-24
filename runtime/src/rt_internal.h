@@ -3,6 +3,7 @@
 #define ZELL_RT_INTERNAL_H
 
 #include "zell_rt.h"
+#include "platform/platform.h"
 
 #include <setjmp.h>
 
@@ -282,7 +283,7 @@ ZELL_HIDDEN extern _Thread_local zell__panic_capture *zell__panic_capture_tls;
  * up by compiled coroutines), which run their pending defers and complete
  * their tasks as panicked, then jumps back to the job's start. */
 typedef struct zell__job_unwind {
-    void *jb[5];                       /* __builtin_setjmp buffer */
+    zell__plat_jmpbuf jb;              /* zell__plat_setjmp buffer */
     void *chain0;                      /* zell_coro_chain when the job started */
     struct zell__job_unwind *prev;
 } zell__job_unwind;

@@ -1,14 +1,13 @@
 // test: a panic backtrace names the source file, line and function of every Zell frame (DESIGN.md "Паника", ABI.md 8.2), paths relative to the working directory
 // status: passing
 // exit: 2
-// os: linux
 // env: ZELL_NO_BACKTRACE=
 // stderr: panic: runtime error: index out of range [5] with length 3
 // stderr: backtrace (most recent call first):
-// stderr:   tests/spec/panics/backtrace_lines.zl:18 inner
-// stderr:   tests/spec/panics/backtrace_lines.zl:22 middle
-// stderr:   tests/spec/panics/backtrace_lines.zl:27 outer
-// stderr:   tests/spec/panics/backtrace_lines.zl:32 main
+// stderr:   tests/spec/panics/backtrace_lines.zl:17 inner
+// stderr:   tests/spec/panics/backtrace_lines.zl:21 middle
+// stderr:   tests/spec/panics/backtrace_lines.zl:26 outer
+// stderr:   tests/spec/panics/backtrace_lines.zl:31 main
 namespace spec.panics.backtrace_lines
 
 import io

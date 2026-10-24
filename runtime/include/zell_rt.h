@@ -551,6 +551,9 @@ void zell_coro_unwound(zell_task *own, zell_object *ctx0);
 /* The running coroutine frames of this thread, innermost first: nodes
  * { prev, hdl } in the frames (hdl NULL = no destroy). */
 extern _Thread_local void *zell_coro_chain;
+/* The program's line table (ABI.md 8.2), registered by the constructor of
+ * the line-table object the compiler links into every program. */
+void zell_lines_register(const void *table, int64_t len);
 zell_task *zell_task_delay(int64_t ms);
 zell_task *zell_task_all(zell_task *const *tasks, int64_t n);
 zell_task *zell_task_any(zell_task *const *tasks, int64_t n); /* result: int64_t index */

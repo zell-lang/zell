@@ -1,11 +1,10 @@
 // test: a stripped --release executable still prints file:line in panic backtraces: the line table is data, not symbols (ABI.md 8.2); inlined calls show the innermost line
 // status: passing
 // exit: 2
-// os: linux
 // build-flags: --release
 // env: ZELL_NO_BACKTRACE=
 // stderr: panic: runtime error: index out of range [5] with length 3
-// stderr:   tests/spec/panics/backtrace_lines_release.zl:15 inner
+// stderr:   tests/spec/panics/backtrace_lines_release.zl:14 inner
 namespace spec.panics.backtrace_lines_release
 
 import io

@@ -639,6 +639,9 @@ fn emit_plain(program: &Program, name: &str, output: PathBuf, opts: &BuildOption
             return Err(format!("cannot write {}", obj.display()));
         }
     } else {
+        if crate::lines::supported(&crate::target::current()) {
+            crate::lines::expose(&module, None);
+        }
         write_object_par(&machine, &module, &obj, opts)?;
     }
     let r = link(&[obj.clone()], &output, &libs, opts, &crate::lines::Names::of(program));
@@ -759,11 +762,7 @@ fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions, nam
     let _t = phase("link");
     let target = crate::target::current();
     let clang = find_clang().unwrap_or_else(|_| "clang".into());
-    // ELF executables get the `.zell_lines` table from the DWARF after the
-    // link (`crate::lines`), which also strips them: the linker does not.
-    let lines = crate::lines::supported(&target);
-    let want_strip = opts.strip || (opts.release && !opts.debug_info);
-    let strip = want_strip && !lines;
+    let strip = opts.strip || (opts.release && !opts.debug_info);
     let lo = crate::crosslink::LinkOpts { release: opts.release, strip, static_link: opts.static_link, export_dynamic: !opts.release && !opts.static_link, clang: &clang };
     let cross = !target.is_host() || target.os == "windows";
     let lto = !cross && lto_enabled(opts);
@@ -782,30 +781,47 @@ fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions, nam
     } else {
         find_runtime()?
     };
-    let (mut cmd, linker) = if lto {
-        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, true, strip), clang.clone())
-    } else if let Some(r) = crate::crosslink::bundled_link(&target, objs, &rt, output, libs, &lo) {
+    // The line table (ABI.md 8.2): one more object, built from the DWARF of
+    // the program's objects (not of bitcode: ThinLTO builds have none).
+    let mut objs = objs.to_vec();
+    let lines_obj = output.with_extension(format!("{}.lines.o", std::process::id()));
+    if crate::lines::supported(&target) && !lto {
+        let _t = phase("lines");
+        let machine = codegen::host_machine(OptimizationLevel::None)?;
+        if let Some(n) = crate::lines::write_object(&objs, names, &machine, &lines_obj)? {
+            log(opts, format!("line table: {n} bytes"));
+            objs.push(lines_obj.clone());
+        }
+    }
+    let r = link_command(&objs, &rt, output, libs, opts, &target, &clang, &lo, cross, lto).and_then(|(mut cmd, linker)| {
+        log(opts, format!("linking {} for {} ({} object(s), runtime {}) with {linker}{}", output.display(), target.triple, objs.len(), rt.display(), if lto { " (ThinLTO)" } else { "" }));
+        let out = cmd.output().map_err(|e| format!("cannot run {}: {e}", cmd.get_program().to_string_lossy()))?;
+        if !out.status.success() {
+            return Err(format!("linking failed:\n{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout)));
+        }
+        Ok(())
+    });
+    let _ = std::fs::remove_file(&lines_obj);
+    r
+}
+
+/// The link command of [`link`] and the linker's name.
+#[allow(clippy::too_many_arguments)]
+fn link_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str], opts: &BuildOptions, target: &crate::target::Target, clang: &str, lo: &crate::crosslink::LinkOpts, cross: bool, lto: bool) -> Result<(Command, String), String> {
+    let strip = lo.strip;
+    Ok(if lto {
+        (host_clang_command(objs, rt, output, libs, opts, &find_clang()?, true, strip), clang.to_string())
+    } else if let Some(r) = crate::crosslink::bundled_link(target, objs, rt, output, libs, lo) {
         r?
     } else if cross {
         // Cross link with the system clang (docs/PLATFORMS.md): the
         // target's runtime and C library (on a Windows host too: the MinGW
         // runtime and clang driver).
         find_clang()?;
-        crate::crosslink::link_command(&target, objs, &rt, output, libs, &lo)?
+        crate::crosslink::link_command(target, objs, rt, output, libs, lo)?
     } else {
-        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, false, strip), clang.clone())
-    };
-    log(opts, format!("linking {} for {} ({} object(s), runtime {}) with {linker}{}", output.display(), target.triple, objs.len(), rt.display(), if lto { " (ThinLTO)" } else { "" }));
-    let out = cmd.output().map_err(|e| format!("cannot run {}: {e}", cmd.get_program().to_string_lossy()))?;
-    if !out.status.success() {
-        return Err(format!("linking failed:\n{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout)));
-    }
-    if lines {
-        let _t = phase("lines");
-        let n = crate::lines::finish(output, names, opts.emits_debug_info(), want_strip)?;
-        log(opts, format!("line table: {n} bytes"));
-    }
-    Ok(())
+        (host_clang_command(objs, rt, output, libs, opts, &find_clang()?, false, strip), clang.to_string())
+    })
 }
 
 /// The host link through the system clang driver (a runtime without
@@ -882,7 +898,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
         set_sections(&part);
         let mut h = Sha256::new();
         h.update(compiler.as_bytes());
-        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0open_defer={}\0lines=1\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none(), std::env::var_os("ZELL_NO_OPEN_DEFER").is_none()).as_bytes());
+        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0open_defer={}\0lines=2\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none(), std::env::var_os("ZELL_NO_OPEN_DEFER").is_none()).as_bytes());
         h.update(format!("agent={}\0", opts.debug_agent_on()).as_bytes());
         h.update(part.print_to_string().to_bytes());
         let key = lock::hex(&h.finalize()[..8]);
@@ -892,6 +908,9 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
         } else {
             log(opts, format!("compiling {name} -> {}", obj.display()));
             optimise(&part, &machine, opts.opt)?;
+            if crate::lines::supported(&crate::target::current()) {
+                crate::lines::expose(&part, Some(name));
+            }
             let tmp = obj.with_extension(format!("{}.tmp", std::process::id()));
             write_object_par(&machine, &part, &tmp, opts)?;
             std::fs::rename(&tmp, &obj).map_err(|e| format!("cannot write {}: {e}", obj.display()))?;

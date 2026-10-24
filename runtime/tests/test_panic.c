@@ -15,6 +15,34 @@ static void p_stdout_flushed(void) {
 }
 static void p_exit(void) { zell_print_cstr("bye"); zell_exit(7); }
 
+/* A line table (ABI.md 8.2) whose one code range is p_lined: every
+ * address in it is t.zl:7, inside function `lined` (t.zl:1-100). */
+static __attribute__((noinline)) void p_lined(void) { zell_panic("lined"); }
+static _Alignas(4) unsigned char g_tab[24 + 12 + 4 + 8 + 12 + 16];
+static void put32(unsigned char *p, uint32_t v) { memcpy(p, &v, 4); }
+static void register_table(void) {
+    unsigned char *t = g_tab;
+    memcpy(t, "ZLN2", 4);
+    put32(t + 4, 1);          /* nfiles */
+    put32(t + 8, 1);          /* nlines */
+    put32(t + 12, 1);         /* nfuncs */
+    put32(t + 16, 11);        /* strsize: "t.zl\0lined\0" */
+    put32(t + 20, 1);         /* ncode */
+    put32(t + 24, (uint32_t)(int32_t)((intptr_t)(void *)p_lined - (intptr_t)(t + 24)));
+    put32(t + 28, 4096);      /* size */
+    put32(t + 32, 0);         /* first line entry */
+    put32(t + 36, 0);         /* files[0] = "t.zl" */
+    put32(t + 40, 0);         /* lines[0]: off 0 */
+    put32(t + 44, 7);         /* file 0, line 7 */
+    put32(t + 48, 1);         /* funcs[0]: file 0, first line 1 */
+    put32(t + 52, 100);       /* last line */
+    put32(t + 56, 5);         /* name "lined" */
+    memcpy(t + 60, "t.zl\0lined\0", 11);
+    zell_lines_register(t, 71);
+}
+/* registers in the child: on Windows run_child starts a new process */
+static void p_lined_child(void) { register_table(); p_lined(); }
+
 TEST(messages) {
     char buf[16384];
     assert(run_child(p_msg, buf, sizeof buf) == 2);
@@ -38,9 +66,17 @@ TEST(flush_and_exit) {
     assert(strcmp(buf, "bye") == 0);
 }
 
+TEST(line_table) {
+    char buf[16384];
+    assert(run_child(p_lined_child, buf, sizeof buf) == 2);
+    assert(strstr(buf, "panic: lined\n"));
+    assert(strstr(buf, "\n  t.zl:7 lined\n"));
+}
+
 int main(void) {
     printf("test_panic\n");
     RUN(messages);
     RUN(flush_and_exit);
+    RUN(line_table);
     return 0;
 }
