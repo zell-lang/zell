@@ -120,7 +120,7 @@ Next, in this order:
    (dotnet-counters analogue over `diag`).
 5. **Language and framework** (`DESIGN.md` stages, `docs/REFLECTION_PLAN.md`,
    `docs/FRAMEWORK.md`): ownership elision, cycle-collector gaps (maps in
-   threaded processes, tasks, errors), generics completion, block `try`,
+   threaded processes, tasks, errors), generics completion (block `try` is done),
    `reflect.TypesWith<A>()` then `web` → `zell-lang/web`, expression trees
    then `data` → `zell-lang/data`, run-time reflection, stdlib
    (`collections`, `net`, `encoding.json` write API — `Value.Set`),
