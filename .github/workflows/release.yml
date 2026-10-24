@@ -73,6 +73,7 @@ jobs:
       prerelease: ${{ steps.v.outputs.prerelease }}
       ref: ${{ steps.r.outputs.ref }}
       unix_matrix: ${{ steps.m.outputs.unix_matrix }}
+      smoke_matrix: ${{ steps.m.outputs.smoke_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,6 +108,10 @@ jobs:
           if [ "$HOSTS" = linux ]; then m="[$linux]"; else m="[$linux,$macos]"; fi
           echo "unix_matrix=$m" >> "$GITHUB_OUTPUT"
           echo "building: $m"
+          # smoke: install every host archive on a clean runner and use it
+          smoke="$linux"
+          [ "$HOSTS" = linux ] || smoke="$linux,$macos,{\"host\":\"windows-amd64\",\"os\":\"windows-latest\"}"
+          echo "smoke_matrix=[$smoke]" >> "$GITHUB_OUTPUT"
       - id: v
         name: Tag matches Cargo.toml
         run: |
@@ -374,10 +379,76 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  release:
+  # Install each host archive on a clean runner of that host (nothing else
+  # installed: no clang, no SDK) and use it like a user would: a new package
+  # (init, run, build --release, test), a set of examples byte-exact against
+  # their .out, and one cross build for another OS from the bundled SDK.
+  smoke:
+    name: smoke ${{ matrix.host }}
     needs: [meta, unix, windows]
-    # The Windows job is skipped for hosts=linux; every job that ran must have passed.
     if: always() && needs.meta.result == 'success' && needs.unix.result == 'success' && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.meta.outputs.smoke_matrix) }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional == true }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.host }}
+          path: dist
+      - name: Install from the archive
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          HOST: ${{ matrix.host }}
+        run: |
+          arc=$(ls "dist/zell-$VERSION-$HOST.tar.xz" "dist/zell-$VERSION-$HOST.tar.gz" 2>/dev/null | head -1)
+          [ -n "$arc" ] || { echo "::error::no archive for $HOST in dist/"; ls dist; exit 1; }
+          mkdir -p "$HOME/zell" && tar xf "$arc" -C "$HOME/zell" --strip-components=1
+          ls "$HOME/zell/bin" "$HOME/zell/targets"
+          echo "$HOME/zell/bin" >> "$GITHUB_PATH"
+      - name: zell version, zell env
+        run: zell version && zell env
+      - name: New package - init, run, build --release, test
+        run: |
+          mkdir smoke-pkg && cd smoke-pkg
+          zell init
+          out=$(zell run | tr -d '\r')
+          [ "$out" = "Hello, world!" ] || { echo "::error::zell run printed: $out"; exit 1; }
+          zell build --release
+          zell test
+      - name: Examples byte-exact
+        run: |
+          fail=0
+          for e in hello structs enums errors defer slices_maps strings stdlib_strings2 json async stdlib_crypto; do
+            if ! out=$(zell run "examples/$e.zl" 2>&1 | tr -d '\r'); then
+              echo "::error::examples/$e.zl failed:"; printf '%s\n' "$out"; fail=1; continue
+            fi
+            if [ "$out" != "$(cat "examples/$e.out")" ]; then
+              echo "::error::examples/$e.zl output differs from $e.out"; diff <(printf '%s\n' "$out") "examples/$e.out" || true; fail=1
+            fi
+          done
+          exit $fail
+      - name: Cross build from the bundled SDK
+        run: |
+          case "${{ matrix.host }}" in
+            windows-*) t=linux-amd64; o=hello-linux ;;
+            *)         t=windows-amd64; o=hello.exe ;;
+          esac
+          zell build examples/hello.zl --target "$t" -o "$o"
+          ls -l "$o"
+
+  release:
+    needs: [meta, unix, windows, smoke]
+    # The Windows job is skipped for hosts=linux; every job that ran must have passed.
+    if: always() && needs.meta.result == 'success' && needs.unix.result == 'success' && needs.smoke.result == 'success' && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       contents: write

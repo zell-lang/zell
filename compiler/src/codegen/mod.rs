@@ -545,7 +545,11 @@ pub fn host_machine(opt: OptimizationLevel) -> Result<TargetMachine, String> {
 pub fn target_machine(t: &crate::target::Target, opt: OptimizationLevel) -> Result<TargetMachine, String> {
     if t.is_host() {
         Target::initialize_native(&InitializationConfig::default())?;
-        let triple = TargetMachine::get_default_triple();
+        // The compiler's own triple (`x86_64-pc-windows-gnu`, `aarch64-apple-darwin`),
+        // not LLVM's default one: a zell.exe built with the MSVC LLVM defaults to
+        // `x86_64-pc-windows-msvc`, whose code (`__chkstk`, `_fltused`, MSVC
+        // relocations) does not link with the bundled MinGW runtime.
+        let triple = inkwell::targets::TargetTriple::create(&t.triple);
         let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
         // ZELL_TARGET_CPU=x86-64-v3 (say) instead of the host's CPU and
         // features: for tools such as Valgrind that lack AVX-512.

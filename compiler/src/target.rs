@@ -199,6 +199,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_machine_uses_the_compilers_triple() {
+        // Not LLVM's default triple: a zell.exe built with the MSVC LLVM would
+        // otherwise generate `x86_64-pc-windows-msvc` code for the MinGW runtime.
+        let tm = crate::codegen::target_machine(&Target::host(), inkwell::OptimizationLevel::None).unwrap();
+        assert_eq!(tm.get_triple().as_str().to_str().unwrap(), Target::host().triple);
+    }
+
+    #[test]
     fn parses_aliases_and_triples() {
         let t = Target::parse("windows-amd64").unwrap();
         assert_eq!((t.os.as_str(), t.arch.as_str(), t.triple.as_str()), ("windows", "amd64", "x86_64-pc-windows-gnu"));
