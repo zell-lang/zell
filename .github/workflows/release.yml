@@ -422,7 +422,12 @@ jobs:
           zell init
           out=$(zell run | tr -d '\r')
           [ "$out" = "Hello, world!" ] || { echo "::error::zell run printed: $out"; exit 1; }
-          zell build --release
+          # the release executable itself starts and prints the same
+          case "${{ matrix.host }}" in windows-*) exe=app.exe ;; *) exe=app ;; esac
+          zell build --release -o "$exe"
+          ls -l "$exe"
+          out=$("./$exe" | tr -d '\r')
+          [ "$out" = "Hello, world!" ] || { echo "::error::./$exe printed: $out"; exit 1; }
           zell test
       - name: Examples byte-exact
         run: |
