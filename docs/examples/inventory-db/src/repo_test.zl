@@ -1,0 +1,67 @@
+// Repository tests against an in-memory SQLite database: fast, isolated
+// (every Open of ":memory:" is a new empty database) and nothing to clean
+// up. One connection matters here: each connection to ":memory:" would
+// see its own database, which is why db.Open limits the pool to one.
+namespace inventory.tests
+
+import inventory.repo
+
+async func fresh() Repo! {
+    var conn = await inventory.db.Open(":memory:")?
+    _ = await inventory.db.Migrate(conn)?
+    var r = Repo.New(conn)
+    _ = await r.Add(Product{Sku: "A", Name: "a", Category: "x", PriceCents: 100, Stock: 5})?
+    _ = await r.Add(Product{Sku: "B", Name: "b", Category: "x", PriceCents: 250, Stock: 1})?
+    return r
+}
+
+@test
+async func TestShipIsAllOrNothing(t *testing.T) {
+    var r = try await fresh() catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    try await r.Ship("o1", [Line{Sku: "A", Qty: 2}, Line{Sku: "B", Qty: 2}]) catch err {
+        var oos OutOfStock
+        testing.True(t, errors.As(err, &oos), "OutOfStock expected")
+        testing.Equal(t, oos.Available, 1)
+    }
+    // A was not taken out: the transaction rolled back.
+    var a = try await r.BySku("A") catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, a.Stock, 5)
+}
+
+@test
+async func TestUnknownSku(t *testing.T) {
+    var r = try await fresh() catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    try await r.BySku("nope") catch err {
+        testing.True(t, errors.Is(err, ErrUnknownSku), "ErrUnknownSku expected")
+        return
+    }
+    t.Fatal("BySku found a product that does not exist")
+}
+
+@test
+async func TestMigrateIsIdempotent(t *testing.T) {
+    var conn = try await inventory.db.Open(":memory:") catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    defer conn.Close()
+    var first = try await inventory.db.Migrate(conn) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    var second = try await inventory.db.Migrate(conn) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, first, 3)
+    testing.Equal(t, second, 0)
+}

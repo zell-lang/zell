@@ -1,0 +1,21 @@
+== first run
+migrations applied: 3
+stock: BOLT-M6=500 NUT-M6=800 SAW-HAND=3
+shipped A-1001
+A-1002 rejected: SAW-HAND: wanted 5, only 3 in stock | short by 2
+A-1003 rejected: WIDGET: unknown sku | unknown sku: true
+stock: BOLT-M6=400 NUT-M6=700 SAW-HAND=3
+duplicate: true
+category  items  units  value
+--------  -----  -----  ------
+tools         2     25  313.87
+hardware      2   1100   83.00
+supplies      1      4   27.00
+low stock (< 5): [GLUE-W]
+movements:
+  BOLT-M6 -100 order A-1001
+  NUT-M6 -100 order A-1001
+  SAW-HAND 10 restock
+== second run
+migrations applied: 0
+5 products, first: BOLT-M6 Bolt M6x20 0.12

@@ -1,0 +1,125 @@
+// inventory: a small stock database on SQLite. It creates the database
+// in a temporary file, migrates it, runs a few orders (one of which must
+// roll back), prints a report, and opens the file again to show that the
+// data and the schema version persisted.
+namespace inventory
+
+import io
+
+import inventory.repo
+
+// TempPath removes its file when it goes out of scope. Drop runs exactly
+// once, at the end of the block that owns the value, also when the block
+// is left early by `?` or a panic, so the demo never leaves files behind.
+struct TempPath {
+    Path string
+
+    func Drop() {
+        _ = fs.Remove(this.Path)
+    }
+}
+
+async func seed(r Repo) void! {
+    var products = [
+        Product{
+            Sku: "BOLT-M6",
+            Name: "Bolt M6x20",
+            Category: "hardware",
+            PriceCents: 12,
+            Stock: 500,
+        },
+        Product{Sku: "NUT-M6", Name: "Nut M6", Category: "hardware", PriceCents: 5, Stock: 800},
+        Product{
+            Sku: "DRILL-8",
+            Name: "Drill bit 8 mm",
+            Category: "tools",
+            PriceCents: 450,
+            Stock: 12,
+        },
+        Product{Sku: "SAW-HAND", Name: "Hand saw", Category: "tools", PriceCents: 1999, Stock: 3},
+        Product{
+            Sku: "GLUE-W",
+            Name: "Wood glue 250 ml",
+            Category: "supplies",
+            PriceCents: 675,
+            Stock: 4,
+        },
+    ]
+    for p in products {
+        _ = await r.Add(p)?
+    }
+}
+
+async func stock(r Repo, skus []string) string! {
+    var parts []string = []
+    for s in skus {
+        var p = await r.BySku(s)?
+        parts = append(parts, fmt.Format("{0}={1}", p.Sku, p.Stock))
+    }
+    return strings.Join(parts, " ")
+}
+
+async func session(path string) void! {
+    var conn = await db.Open(path)?
+    // DB.Close returns no error, so plain defer works: the pool closes
+    // its connections when the function returns, whatever the path.
+    defer conn.Close()
+    println("migrations applied:", await db.Migrate(conn)?)
+
+    var r = Repo.New(conn)
+    await seed(r)?
+    println("stock:", await stock(r, ["BOLT-M6", "NUT-M6", "SAW-HAND"])?)
+
+    await r.Ship("A-1001", [Line{Sku: "BOLT-M6", Qty: 100}, Line{Sku: "NUT-M6", Qty: 100}])?
+    println("shipped A-1001")
+
+    // The second line cannot be served: the whole order rolls back, the
+    // 50 bolts of the first line included.
+    try await r.Ship("A-1002", [
+        Line{Sku: "BOLT-M6", Qty: 50},
+        Line{Sku: "SAW-HAND", Qty: 5},
+    ]) catch err {
+        var oos OutOfStock
+        if errors.As(err, &oos) {
+            println("A-1002 rejected:", err, "| short by", oos.Wanted - oos.Available)
+        }
+    }
+    try await r.Ship("A-1003", [
+        Line{Sku: "NUT-M6", Qty: 1},
+        Line{Sku: "WIDGET", Qty: 1},
+    ]) catch err {
+        println("A-1003 rejected:", err, "| unknown sku:", errors.Is(err, ErrUnknownSku))
+    }
+    println("stock:", await stock(r, ["BOLT-M6", "NUT-M6", "SAW-HAND"])?)
+
+    await r.Restock("SAW-HAND", 10)?
+    // A constraint violation comes back as an ordinary error.
+    try await r.Add(Product{
+        Sku: "NUT-M6",
+        Name: "dup",
+        Category: "hardware",
+        PriceCents: 1,
+    }) catch err {
+        println("duplicate:", strings.Contains(err.Message(), "UNIQUE"))
+    }
+    await report.Print(conn)?
+}
+
+async func reopen(path string) void! {
+    var conn = await db.Open(path)?
+    defer conn.Close()
+    // Already at the latest version: nothing to apply.
+    println("migrations applied:", await db.Migrate(conn)?)
+    var all = await Repo.New(conn).All()?
+    println(len(all), "products, first:", all[0].Sku, all[0].Name, report.Money(all[0].PriceCents))
+}
+
+async func main() void! {
+    var tmp = TempPath{Path: fs.Join(fs.TempDir(), "inventory-demo.db")}
+    _ = fs.Remove(tmp.Path)
+    println("== first run")
+    await session(tmp.Path)?
+    println("== second run")
+    await reopen(tmp.Path)?
+    // tmp is dropped here and removes the database file.
+}

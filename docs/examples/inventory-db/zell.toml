@@ -1,0 +1,5 @@
+[package]
+name = "inventory-db"
+version = "0.1.0"
+namespace = "inventory"
+entry = "src/main.zl"

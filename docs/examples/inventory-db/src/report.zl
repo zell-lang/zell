@@ -1,0 +1,69 @@
+// Read-only queries for reporting. They return their own small structs:
+// a report row is not a Product, and Query<T> maps any select list whose
+// column names match T's fields.
+namespace inventory.report
+
+import database
+import io
+
+struct CategoryValue {
+    Category   string
+    Items      int
+    Units      int
+    ValueCents int
+}
+
+struct Movement {
+    Sku    string
+    Delta  int
+    Reason string
+}
+
+// ByCategory aggregates in SQL: the database does the grouping and the
+// program only formats. Column aliases (as items, as units, ...) are what
+// connects the select list to the struct fields.
+async func ByCategory(db *sql.DB) []CategoryValue! {
+    return await db.Query<CategoryValue>(
+        `select category, count(*) as items, sum(qty) as units, sum(qty * price_cents) as value_cents
+         from products group by category order by value_cents desc`,
+        [],
+    )?
+}
+
+async func LowStock(db *sql.DB, below int) []string! {
+    // A single column maps to a slice of a plain type.
+    return await db.Query<string>("select sku from products where qty < ? order by qty, sku", [
+        below,
+    ])?
+}
+
+async func History(db *sql.DB) []Movement! {
+    return await db.Query<Movement>(
+        `select p.sku as sku, m.delta as delta, m.reason as reason
+         from movements m join products p on p.id = m.product_id order by m.id`,
+        [],
+    )?
+}
+
+// Money formats cents as 12.34. Money is kept in integer cents in the
+// database and in the program: floats cannot represent 0.10 exactly.
+func Money(cents int) string {
+    return fmt.Format("{0}.{1}", cents / 100, strings.PadLeft(strconv.Itoa(cents % 100), 2, "0"))
+}
+
+// Print renders the report with text.table, which aligns the columns.
+async func Print(db *sql.DB) void! {
+    var t = text.table.New(["category", "items", "units", "value"])
+    for col in [1, 2, 3] {
+        t.SetAlign(col, text.table.Right)
+    }
+    for c in await ByCategory(db)? {
+        t.AddRow([c.Category, strconv.Itoa(c.Items), strconv.Itoa(c.Units), Money(c.ValueCents)])
+    }
+    print(t.String())
+    println("low stock (< 5):", await LowStock(db, 5)?)
+    println("movements:")
+    for m in await History(db)? {
+        println(" ", m.Sku, fmt.Format("{0}", m.Delta), m.Reason)
+    }
+}

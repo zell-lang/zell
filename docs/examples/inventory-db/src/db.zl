@@ -1,0 +1,62 @@
+// Opening the database and bringing its schema up to date.
+namespace inventory.db
+
+import database
+
+// Migrations are applied in order, each at most once. The list only ever
+// grows: a released migration is never edited, a change is a new entry.
+// Version numbers are the positions in this list, starting at 1.
+const migrations = [
+    `create table products (
+        id          integer primary key,
+        sku         text not null unique,
+        name        text not null,
+        category    text not null,
+        price_cents integer not null check (price_cents >= 0),
+        qty         integer not null default 0 check (qty >= 0)
+    )`,
+    `create table movements (
+        id         integer primary key,
+        product_id integer not null references products(id),
+        delta      integer not null,
+        reason     text not null
+    )`,
+    "create index movements_product on movements(product_id)",
+]
+
+// Open opens (or creates) the SQLite file at path. sqlite.Open never
+// fails by itself, connections are opened lazily, so Ping makes a bad
+// path fail here, at start-up, rather than on the first query.
+async func Open(path string) *sql.DB! {
+    var db = sqlite.Open(path)
+    await db.Ping()?("open " + fs.Base(path))
+    // SQLite enforces foreign keys only when asked, per connection; one
+    // connection makes that setting (and the file lock) simple.
+    db.SetMaxOpenConns(1)
+    _ = await db.Exec("pragma foreign_keys = on", [])?
+    return db
+}
+
+// Migrate applies the migrations the database has not seen and returns
+// how many it applied. Each one runs in its own transaction together with
+// the version bump, so a failing migration leaves the schema at the last
+// good version instead of half-changed.
+async func Migrate(db *sql.DB) int! {
+    _ = await db.Exec("create table if not exists schema_version (version integer not null)", [])?
+    var current = await db.QueryOne<int>("select coalesce(max(version), 0) from schema_version", [
+
+    ])?
+    var applied = 0
+    for i, stmt in migrations {
+        var version = i + 1
+        if version <= current {
+            continue
+        }
+        await db.Transact(async func(tx sql.Tx) void! {
+            _ = await tx.Exec(stmt, [])?(fmt.Format("migration {0}", version))
+            _ = await tx.Exec("insert into schema_version (version) values (?)", [version])?
+        })?
+        applied += 1
+    }
+    return applied
+}

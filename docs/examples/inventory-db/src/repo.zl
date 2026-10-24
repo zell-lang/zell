@@ -1,0 +1,129 @@
+// The repository: every SQL statement that reads or changes products
+// lives here, behind typed methods.
+namespace inventory.repo
+
+import database
+
+// Product maps a row of `products`. Query<Product> matches columns to
+// fields by name in snake_case (PriceCents <- price_cents) at compile
+// time; @sql.column names a column that does not follow the rule.
+struct Product {
+    Id         int
+    Sku        string
+    Name       string
+    Category   string
+    PriceCents int
+    @sql.column("qty") Stock int
+}
+
+// One line of an order: which product and how many.
+struct Line {
+    Sku string
+    Qty int
+}
+
+const ErrUnknownSku = error("unknown sku")
+
+// OutOfStock carries what the caller needs to tell the customer.
+struct OutOfStock {
+    Sku       string
+    Wanted    int
+    Available int
+
+    func Message() string {
+        return fmt.Format(
+            "{0}: wanted {1}, only {2} in stock",
+            this.Sku,
+            this.Wanted,
+            this.Available,
+        )
+    }
+}
+
+struct Repo {
+    db *sql.DB
+
+    static func New(db *sql.DB) Repo {
+        return Repo{db: db}
+    }
+
+    async func Add(p Product) int! {
+        // Named parameters keep long inserts readable; the driver rewrites
+        // them to positional ones.
+        var r = await this.db.Exec(
+            "insert into products (sku, name, category, price_cents, qty) values (:sku, :name, :cat, :price, :qty)",
+            [
+                sql.Named("sku", p.Sku),
+                sql.Named("name", p.Name),
+                sql.Named("cat", p.Category),
+                sql.Named("price", p.PriceCents),
+                sql.Named("qty", p.Stock),
+            ],
+        )?(p.Sku)
+        return r.LastInsertId
+    }
+
+    // BySku turns "no row" into the domain error. Callers test
+    // errors.Is(err, ErrUnknownSku) and never see sql.ErrNoRows, which
+    // would leak the storage layer into their code.
+    async func BySku(sku string) Product! {
+        return try await this.db.QueryOne<Product>("select * from products where sku = ?", [
+            sku,
+        ]) catch err {
+            if errors.Is(err, sql.ErrNoRows) {
+                return errors.Wrap(ErrUnknownSku, sku)
+            }
+            return err
+        }
+    }
+
+    async func All() []Product! {
+        return await this.db.Query<Product>("select * from products order by sku", [])?
+    }
+
+    // Restock adds to the stock and records the movement, atomically.
+    async func Restock(sku string, qty int) void! {
+        await this.db.Transact(async func(tx sql.Tx) void! {
+            await move(tx, sku, qty, "restock")?
+        })?
+    }
+
+    // Ship takes every line of an order out of stock, or none of them.
+    // The explicit form of a transaction: Begin, a deferred Rollback, and
+    // Commit at the end. When any step returns an error, the function
+    // exits before Commit and the deferred Rollback undoes the lines
+    // already taken; after a successful Commit the Rollback is a no-op.
+    async func Ship(order string, lines []Line) void! {
+        var tx = await this.db.Begin()?
+        defer tx.Rollback()
+        for l in lines {
+            var p = try await tx.QueryOne<Product>("select * from products where sku = ?", [
+                l.Sku,
+            ]) catch err {
+                if errors.Is(err, sql.ErrNoRows) {
+                    return errors.Wrap(ErrUnknownSku, l.Sku)
+                }
+                return err
+            }
+            if p.Stock < l.Qty {
+                return OutOfStock{Sku: l.Sku, Wanted: l.Qty, Available: p.Stock}
+            }
+            await move(tx, l.Sku, -l.Qty, "order " + order)?
+        }
+        await tx.Commit()?
+    }
+}
+
+// move changes the stock of one product inside a transaction and records
+// why. It takes the transaction, not the DB, so it can only run as part
+// of a larger unit of work.
+async func move(tx sql.Tx, sku string, delta int, reason string) void! {
+    var r = await tx.Exec("update products set qty = qty + ? where sku = ?", [delta, sku])?
+    if r.RowsAffected == 0 {
+        return errors.Wrap(ErrUnknownSku, sku)
+    }
+    _ = await tx.Exec(
+        "insert into movements (product_id, delta, reason) select id, ?, ? from products where sku = ?",
+        [delta, reason, sku],
+    )?
+}
