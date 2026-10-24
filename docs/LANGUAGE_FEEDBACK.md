@@ -147,3 +147,11 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     Still open from the original item: `database.sql.DB`/`Tx` have no
     `Drop` (only `Rows`), so `examples/sql.zl` still needs `defer
     tx.Rollback()` and `defer db.Close()`; give them a `Drop`.
+
+29. **Red test `compiler/tests/debug.rs::debug_info_flags_and_identical_code`**
+    since the ZLN2 line tables (`c2d65eb`): codegen now always emits DWARF
+    line tables and artificial subprograms for the helpers (`rc.retain.*`,
+    `any.inline`), so a `--release --emit=obj` object carries `.debug_info`
+    the test expects to be absent. Decide: strip `.debug_*` from release
+    objects after the line table is read (keeps the test), or relax the test
+    to "no DWARF in the linked `--release` executable" (the linker gets `-s`).
