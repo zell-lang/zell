@@ -57,10 +57,29 @@ arm64. Это требование к компилятору, рантайму, 
 | Процессы | fork/exec, posix_spawn | posix_spawn | `CreateProcessW` |
 | Сеть | BSD sockets | BSD sockets | Winsock2 |
 | Backtrace при панике | `execinfo` / libunwind | `execinfo` | `CaptureStackBackTrace` + DbgHelp |
+| `файл:строка` в backtrace | таблица `zell_lines` (одна для всех) | та же | та же |
+| Раскрутка паники задачи | `__builtin_setjmp` (x86-64), `_setjmp` (arm64) | `_setjmp` | `_setjmp(buf, NULL)` (без SEH-раскрутки) |
 | Случайные байты | `getrandom(2)` | `getentropy` | `BCryptGenRandom` |
 | Время | `clock_gettime` | `clock_gettime` | `QueryPerformanceCounter`, `GetSystemTimePreciseAsFileTime` |
 | Динамическая загрузка (FFI) | `dlopen` | `dlopen` | `LoadLibraryW` |
 | Консоль | UTF-8 | UTF-8 | UTF-8 через `WriteConsoleW` конверсию, ANSI-цвета включаются |
+
+**Паника и backtrace одинаковы на всех платформах** (с 2026-10-24):
+паника в задаче завершает только задачу (runtime/ABI.md 8.1), трасса
+печатает `  <файл>:<строка> <функция>` для кадров Zell-кода из таблицы
+`zell_lines` (ABI.md 8.2), которую компилятор строит из DWARF объектных
+файлов (ELF, Mach-O, MinGW COFF) и линкует отдельным объектом — адреса
+в ней 32-битные смещения от самой таблицы, их разрешает статический
+линковщик, поэтому ни поправки на адрес загрузки, ни чтения файла
+программы. Различается только остальное: кадры рантайма и libc
+(`модуль(символ+0xсмещение)`, на Windows `модуль(символ+0xсмещение) [0xадрес]`
+с именами из DbgHelp/COFF), `testing.Panics` (перехват на своём потоке
+есть только на POSIX: на Windows тест перезапускается в дочернем
+процессе), сборки ThinLTO (`ZELL_LTO=1`, только не Windows) — без таблицы.
+MSVC ABI (CodeView вместо DWARF) таблицы не получает. На Windows и macOS
+проверено: `tests/spec/panics/*` под wine (`scripts/spec-wine.sh`),
+macOS — только линковка (`ld64.lld`) и разбор таблицы в собранном
+Mach-O; запуск на Mac — шаг `smoke` в `.github/workflows/release.yml`.
 
 Правила:
 
@@ -376,6 +395,8 @@ macos-arm64|macos-amd64 --emit=obj` даёт Mach-O для всех 49 прим�
    `-dead_strip`) и `cargo test --workspace` (все примеры байт-в-байт).
 4. Сэмплер `SIGPROF` (`ITIMER_PROF`, регистры из `__darwin_mcontext64`)
    и символы `LC_SYMTAB` — `examples/cpuprofile.zl` и backtrace с именами.
+   Паника: `tests/spec/panics/*` (в т.ч. `backtrace_lines*`: `файл:строка`
+   из `zell_lines`, раскрутка задач через `_setjmp`/`_longjmp` на arm64).
 5. Часовые пояса из `/usr/share/zoneinfo`/`/etc/localtime`, корни из
    `/etc/ssl/cert.pem`, `process` (`posix_spawn`), сетевые примеры.
 6. `scripts/package-toolchain.sh` на Mac (архив `zell-<ver>-macos-<arch>`).

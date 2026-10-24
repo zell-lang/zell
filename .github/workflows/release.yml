@@ -448,6 +448,24 @@ jobs:
             fi
           done
           exit $fail
+      - name: Panics - file:line backtrace (stripped release), task panic contained
+        run: |
+          # runtime/ABI.md 8.2: the zell_lines table is linked into every
+          # executable, so a stripped --release build prints file:line on
+          # every host (ELF, Mach-O, COFF alike)
+          case "${{ matrix.host }}" in windows-*) exe=panic.exe ;; *) exe=panic ;; esac
+          zell build --release tests/spec/panics/backtrace_lines_release.zl -o "$exe"
+          set +e
+          "./$exe" > out.txt 2> err.txt
+          code=$?
+          set -e
+          tr -d '\r' < err.txt > err2.txt
+          cat err2.txt
+          [ "$code" = 2 ] || { echo "::error::panicking program exited with $code, want 2"; exit 1; }
+          grep -Eq '^  tests/spec/panics/backtrace_lines_release\.zl:[0-9]+ ' err2.txt || { echo "::error::no file:line frame in the panic backtrace"; exit 1; }
+          # ABI.md 8.1: a panic in a task ends that task only
+          out=$(zell run tests/spec/panics/fallible_task_panic.zl 2>/dev/null | tr -d '\r')
+          [ "$out" = "$(cat tests/spec/panics/fallible_task_panic.out)" ] || { echo "::error::task panic: output differs"; printf '%s\n' "$out"; exit 1; }
       - name: Cross build from the bundled SDK
         run: |
           case "${{ matrix.host }}" in

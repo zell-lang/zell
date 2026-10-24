@@ -68,14 +68,14 @@ backtrace (most recent call first):
 /lib64/libc.so.6(__libc_start_main+0x88)[0x7f799edec628]
 ```
 
-The lines come from a small table in the executable (`.zell_lines`), so
-they are there in stripped `--release` builds too; frames outside Zell code
-(the runtime, libc) keep the `module(symbol+0xoffset)` form. An optimised
-build inlines small functions, which then have no frame of their own: the
-frame shows the innermost line. `ZELL_NO_LINES=1` prints symbols instead.
-The table exists on Linux and FreeBSD; macOS and Windows still print
-symbols with offsets. `llvm-strip --strip-all` removes the table (GNU
-`strip` keeps it). A panic in a `web` handler without `UseRecover` ends the
+The lines come from a small table that the compiler links into every
+executable as ordinary read-only data (`zell_lines`), so they are there in
+stripped `--release` builds too, and after any `strip`; the format is the
+same on Linux, macOS and Windows. Frames outside Zell code (the runtime,
+libc) keep the `module(symbol+0xoffset)` form. An optimised build inlines
+small functions, which then have no frame of their own: the frame shows the
+innermost line. `ZELL_NO_LINES=1` prints symbols instead. ThinLTO builds
+(`ZELL_LTO=1`) have no table yet. A panic in a `web` handler without `UseRecover` ends the
 task of the request; with it, the log entry's `PanicTrace` has the same
 text.
 
