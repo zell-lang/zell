@@ -9,6 +9,7 @@
 
 use super::html::{self, Chrome, Layout};
 use super::markdown;
+use super::nav::{self, relative, NavTree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
@@ -58,16 +59,6 @@ fn normalize(p: &Path) -> PathBuf {
         }
     }
     out
-}
-
-/// The relative URL from the directory of page `from` to `to` (both site-relative).
-fn relative(from: &str, to: &str) -> String {
-    let from_dir: Vec<&str> = from.split('/').collect::<Vec<_>>().split_last().map(|x| x.1.to_vec()).unwrap_or_default();
-    let to_parts: Vec<&str> = to.split('/').collect();
-    let common = from_dir.iter().zip(&to_parts).take_while(|(a, b)| a == b).count();
-    let mut s = "../".repeat(from_dir.len() - common);
-    s.push_str(&to_parts[common..].join("/"));
-    s
 }
 
 /// The Markdown link targets of a document (`[x](target)`), without code.
@@ -183,41 +174,29 @@ pub fn default_repo_url(root: &Path) -> String {
     }
 }
 
-fn side_for(pages: &[Page], cur: &Page, heads: &[(u8, String, String)]) -> String {
-    let mut o = String::new();
-    let link = |p: &Page| {
-        let cls = if p.out == cur.out { " class=\"cur\"" } else { "" };
-        format!("<li><a{cls} href=\"{}\">{}</a></li>", relative(&cur.out, &p.out), markdown::escape(&p.title))
-    };
-    let guides: Vec<&Page> = pages.iter().filter(|p| p.section == Section::Guide).collect();
-    let design: Vec<&Page> = pages.iter().filter(|p| p.section == Section::Design).collect();
-    o.push_str("<h4>Guide</h4><ul>");
-    for p in &guides {
-        o.push_str(&link(p));
+/// The pages every sidebar links to: guides in reading order, `DESIGN.md`
+/// then the other design documents by title, the documented std namespaces.
+fn nav_tree(pages: &[Page], docs: &super::Docs) -> NavTree {
+    let guide = pages.iter().filter(|p| p.section == Section::Guide).map(|p| (p.out.clone(), p.title.clone())).collect();
+    let mut design: Vec<(String, String)> = pages.iter().filter(|p| p.section == Section::Design && p.src != "DESIGN.md").map(|p| (p.out.clone(), p.title.clone())).collect();
+    design.sort_by_key(|(_, t)| t.to_lowercase());
+    if let Some(d) = pages.iter().find(|p| p.src == "DESIGN.md") {
+        design.insert(0, (d.out.clone(), d.title.clone()));
     }
-    o.push_str("</ul>");
-    if cur.section == Section::Design {
-        o.push_str("<h4>Design</h4><ul>");
-        for p in &design {
-            o.push_str(&link(p));
-        }
-        o.push_str("</ul>");
-    }
-    o.push_str(&format!("<h4>Reference</h4><ul><li><a href=\"{}\">Standard library</a></li></ul>", relative(&cur.out, "std/index.html")));
-    let sub: Vec<&(u8, String, String)> = heads.iter().filter(|h| h.0 == 2).collect();
-    if cur.section != Section::Home && !sub.is_empty() {
-        o.push_str("<h4>On this page</h4><ul>");
-        for (_, t, id) in sub {
-            o.push_str(&format!("<li><a href=\"#{}\">{}</a></li>", markdown::escape(id), markdown::escape(t)));
-        }
-        o.push_str("</ul>");
-    }
-    o
+    let mut std: Vec<String> = docs.namespaces.iter().filter(|n| n.std && !(n.items.is_empty() && n.examples.is_empty() && n.doc.is_empty())).map(|n| n.name.clone()).collect();
+    std.sort();
+    NavTree { guide, design, std }
 }
 
 /// Builds the site; returns the number of HTML pages written.
 pub fn build_site(o: &SiteOptions) -> Result<usize, String> {
     let pages = collect_pages(&o.root)?;
+    let srcs = super::load_std();
+    if srcs.is_empty() {
+        return Err("the standard library sources were not found (set ZELL_STD)".into());
+    }
+    let docs = super::Docs::build(&srcs, super::Options::default());
+    let tree = nav_tree(&pages, &docs);
     let by_src: BTreeMap<String, String> = pages.iter().map(|p| (p.src.clone(), p.out.clone())).collect();
     let mut search: Vec<serde_json::Value> = Vec::new();
     let mut count = 0;
@@ -252,7 +231,7 @@ pub fn build_site(o: &SiteOptions) -> Result<usize, String> {
             body.push_str(&format!("<div class=\"pager\"><span>{prev}</span><span>{next}</span></div>\n"));
         }
         let depth = p.out.matches('/').count();
-        let ch = Chrome { root: "../".repeat(depth), nav: SITE_NAV, side: side_for(&pages, p, &heads) };
+        let ch = Chrome { root: "../".repeat(depth), nav: SITE_NAV, side: nav::sidebar(&tree, &p.out, &heads) };
         html::write(&o.out.join(&p.out), &html::page(&p.title, &body, &ch))?;
         count += 1;
         let kind = match p.section {
@@ -275,22 +254,18 @@ pub fn build_site(o: &SiteOptions) -> Result<usize, String> {
     }
     d.push_str("</ul>\n");
     let idx_page = Page { src: String::new(), out: "design/index.html".into(), section: Section::Design, title: "Design documents".into() };
-    let ch = Chrome { root: "../".into(), nav: SITE_NAV, side: side_for(&pages, &idx_page, &[]) };
+    let ch = Chrome { root: "../".into(), nav: SITE_NAV, side: nav::sidebar(&tree, &idx_page.out, &[]) };
     html::write(&o.out.join("design/index.html"), &html::page("Design documents", &d, &ch))?;
     count += 1;
     // the standard library reference
-    let srcs = super::load_std();
-    if srcs.is_empty() {
-        return Err("the standard library sources were not found (set ZELL_STD)".into());
-    }
-    let docs = super::Docs::build(&srcs, super::Options::default());
-    let layout = Layout { root: "../", prefix: "std/", nav: SITE_NAV };
+    let layout = Layout { root: "../", prefix: "std/", nav: SITE_NAV, tree: Some(&tree) };
     count += html::write_api(&docs, &o.out.join("std"), None, &layout)?;
     search.extend(html::search_entries(&docs, "std/"));
     // shared files
     let idx = serde_json::Value::Array(search);
     html::write(&o.out.join("style.css"), html::CSS)?;
     html::write(&o.out.join("search.js"), html::SEARCH_JS)?;
+    html::write(&o.out.join("nav.js"), nav::NAV_JS)?;
     html::write(&o.out.join("search-index.json"), &serde_json::to_string(&idx).unwrap())?;
     html::write(&o.out.join("search-index.js"), &format!("window.ZELL_INDEX = {};\n", serde_json::to_string(&idx).unwrap()))?;
     html::write(&o.out.join("std/docs.json"), &serde_json::to_string(&docs).unwrap())?;

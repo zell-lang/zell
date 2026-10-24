@@ -26,6 +26,7 @@
 
 pub mod html;
 pub mod markdown;
+pub mod nav;
 pub mod site;
 
 use crate::ast;

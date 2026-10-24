@@ -160,5 +160,30 @@ fn documentation_site_links_resolve() {
     // one search index over guides, design docs and the API
     let idx = read(&d.join("search-index.json"));
     assert!(idx.contains("\"guide/tour.html\"") && idx.contains("\"design/DESIGN.html\"") && idx.contains("\"std/strings.html#Split\""));
+    // one sidebar with the three groups on every kind of page, the current page marked
+    for (page, cur) in [("index.html", ""), ("guide/errors.html", "errors.html"), ("design/DESIGN.html", "DESIGN.html"), ("std/net.http.html", "net.http.html"), ("std/index.html", "index.html"), ("design/index.html", "index.html")] {
+        let h = read(&d.join(page));
+        assert!(h.contains("<nav class=\"side\" id=\"side\" aria-label=\"Documentation\">"), "{page}: no sidebar");
+        for g in ["guide", "design", "std"] {
+            assert!(h.contains(&format!("<details class=\"grp\" data-key=\"{g}\"")), "{page}: no {g} group");
+        }
+        assert!(h.contains("class=\"skip\"") && h.contains("id=\"menu-toggle\"") && h.contains("src=\"") && h.contains("nav.js"), "{page}: chrome");
+        if !cur.is_empty() {
+            assert!(h.contains(&format!("<a href=\"{cur}\" aria-current=\"page\">")), "{page}: current page not marked");
+        }
+    }
+    // the group of the current page is open, the others are closed
+    let tour = read(&d.join("guide/tour.html"));
+    assert!(tour.contains("data-key=\"guide\" open data-cur>") && tour.contains("data-key=\"design\"><summary>") && tour.contains("data-key=\"std\"><summary>"));
+    // the std tree: a root namespace holds its children, a leaf is a plain link
+    let http = read(&d.join("std/net.http.html"));
+    assert!(http.contains("data-key=\"std-net\" open data-cur><summary>net</summary>") && http.contains("href=\"net.tls.html\">net.tls</a>") && http.contains("href=\"strings.html\">strings</a>"));
+    // "On this page" under the current link, from the h2/h3 of the page
+    let errors = read(&d.join("guide/errors.html"));
+    assert!(errors.contains("aria-current=\"page\">Errors</a><ol class=\"toc\"") && errors.contains("<a href=\"#panics\">Panics</a>"), "on this page");
+    assert!(errors.contains("id=\"rtoc\""), "right column");
+    let api_toc = http.split("<ol class=\"toc\"").nth(1).unwrap_or("");
+    assert!(api_toc.contains("href=\"#sec-functions\"") && api_toc.contains("href=\"#sec-types\""), "api toc");
+    assert!(d.join("nav.js").is_file());
     let _ = std::fs::remove_dir_all(&d);
 }
