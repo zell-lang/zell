@@ -1,0 +1,47 @@
+// Arenas: many short-lived objects with one lifetime (a frame) are
+// allocated in one region and freed all at once, with no reference
+// counting on the way.
+namespace scene.particles
+
+import io
+
+struct Particle {
+    Id int
+    X  int
+    Y  int
+    VX int
+    VY int
+}
+
+// spawn allocates n particles in the arena. a.Alloc<T>(n) returns a []T
+// whose buffer lives inside the arena: one pointer bump for the whole
+// frame, no count, no individual free. (a.New<T>() gives a single *T.)
+func spawn(a arena.Arena, frame int, n int) []Particle {
+    var ps = a.Alloc<Particle>(n)
+    for i in 0..n {
+        ps[i].Id = i
+        ps[i].VX = (i % 7) - 3
+        ps[i].VY = frame + 1
+    }
+    return ps
+}
+
+// Frames simulates a few frames. Each frame allocates its particles in
+// the arena and frees them together at the end of the frame; the arena
+// is then reused. Nothing allocated in an arena may be used after Free.
+func Frames(frames int, n int) {
+    println("arenas, one region reused per frame:")
+    var a = arena.New()
+    for f in 0..frames {
+        var ps = spawn(a, f, n)
+        var sumX = 0
+        for i in 0..len(ps) {
+            var p = &ps[i]     // an interior pointer, used while ps is alive
+            p.X += p.VX * 10 + f
+            p.Y += p.VY * 10
+            sumX += p.X
+        }
+        println(fmt.Format("  frame {0}: {1} particles, sum x {2}, arena objects {3}", f, len(ps), sumX, a.Len()))
+        a.Free()           // every particle of this frame, at once
+    }
+}

@@ -1,0 +1,5 @@
+[package]
+name = "scene-graph"
+version = "0.1.0"
+namespace = "scene"
+entry = "src/main.zl"

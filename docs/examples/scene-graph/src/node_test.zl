@@ -1,0 +1,51 @@
+// Tests for the tree operations and for what weak references and the
+// cycle collector guarantee. Node.Drop prints, which `zell test -v` shows.
+namespace scene.tests
+
+import scene.node
+
+@test func TestPathAndWorldPos(t *testing.T) {
+    var root = New("root", 1, 1)
+    var arm = New("arm", 2, 0)
+    var hand = New("hand", 0, 3)
+    Attach(root, arm)
+    Attach(arm, hand)
+    testing.Equal(t, Path(hand), "root/arm/hand")
+    var w = WorldPos(hand)
+    testing.Equal(t, w.X, 3)
+    testing.Equal(t, w.Y, 4)
+}
+
+@test func TestDetach(t *testing.T) {
+    var root = New("root", 0, 0)
+    var a = New("a", 0, 0)
+    Attach(root, a)
+    Attach(root, New("b", 0, 0))
+    Detach(a)
+    testing.Equal(t, len(root.Children), 1)
+    testing.Equal(t, root.Children[0].Name, "b")
+    testing.True(t, a.Parent == nil, "a detached node has no parent")
+    testing.Equal(t, Path(a), "a")
+}
+
+@test func TestWeakParentReadsNilOnceFreed(t *testing.T) {
+    var root = New("root", 0, 0)
+    var leaf = New("leaf", 0, 0)
+    Attach(root, leaf)
+    testing.True(t, leaf.Parent != nil, "the parent is alive")
+    root = nil
+    testing.True(t, leaf.Parent == nil, "a weak reference does not keep the parent alive")
+}
+
+func makeCycle() {
+    var a = New("a", 0, 0)
+    var b = New("b", 0, 0)
+    a.Target = b
+    b.Target = a
+}
+
+@test func TestCycleIsCollected(t *testing.T) {
+    makeCycle()
+    testing.Equal(t, runtime.CollectCycles(), 2)
+    testing.Equal(t, runtime.CollectCycles(), 0)
+}

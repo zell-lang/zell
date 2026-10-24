@@ -1,0 +1,30 @@
+values and references:
+  transforms: 1 50
+  nodes: 50 50
+  drop lamp
+  lamp is gone, n is bulb
+  drop bulb
+a tree with weak parents:
+  scene at (0, 0)
+    world at (10, 0)
+      house at (15, 5)
+        door at (16, 5)
+      tree at (7, 0)
+  detached: house - world has 1 child
+  drop house
+  drop door
+  house released
+  drop scene
+  drop world
+  scene released; tree's parent is nil: true path tree
+  drop tree
+a cycle, and the cycle collector:
+  both released, nothing dropped yet
+  drop camera
+  drop player
+  collected: 2
+arenas, one region reused per frame:
+  frame 0: 1000 particles, sum x -30, arena objects 1
+  frame 1: 1000 particles, sum x 970, arena objects 1
+  frame 2: 1000 particles, sum x 1970, arena objects 1
+done

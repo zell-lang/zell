@@ -1,0 +1,75 @@
+// scene-graph: memory without a garbage collector, step by step. Every
+// "drop" line in the output is printed by Node.Drop at the exact moment
+// the node is freed.
+namespace scene
+
+import io
+import scene.node
+import scene.particles
+
+func values() {
+    println("values and references:")
+    var a = Transform{Pos: Vec2{X: 1, Y: 1}, Scale: 1}
+    var b = a              // a copy: changing b leaves a alone
+    b.Pos.X = 50
+    println("  transforms:", a.Pos.X, b.Pos.X)
+
+    var n = New("lamp", 0, 0)
+    var same = n           // the same node: one object, two references
+    same.Local.Pos.X = 50
+    println("  nodes:", n.Local.Pos.X, same.Local.Pos.X)
+    // Reassignment releases the old object. lamp has two references:
+    // the first assignment leaves one, the second frees it right there.
+    n = New("bulb", 0, 0)
+    same = n
+    println("  lamp is gone, n is", n.Name)
+}                          // bulb: its last references end with the block
+
+func tree() {
+    println("a tree with weak parents:")
+    var root = New("scene", 0, 0)
+    var world = New("world", 10, 0)
+    var house = New("house", 5, 5)
+    var tree = New("tree", -3, 0)
+    Attach(root, world)
+    Attach(world, house)
+    Attach(house, New("door", 1, 0))
+    Attach(world, tree)
+    Print(root, 0)
+
+    // Detach a subtree but keep a reference: it stays alive, alone.
+    Detach(house)
+    println("  detached:", Path(house), "- world has", len(world.Children), "child")
+    house = nil            // the last reference: house and door go now
+    println("  house released")
+
+    // Drop the whole scene while still holding a leaf. Only the leaf
+    // survives, and its weak parent link now reads nil.
+    world = nil
+    root = nil
+    println("  scene released; tree's parent is nil:", tree.Parent == nil, "path", Path(tree))
+}
+
+func cycle() {
+    println("a cycle, and the cycle collector:")
+    var camera = New("camera", 0, 10)
+    var player = New("player", 0, 0)
+    camera.Target = player     // the camera looks at the player...
+    player.Target = camera     // ...and the player at the camera
+    camera = nil
+    player = nil
+    // Both counts are still 1 (each holds the other): nothing dropped.
+    println("  both released, nothing dropped yet")
+    // The collector looks only at objects of cyclic types whose count
+    // went down without reaching zero, finds that these two only
+    // reference each other, runs their Drop and frees them.
+    println("  collected:", runtime.CollectCycles())
+}
+
+func main() {
+    values()
+    tree()
+    cycle()
+    Frames(3, 1000)
+    println("done")
+}

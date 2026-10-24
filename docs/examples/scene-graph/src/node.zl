@@ -1,0 +1,105 @@
+// The scene graph: a tree of nodes. Parents own their children (strong
+// references down the tree); children point back at their parent with a
+// weak reference, which does not keep the parent alive.
+namespace scene.node
+
+import io
+
+// Vec2 and Transform are values: assigning one copies it, like a Go
+// struct, and they have no reference count at all.
+struct Vec2 {
+    X int
+    Y int
+
+    func Add(o Vec2) Vec2 {
+        return Vec2{X: this.X + o.X, Y: this.Y + o.Y}
+    }
+}
+
+struct Transform {
+    Pos   Vec2
+    Scale int
+}
+
+// Node is a reference type: it is always created with `new`, and every
+// copy of a *Node is the same object, freed when the last copy is gone.
+//
+// Target ("look at this node") is a strong reference that can point
+// anywhere in the scene, so two nodes can look at each other: a cycle
+// that reference counting alone never frees. The compiler warns about
+// such a type (W0001); @allowCycle says the cycles are intended, and the
+// cycle collector frees the ones that become unreachable.
+@allowCycle
+struct Node {
+    Name     string
+    Local    Transform
+    Parent   weak *Node
+    Children []*Node
+    Target   *Node
+
+    // Drop runs exactly once, when the node is freed. Printing here makes
+    // the moment visible; a real node would release a GPU buffer.
+    func Drop() {
+        println("  drop", this.Name)
+    }
+}
+
+func New(name string, x int, y int) *Node {
+    return new Node{Name: name, Local: Transform{Pos: Vec2{X: x, Y: y}, Scale: 1}}
+}
+
+// Attach makes child the last child of parent. A *Node converts to a
+// weak *Node implicitly.
+func Attach(parent *Node, child *Node) {
+    child.Parent = parent
+    parent.Children = append(parent.Children, child)
+}
+
+// Detach takes n out of its parent's children. The caller's reference
+// is then the only thing keeping n (and its subtree) alive.
+func Detach(n *Node) {
+    var p = n.Parent
+    if p == nil {
+        return
+    }
+    var kept []*Node = []
+    for c in p.Children {
+        if c != n {
+            kept = append(kept, c)
+        }
+    }
+    p.Children = kept
+    n.Parent = nil
+}
+
+// Path walks up the weak parent links. Reading a weak reference gives a
+// *Node, or nil once the parent is gone (or was never set).
+func Path(n *Node) string {
+    var parts = [n.Name]
+    var p = n.Parent
+    for p != nil {
+        parts = append(parts, p.Name)
+        p = p.Parent
+    }
+    slices.Reverse(parts)
+    return strings.Join(parts, "/")
+}
+
+// WorldPos adds up the local positions from n to the root.
+func WorldPos(n *Node) Vec2 {
+    var pos = n.Local.Pos
+    var p = n.Parent
+    for p != nil {
+        pos = pos.Add(p.Local.Pos)
+        p = p.Parent
+    }
+    return pos
+}
+
+func Print(n *Node, depth int) {
+    var w = WorldPos(n)
+    println(fmt.Format("  {0}{1} at ({2}, {3})", strings.Repeat("  ", depth), n.Name, w.X, w.Y))
+    for c in n.Children {
+        Print(c, depth + 1)
+    }
+}
