@@ -59,6 +59,17 @@ ZELL_PLAT_HIDDEN void zell__plat_thread_join(zell__plat_thread t);
 ZELL_PLAT_HIDDEN int64_t zell__plat_cpu_count(void);
 /* Gives up the CPU (spin-lock back-off). */
 ZELL_PLAT_HIDDEN void zell__plat_yield(void);
+/* A spin-wait hint to the CPU (x86 `pause`, arm64 `yield`): no system
+ * call, the sibling hyperthread gets the core for a few dozen cycles. */
+static inline void zell__plat_cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield" ::: "memory");
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
 
 /* ---- mutexes, condition variables, once, thread-local keys ------------
  * pthreads on POSIX (inline), SRWLOCK / CONDITION_VARIABLE / INIT_ONCE /

@@ -1312,21 +1312,34 @@ built as `*_async` variants that return a `zell_task *`.
     worker checks it every 61 jobs even while its own queues are busy;
   - an out-of-work worker looks in its run-next slot, its ring, the global
     queue, then **steals** half of another worker's ring (four passes over
-    the workers in a random order; run-next slots only on the last pass,
-    after the grace period), then polls every queue for up to 50 us if no
-    other worker is polling (at most one polls at a time: the "spinning"
-    token), then parks on a condition variable. A post wakes one parked
-    worker only when nobody is polling, and the woken worker inherits the
-    token (Go's `wakep`), so a burst of posts wakes one worker per 50 us at
-    most; a worker that found work while holding the token hands it to
-    another parked worker if work is still queued. Posters and parkers
-    use a store-then-load protocol (sequentially consistent) so a post is
-    never missed by a worker about to park; this covers run-next posts
-    too: a worker about to park that sees another worker's run-next slot
-    full gives it the grace period and steals it if its owner has not
-    taken it by then, so a job that never yields (a loop that keeps finding
-    completed tasks) cannot starve the continuation it posted while every
-    other worker sleeps.
+    the workers in a random order; never a run-next slot), then polls every
+    queue for up to 50 us if no other worker is polling (at most one polls
+    at a time: the "spinning" token), then parks on a condition variable.
+    The spinner waits with the CPU's spin hint (`pause` / arm64 `yield`)
+    between polls, reads the clock every 256 polls and calls `sched_yield`
+    only when more worker threads than CPUs are alive (spares). A post
+    wakes one parked worker only when nobody is polling, and the woken
+    worker inherits the token (Go's `wakep`), so a burst of posts wakes one
+    worker per 50 us at most; a worker that found work while holding the
+    token hands it to another parked worker if work is still queued.
+    Posters and parkers use a store-then-load protocol (sequentially
+    consistent) so a post is never missed by a worker about to park.
+  - **Run-next slots of busy workers.** A run-next slot is its owner's,
+    but a job that never yields (a loop that keeps finding completed
+    tasks) must not starve the continuation it posted. The slot state
+    carries a sequence number bumped on every fill, so a watcher can tell
+    a slot that stayed full from one refilled. Only two threads watch: the
+    spinner looks at the other workers' slots once per 64 polls (each look
+    pulls a cache line the owner writes on every hand-off) and takes a
+    slot it has seen unchanged for 20 us; and a worker about to park that
+    finds only a full run-next slot (no queued work) parks with a timeout
+    if no other parked worker does so already (the run-next watcher): it
+    takes the slot when it wakes if the slot still holds the record it
+    saw, and doubles its timeout (20 us up to 1 ms) while the slots it
+    sees keep moving. Every other worker parks without a timeout. A
+    run-next post wakes a parked worker by the rule above, which then
+    spins and watches, so a stuck slot is taken within ~20 us when a
+    worker was parked plainly, and within ~2 ms in the worst case.
   - **Network polling (netpoll, 10.9)**, when the I/O pollers are shared
     (epoll): an out-of-work worker polls the network with timeout 0 after
     the global queue and before stealing (and the spinning worker every 64

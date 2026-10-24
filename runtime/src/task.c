@@ -20,6 +20,22 @@
  * global FIFO for posts from other threads (I/O, timers, main) and ring
  * overflow. ABI.md 10.1 describes the policy; the rules are Go's.
  *
+ * Idle workers (ABI.md 10.1): an out-of-work worker steals from rings
+ * (never run-next slots), then, if it gets the single spinning token
+ * (q_spinning), polls the queues for SPIN_NS with cpu_relax between polls
+ * (sched_yield only with more threads than CPUs), then parks. Idle
+ * workers must not disturb the busy one: a hand-off chain runs on one
+ * worker through its run-next slot, and every idle thread that yields or
+ * reads that worker's rn_state line in a loop slows it down (ping-pong on
+ * 16 workers took 520 ms vs 410 on one while every parker lingered on the
+ * slot with sched_yield; 420 with the watchers below). So only two
+ * threads look at run-next slots: the spinner, once per pass
+ * (watch_runnext: a slot whose rn_state, sequence included, stays the
+ * same for RUNNEXT_GRACE_NS is taken), and one parked worker that waits
+ * with a timeout (q_watcher, WATCH_MIN_NS doubling to WATCH_MAX_NS) and
+ * takes the slot it saw if it is unchanged when it wakes. That is the
+ * guarantee for a job that never yields after posting to run-next.
+ *
  * Network polling (netpoll, ABI.md 10.9), when task_io.c installs
  * zell__netpoll_hooks (shared pollers: epoll): readiness is picked up by
  * the workers themselves, as in Go's findrunnable, instead of by poller
@@ -44,7 +60,7 @@
  *     when no worker is awake to poll (the I/O started while every worker
  *     slept) and otherwise polls on the workers' behalf when they have not
  *     polled for 10 ms (all of them busy), like Go's sysmon.
- * The spin/park protocol itself (spinning token, lingering run-next) is
+ * The spin/park protocol itself (spinning token, run-next watching) is
  * the same with and without netpoll.
  * ====================================================================== */
 
@@ -67,10 +83,15 @@ typedef struct job {
 #define MAX_WORKERS 1024           /* core workers + spares, ever */
 #define GLOBAL_EVERY 61            /* ticks between forced looks at the global queue */
 #define RUNNEXT_STREAK 32          /* run-next hand-offs in a row before the ring gets a turn */
-#define STEAL_PASSES 4             /* rounds over the victims; run-next only in the last */
-#define RUNNEXT_GRACE_NS 20000     /* a victim keeps its run-next this long before a thief takes it */
+#define STEAL_PASSES 4             /* rounds over the victims' rings */
+#define RUNNEXT_GRACE_NS 20000     /* a run-next slot seen unchanged this long is taken by the spinner */
 
-enum { RN_EMPTY = 0, RN_FULL = 1, RN_BUSY = 2 };
+/* rn_state: the low two bits are the state, the rest a sequence number
+ * the owner bumps on every fill, so a watcher can tell a slot that stayed
+ * full from one that was refilled (RN_SEQ). */
+enum { RN_EMPTY = 0, RN_FULL = 1, RN_BUSY = 2, RN_MASK = 3, RN_SEQ = 4 };
+#define WATCH_MIN_NS 20000         /* the parked run-next watcher's first timeout */
+#define WATCH_MAX_NS 1000000       /* ... doubled while the slots it sees keep moving, up to this */
 
 typedef struct worker {
     /* The ring: the owner stores records at `tail`; the owner and thieves
@@ -84,7 +105,7 @@ typedef struct worker {
     jobrec ring[LOCALQ];
     /* The run-next slot: RN_EMPTY, RN_FULL, or RN_BUSY while someone copies
      * it out. Only the owner fills it. */
-    int32_t rn_state;              /* atomic */
+    uint32_t rn_state;             /* atomic: RN_* state | sequence */
     jobrec runnext;
     /* Owner-only bookkeeping. */
     uint64_t tick;                 /* jobs taken */
@@ -92,6 +113,10 @@ typedef struct worker {
     uint64_t rng;                  /* victim order */
     int spinning;                  /* holds the pool's spinning token */
     int64_t spin_until;            /* monotonic ns: when to give the token up and park */
+    int64_t cand;                  /* spinner: the peer whose full run-next slot it follows, or -1 */
+    uint32_t cand_val;             /* ... that slot's rn_state when first seen */
+    int64_t cand_t;                /* ... monotonic ns of the second sighting (0: not yet) */
+    int64_t watch_ns;              /* the watcher's current timeout */
     int spare;
     int alive;                     /* under q_mu: the slot is in use */
     int64_t live_tasks;            /* tasks made minus tasks dropped on this thread (diag; summed by zell__live_tasks) */
@@ -104,30 +129,35 @@ static zell__plat_mutex q_mu = ZELL_PLAT_MUTEX_INIT;
 static zell__plat_cond q_cv = ZELL_PLAT_COND_INIT;     /* work available / stop */
 static zell__plat_cond idle_cv = ZELL_PLAT_COND_INIT;  /* drained / thread exited */
 static job *q_head, *q_tail;  /* the global queue, under q_mu */
-static int64_t q_len;         /* atomic: its length (read without q_mu) */
+/* q_len, q_idle and q_spinning are read on every post and find_work: each on
+ * its own cache line, away from q_mu and the fields parkers write. */
+static _Alignas(64) int64_t q_len;  /* atomic: its length (read without q_mu) */
 static int q_stopping;
 static int q_started;
 static int64_t q_nworkers;    /* target parallelism N */
 static int64_t q_alive;       /* worker threads alive (N core + spares), under q_mu */
-static int64_t q_idle;        /* atomic: workers parked on q_cv */
+static _Alignas(64) int64_t q_idle; /* atomic: workers parked on q_cv */
 static int64_t q_blocked;     /* workers blocked inside zell_task_await, under q_mu */
 static int64_t q_max_spares;  /* spare workers allowed at once (ABI.md 10.1, 10.5) */
+static int64_t q_ncpu;        /* online CPUs (more worker threads than this: the spinner yields) */
 static int64_t q_alive_peak;  /* most worker threads ever alive at once, under q_mu (diag) */
 static int64_t q_unblocks;    /* under q_mu: workers that left zell_task_await, ever (stall detection) */
 #define STALL_NS 10000000     /* a blocked pool with queued work and no progress for this long gets one more thread */
-static int64_t q_spinning;    /* atomic: 1 while a worker polls for work before parking */
-static int64_t q_wake_pending; /* under q_mu: wake-ups sent whose spinning token is not yet taken */
+static _Alignas(64) int64_t q_spinning; /* atomic: workers polling for work before parking (the spinning tokens) */
+static _Alignas(64) int64_t q_wake_pending; /* under q_mu: wake-ups sent whose spinning token is not yet taken */
 static worker *q_hub_w;        /* under q_mu: the idle worker blocked in the network hub (netpoll), if any */
 static int q_hub_kicked;       /* under q_mu: q_hub_w was kicked for a post and inherits the spinning token */
+static worker *q_watcher;      /* under q_mu: the parked worker that waits with a timeout for a run-next slot it saw full */
 
 /* How long an out-of-work worker polls the queues before it parks on q_cv
  * (and at most one does at a time). A job posted meanwhile is taken
  * without a futex wake-up of a parked thread: hand-offs between tasks
  * (channels, mutexes, awaits) would otherwise pay a sleep/wake per job. */
 #define SPIN_NS 50000
+#define SPIN_RELAX 4               /* cpu_relax hints between two polls of the spinner */
 
 #ifdef ZELL_SCHED_STATS
-static int64_t st_wake, st_spin, st_spin_found, st_steal, st_linger, st_park, st_recheck, st_jobs_rn, st_jobs_ring, st_jobs_glob, st_rn_kick, st_stall;
+static int64_t st_wake, st_spin, st_spin_found, st_steal, st_linger, st_park, st_recheck, st_jobs_rn, st_jobs_ring, st_jobs_glob, st_rn_kick, st_stall, st_watch;
 #define STAT(x) __atomic_add_fetch(&st_##x, 1, __ATOMIC_RELAXED)
 /* Cycle profile of the resume path (x86 only): PROF_T(name) accumulates
  * the cycles from the matching PROF_START() in a section. */
@@ -293,28 +323,34 @@ static bool steal_ring(worker *w, worker *v, jobrec *out) {
 
 /* ---- the run-next slot ---- */
 
-static bool runnext_take(worker *w, jobrec *out) {
-    int32_t s = RN_FULL;
-    if (!__atomic_compare_exchange_n(&w->rn_state, &s, RN_BUSY, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return false;
+/* Takes w's run-next record if rn_state is still exactly v (full). */
+static bool runnext_take_exact(worker *w, uint32_t v, jobrec *out) {
+    if ((v & RN_MASK) != RN_FULL) return false;
+    if (!__atomic_compare_exchange_n(&w->rn_state, &v, (v & ~(uint32_t)RN_MASK) | RN_BUSY, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return false;
     rec_load(out, &w->runnext);
-    __atomic_store_n(&w->rn_state, RN_EMPTY, __ATOMIC_RELEASE);
+    __atomic_store_n(&w->rn_state, (v & ~(uint32_t)RN_MASK) | RN_EMPTY, __ATOMIC_RELEASE);
     return true;
+}
+
+static bool runnext_take(worker *w, jobrec *out) {
+    return runnext_take_exact(w, __atomic_load_n(&w->rn_state, __ATOMIC_ACQUIRE), out);
 }
 
 /* Owner: r runs next; a record already there goes behind the ring. */
 static void runnext_put(worker *w, const jobrec *r) {
+    uint32_t s;
     for (;;) {
-        int32_t s = __atomic_load_n(&w->rn_state, __ATOMIC_ACQUIRE);
-        if (s == RN_EMPTY) break;
+        s = __atomic_load_n(&w->rn_state, __ATOMIC_ACQUIRE);
+        if ((s & RN_MASK) == RN_EMPTY) break;
         jobrec old;
-        if (s == RN_FULL && runnext_take(w, &old)) { STAT(rn_kick); ring_push_slow(w, &old); }
+        if (runnext_take_exact(w, s, &old)) { STAT(rn_kick); ring_push_slow(w, &old); }
         /* RN_BUSY: a thief is copying it out */
     }
     rec_store(&w->runnext, r);
-    __atomic_store_n(&w->rn_state, RN_FULL, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&w->rn_state, (s & ~(uint32_t)RN_MASK) + RN_SEQ + RN_FULL, __ATOMIC_SEQ_CST);
 }
 
-static inline bool runnext_full(const worker *w) { return __atomic_load_n(&w->rn_state, __ATOMIC_SEQ_CST) == RN_FULL; }
+static inline bool runnext_full(const worker *w) { return (__atomic_load_n(&w->rn_state, __ATOMIC_SEQ_CST) & RN_MASK) == RN_FULL; }
 
 /* ---- wake-ups ---- */
 
@@ -325,12 +361,12 @@ static void wake_locked(void) {
     if (__atomic_load_n(&q_spinning, __ATOMIC_RELAXED) != 0) return;
     /* a worker on q_cv first: the one in the hub keeps covering the network */
     if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) - (q_hub_w ? 1 : 0) - q_wake_pending > 0) {
-        __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
+        __atomic_add_fetch(&q_spinning, 1, __ATOMIC_SEQ_CST);
         q_wake_pending++;
         STAT(wake);
         zell__plat_cond_signal(&q_cv);
     } else if (q_hub_w && !q_hub_kicked) {
-        __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
+        __atomic_add_fetch(&q_spinning, 1, __ATOMIC_SEQ_CST);
         q_hub_kicked = 1;
         STAT(wake);
         netpoll()->kick();
@@ -345,7 +381,7 @@ static void wake_one(void) {
 }
 
 /* Whether the global queue or any ring holds work (run-next slots are
- * their owners' business: see lingering_runnext). */
+ * their owners' business: see watch_runnext). */
 static bool queued_work(void) {
     if (global_nonempty()) return true;
     int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
@@ -363,19 +399,45 @@ static bool any_runnext_full(worker *w) {
     return false;
 }
 
-/* A run-next slot of another worker that stays full for the grace period
- * (its owner is busy with a long job rather than about to take it) is
- * taken by w: returns true with the record in *out. Owners normally take
- * their slot within nanoseconds, so this mostly waits a little and
- * returns false. */
-static bool lingering_runnext(worker *w, jobrec *out) {
+/* The first other worker whose run-next slot is full (its rn_state in
+ * *val), or -1. */
+static int64_t first_runnext_full(worker *w, uint32_t *val) {
+    int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
+    for (int64_t i = 0; i < n; i++) {
+        if (workers[i] == w) continue;
+        uint32_t v = __atomic_load_n(&workers[i]->rn_state, __ATOMIC_SEQ_CST);
+        if ((v & RN_MASK) == RN_FULL) { *val = v; return i; }
+    }
+    return -1;
+}
+
+/* The spinner's look at the other workers' run-next slots, once per pass
+ * (every read pulls a line the busy owner writes on every hand-off): a
+ * slot seen holding the same record (same rn_state, sequence included)
+ * for RUNNEXT_GRACE_NS belongs to an owner busy with a long job rather
+ * than about to take it, and w takes it (true, record in *out). One
+ * candidate slot is followed at a time; the clock is read only while it
+ * stays unchanged. */
+static bool watch_runnext(worker *w, jobrec *out) {
     int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
     for (int64_t i = 0; i < n; i++) {
         worker *v = workers[i];
-        if (v == w || !runnext_full(v)) continue;
-        int64_t until = zell__plat_mono_ns() + RUNNEXT_GRACE_NS;
-        while (runnext_full(v) && zell__plat_mono_ns() < until) zell__plat_yield();
-        if (runnext_take(v, out)) { STAT(linger); return true; }
+        if (v == w) continue;
+        uint32_t s = __atomic_load_n(&v->rn_state, __ATOMIC_ACQUIRE);
+        if ((s & RN_MASK) != RN_FULL) { if (i == w->cand) w->cand = -1; continue; }
+        if (i == w->cand && s == w->cand_val) {
+            int64_t now = zell__plat_mono_ns();
+            if (w->cand_t == 0) w->cand_t = now;
+            else if (now - w->cand_t >= RUNNEXT_GRACE_NS && runnext_take_exact(v, s, out)) {
+                STAT(linger);
+                w->cand = -1;
+                return true;
+            }
+        } else if (w->cand < 0 || i == w->cand) {
+            w->cand = i;
+            w->cand_val = s;
+            w->cand_t = 0;
+        }
     }
     return false;
 }
@@ -417,20 +479,18 @@ static bool global_get(worker *w, jobrec *out) {
     return true;
 }
 
-/* Steals from the other workers: halves of rings on every pass, a run-next
- * only on the last pass and only if its owner has not taken it within a
- * grace period (it usually does, within nanoseconds). */
+/* Steals halves of the other workers' rings. Run-next slots are left to
+ * their owners here; only the spinner (watch_runnext) and the parked
+ * watcher take one that stays full. */
 static bool steal_work(worker *w, jobrec *out) {
     int64_t n = __atomic_load_n(&q_nslots, __ATOMIC_ACQUIRE);
     if (n <= 1) return false;
     for (int pass = 0; pass < STEAL_PASSES; pass++) {
-        bool last = pass == STEAL_PASSES - 1;
         uint64_t start = rng_next(w) % (uint64_t)n;
         for (int64_t i = 0; i < n; i++) {
             worker *v = workers[(start + (uint64_t)i) % (uint64_t)n];
             if (v != w && steal_ring(w, v, out)) { STAT(steal); return true; }
         }
-        if (last && lingering_runnext(w, out)) return true;
     }
     return false;
 }
@@ -474,15 +534,27 @@ static bool find_work(worker *w, jobrec *out) {
  * (then it is already taken, in *out). */
 static bool spin_for_work(worker *w, jobrec *out, bool *taken) {
     *taken = false;
-    for (int i = 1;; i++) {
+    for (uint32_t i = 1;; i++) {
         if (queued_work()) return true;
         if ((i & 63) == 0) {
-            if (zell__plat_mono_ns() >= w->spin_until) return false;
+            if ((i & 255) == 0 && zell__plat_mono_ns() >= w->spin_until) return false;
             if (netpoll_here(w)) return true;
-            if (lingering_runnext(w, out)) { *taken = true; return true; }
-            zell__plat_yield();   /* a shared machine: let the poster run */
+            if (watch_runnext(w, out)) { *taken = true; return true; }
+            /* more threads than cores (spares): let the poster run */
+            if (__atomic_load_n(&q_alive, __ATOMIC_RELAXED) > q_ncpu) zell__plat_yield();
         }
+        for (int k = 0; k < SPIN_RELAX; k++) zell__plat_cpu_relax();
     }
+}
+
+/* Takes the spinning token if nobody holds it. One spinner at a time:
+ * Go's cap of GOMAXPROCS/2 spinners measured no faster here (ping-pong
+ * 414 -> 457 ms, select_many CPU 5.8 -> 6.0 s). q_spinning is a count
+ * (raised with add, dropped with sub) because a waker may raise it for a
+ * parked worker while a worker takes it here. */
+static bool take_spin_token(void) {
+    int64_t zero = 0;
+    return __atomic_compare_exchange_n(&q_spinning, &zero, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 /* Drops the spinning token; with work still queued somewhere, hands it to
@@ -490,8 +562,7 @@ static bool spin_for_work(worker *w, jobrec *out, bool *taken) {
 static void stop_spinning(worker *w) {
     if (!w->spinning) return;
     w->spinning = 0;
-    __atomic_store_n(&q_spinning, 0, __ATOMIC_SEQ_CST);
-    if (ring_len(w) != 0 || global_nonempty()) wake_one();
+    if (__atomic_sub_fetch(&q_spinning, 1, __ATOMIC_SEQ_CST) == 0 && (ring_len(w) != 0 || global_nonempty())) wake_one();
 }
 
 static void run_job(const jobrec *j) {
@@ -548,13 +619,11 @@ static void *worker_main(void *arg) {
         if (zell__heap_needs_collect()) { zell__heap_collect(0); continue; }
         if (zell__rc_pending()) { zell__rc_poll(); continue; }
         /* Poll before parking, if nobody else does (the token). */
-        if (!w->spinning && q_nworkers > 1) {
-            int64_t zero = 0;
-            if (__atomic_compare_exchange_n(&q_spinning, &zero, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-                w->spinning = 1;
-                w->spin_until = zell__plat_mono_ns() + SPIN_NS;
-                STAT(spin);
-            }
+        if (!w->spinning && q_nworkers > 1 && take_spin_token()) {
+            w->spinning = 1;
+            w->spin_until = zell__plat_mono_ns() + SPIN_NS;
+            w->cand = -1;
+            STAT(spin);
         }
         if (w->spinning) {
             bool taken;
@@ -568,7 +637,7 @@ static void *worker_main(void *arg) {
         zell__plat_mutex_lock(&q_mu);
         if (w->spinning) {
             w->spinning = 0;
-            __atomic_store_n(&q_spinning, 0, __ATOMIC_SEQ_CST);
+            __atomic_sub_fetch(&q_spinning, 1, __ATOMIC_SEQ_CST);
         }
         if (q_stopping) break;
         /* spare threads retire once enough unblocked workers exist again */
@@ -579,15 +648,46 @@ static void *worker_main(void *arg) {
          * sees the other. A run-next slot is its owner's to take, but a job
          * that never yields (a loop that keeps finding completed tasks)
          * would starve it with every other worker parked and nobody
-         * posting: so a full slot is given its grace period, outside the
-         * lock, and stolen if the owner has not taken it by then. */
-        if (queued_work() || any_runnext_full(w)) {
+         * posting: the timed watcher below covers that. */
+        if (queued_work()) {
             STAT(recheck);
             __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
             zell__plat_mutex_unlock(&q_mu);
-            if (lingering_runnext(w, &j)) run_job(&j);
             continue;
         }
+        /* Only a run-next slot is full: its owner is about to take it, or
+         * runs a job that will not yield. One parked worker (q_watcher)
+         * waits with a timeout and takes the slot if it still holds the
+         * same record when it wakes; the timeout doubles while the slots
+         * it sees keep moving. Everybody else parks plainly. */
+        uint32_t wv = 0;
+        int64_t wp = q_watcher ? -1 : first_runnext_full(w, &wv);
+        if (wp >= 0) {
+            q_watcher = w;
+            STAT(watch);
+            zell__rc_park(0);
+            zell__plat_cond_wait_ns(&q_cv, &q_mu, w->watch_ns);
+            if (q_watcher == w) q_watcher = NULL;
+            __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
+            if (q_wake_pending > 0) {
+                q_wake_pending--;
+                w->spinning = 1;
+                w->spin_until = zell__plat_mono_ns() + SPIN_NS;
+            }
+            zell__plat_mutex_unlock(&q_mu);
+            zell__rc_unpark();
+            if (netpoll()) netpoll()->awake();
+            if (runnext_take_exact(workers[wp], wv, &j)) {
+                STAT(linger);
+                w->watch_ns = WATCH_MIN_NS;
+                stop_spinning(w);
+                run_job(&j);
+            } else if (w->watch_ns < WATCH_MAX_NS) {
+                w->watch_ns *= 2;
+            }
+            continue;
+        }
+        w->watch_ns = WATCH_MIN_NS;
         if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == q_alive) zell__plat_cond_broadcast(&idle_cv);  /* drained */
         /* The last worker to go idle waits for the network (and the next
          * I/O deadline) in the hub poller instead of on q_cv; a post kicks
@@ -658,6 +758,8 @@ static bool spawn_worker_locked(int spare) {
     w->spare = spare;
     w->spinning = 0;
     w->tick = w->rn_streak = 0;
+    w->watch_ns = WATCH_MIN_NS;
+    w->cand = -1;
     if (!zell__plat_thread_start_detached(worker_main, w)) zell_panic("cannot create worker thread");
     __atomic_add_fetch(&q_alive, 1, __ATOMIC_SEQ_CST);
     if (q_alive > q_alive_peak) q_alive_peak = q_alive;
@@ -759,6 +861,7 @@ void zell__sched_start(void) {
     q_stopping = 0;
     q_nworkers = worker_count();
     q_max_spares = spare_limit(q_nworkers);
+    q_ncpu = zell__plat_cpu_count();
     for (int64_t i = 0; i < q_nworkers; i++) spawn_worker_locked(0);
     __atomic_store_n(&q_started, 1, __ATOMIC_RELEASE);
     zell__plat_mutex_unlock(&q_mu);
@@ -785,9 +888,9 @@ static void sched_stop_started(void) {
     while (q_alive > 0) zell__plat_cond_wait(&idle_cv, &q_mu);
     zell__plat_mutex_unlock(&q_mu);
 #ifdef ZELL_SCHED_STATS
-    fprintf(stderr, "sched: wake %lld spin %lld spin_found %lld steal %lld linger %lld park %lld recheck %lld jobs rn %lld ring %lld glob %lld rn_kick %lld stall %lld\n",
+    fprintf(stderr, "sched: wake %lld spin %lld spin_found %lld steal %lld linger %lld park %lld recheck %lld jobs rn %lld ring %lld glob %lld rn_kick %lld stall %lld watch %lld\n",
             (long long)st_wake, (long long)st_spin, (long long)st_spin_found, (long long)st_steal, (long long)st_linger, (long long)st_park, (long long)st_recheck,
-            (long long)st_jobs_rn, (long long)st_jobs_ring, (long long)st_jobs_glob, (long long)st_rn_kick, (long long)st_stall);
+            (long long)st_jobs_rn, (long long)st_jobs_ring, (long long)st_jobs_glob, (long long)st_rn_kick, (long long)st_stall, (long long)st_watch);
     fprintf(stderr, "sched: Mcycles lazy %lld addcont %lld complete %lld drop %lld findwork %lld jobtail %lld\n",
             (long long)(pr_lazy >> 20), (long long)(pr_addcont >> 20), (long long)(pr_complete >> 20), (long long)(pr_drop >> 20), (long long)(pr_findwork >> 20), (long long)(pr_jobtail >> 20));
 #endif

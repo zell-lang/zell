@@ -259,6 +259,58 @@ TEST(runnext_stolen_from_busy_worker) {
     }
 }
 
+/* ---- the same with the pool parked: the hog busy-waits first (every
+ * other worker gives up spinning and parks), then posts to its run-next
+ * slot and keeps the thread for 10 ms more. A parked worker must pick the
+ * record up within a few milliseconds (the timed run-next watcher), not
+ * when the hog lets go. ---- */
+
+static int64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static int64_t parked_ran_ns;
+
+static void parked_cont(void *arg) { (void)arg; __atomic_store_n(&parked_ran_ns, now_ns(), __ATOMIC_RELEASE); }
+
+static void parked_hog(zell_task *t, void *ctx) {
+    int64_t *posted = ctx;
+    int64_t t0 = now_ns();
+    while (now_ns() - t0 < 3000000) {}   /* 3 ms: the others park */
+    zell_task *w = zell_task_new_plain(0, NULL);
+    zell_task_add_continuation(w, parked_cont, NULL);
+    *posted = now_ns();
+    zell_task_complete(w, NULL);   /* -> this worker's run-next slot */
+    zell_release(w);
+    t0 = now_ns();
+    while (now_ns() - t0 < 10000000) {}   /* 10 ms, never yields */
+    zell_task_complete(t, NULL);
+}
+
+TEST(runnext_taken_while_pool_parks) {
+    if (zell_sched_workers() < 2) return;
+    int64_t worst = 0;
+    for (int round = 0; round < 10; round++) {
+        parked_ran_ns = 0;
+        int64_t posted = 0;
+        zell_task *d = zell_task_delay(2);   /* let the pool park */
+        zell_task_await(d);
+        zell_release(d);
+        zell_task *t = zell_task_spawn(parked_hog, &posted);
+        zell_task_await(t);
+        zell_release(t);
+        int64_t ran = __atomic_load_n(&parked_ran_ns, __ATOMIC_ACQUIRE);
+        assert(ran != 0);
+        if (ran - posted > worst) worst = ran - posted;
+    }
+    /* the hog holds its thread for 10 ms after the post: a pickup only
+     * when it lets go would take >= 10 ms */
+    if (getenv("ZELL_TEST_VERBOSE") || worst >= 5000000) fprintf(stderr, "run-next pickup took %lld us\n", (long long)(worst / 1000));
+    assert(worst < 5000000);
+}
+
 /* ---- results with refcounted payloads ---- */
 
 static void make_str(zell_task *t, void *ctx) {
@@ -1009,6 +1061,7 @@ int main(int argc, char **argv) {
     RUN(work_stealing);
     RUN(runnext_fairness);
     RUN(runnext_stolen_from_busy_worker);
+    RUN(runnext_taken_while_pool_parks);
     RUN(refcounted_result);
     RUN(mutex);
     RUN(channel_unbuffered);
