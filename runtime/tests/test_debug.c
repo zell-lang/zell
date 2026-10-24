@@ -68,6 +68,26 @@ TEST(canon_resolves_symlinks) {
     unlink(link);
     rmdir(real);
     rmdir(dir);
+#else
+    /* A `c:/...` lower-case, forward-slash spelling of a file names it. */
+    char tmp[MAX_PATH], file[MAX_PATH + 32], other[MAX_PATH + 32];
+    DWORD n = GetTempPathA(sizeof tmp, tmp);
+    assert(n > 0 && n < sizeof tmp);
+    snprintf(file, sizeof file, "%sZellDbgPath.zl", tmp);
+    FILE *f = fopen(file, "w");
+    assert(f);
+    fclose(f);
+    size_t i = 0;
+    for (; file[i]; i++) other[i] = file[i] == '\\' ? '/' : (char)(file[i] >= 'A' && file[i] <= 'Z' ? file[i] - 'A' + 'a' : file[i]);
+    other[i] = 0;
+    char *a = zell__plat_path_canon(file), *b = zell__plat_path_canon(other);
+    assert(a && b);
+    assert(strncmp(a, "\\\\?\\", 4) != 0);
+    assert(zell__dbg_path_match(a, b, zell__plat_path_fold()) == 3);
+    assert(zell__dbg_path_match(a, other, zell__plat_path_fold()) == 3);
+    free(a);
+    free(b);
+    remove(file);
 #endif
 }
 

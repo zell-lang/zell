@@ -62,6 +62,10 @@ struct T {
     panicsSeen int
     probeName  string
     probe      int
+    // In-process run (`zell test --debug`): FailNow and Skip end the
+    // test's task (a task panic) instead of the process; ended marks it.
+    inProcess bool
+    ended     bool
 
     // Name returns the test name ("TestX/sub" for subtests).
     func Name() string {
@@ -107,6 +111,10 @@ struct T {
 
     // Ends the test now (failed if it was marked failed).
     func FailNow() {
+        if this.inProcess {
+            this.ended = true
+            panic("testing: " + this.name + " ended")
+        }
         if this.failed {
             os.Exit(1)
         }
@@ -118,6 +126,10 @@ struct T {
         this.skipped = true
         if msg != "" {
             this.Log(msg)
+        }
+        if this.inProcess {
+            this.ended = true
+            panic("testing: " + this.name + " skipped")
         }
         if this.failed {
             os.Exit(1)
@@ -470,6 +482,7 @@ struct options {
     noTime    bool
     probeName string
     probe     int
+    inProcess bool
 }
 
 func parseArgs(args []string) options {
@@ -486,6 +499,8 @@ func parseArgs(args []string) options {
             o.verbose = true
         } else if a == "--no-time" {
             o.noTime = true
+        } else if a == "--in-process" {
+            o.inProcess = true
         } else if (a == "--filter" ||
             a == "--run-one" ||
             a == "--bench-one" ||
@@ -673,6 +688,83 @@ async func runOne(self string, c Case, o options) outcome {
     }
 }
 
+// One test in a task of its own (the first await suspends, so the rest
+// runs in this function's task, ABI.md 10.3): a panic, also the one
+// FailNow and Skip raise in-process, ends only this test.
+async func caseTask(c Case, t *T) void! {
+    await task.Yield()
+    if c.RunAsync != nil {
+        var arun = c.RunAsync
+        await arun(t)
+    } else {
+        var run = c.Run
+        run(t)
+    }
+}
+
+// --in-process (`zell test --debug`): every selected test, one after the
+// other, in this process (so one debug agent sees them all); a panic ends
+// only its test. Output is not captured: it streams as the tests run.
+async func runInProcess(tests []Case, o options) int {
+    var start = time.NowInstant()
+    var passed = 0
+    var failed = 0
+    var skipped = 0
+    for c in tests {
+        var t = new T{name: c.Name, verbose: o.verbose, noTime: o.noTime, inProcess: true}
+        if o.json {
+            io.println(jsonEvent("run", c.Name, 0.0, ""))
+        } else {
+            io.println("=== RUN   " + c.Name)
+        }
+        var t0 = time.NowInstant()
+        try await caseTask(c, t) catch err {
+            if !t.ended {
+                t.failed = true
+                io.println(t.indent() + "panic: " + task.PanicMessage(err))
+            }
+        }
+        var status = "PASS"
+        if t.failed {
+            status = "FAIL"
+            failed += 1
+        } else if t.skipped {
+            status = "SKIP"
+            skipped += 1
+        } else {
+            passed += 1
+        }
+        if o.json {
+            io.println(jsonEvent(strings.ToLower(status), c.Name, t0.Elapsed().Seconds(), ""))
+        } else {
+            io.println("--- " + status + ": " + c.Name + timeText(t0.Elapsed(), o.noTime))
+        }
+    }
+    var summary = strconv.Itoa(passed) +
+        " passed, " +
+        strconv.Itoa(failed) +
+        " failed, " +
+        strconv.Itoa(skipped) +
+        " skipped"
+    if o.json {
+        var act = "pass"
+        if failed > 0 {
+            act = "fail"
+        }
+        io.println(jsonEvent(act, "", start.Elapsed().Seconds(), ""))
+    } else if failed > 0 {
+        io.println("FAIL")
+        io.println("FAIL\t" + summary + timeText(start.Elapsed(), o.noTime))
+    } else {
+        io.println("PASS")
+        io.println("ok  \t" + summary + timeText(start.Elapsed(), o.noTime))
+    }
+    if failed > 0 {
+        return 1
+    }
+    return 0
+}
+
 // Runs the cases (the entry point of the driver `zell test` generates);
 // returns the exit code: 0 when everything passed, 1 otherwise.
 async func Main(cases []Case) int {
@@ -722,6 +814,9 @@ async func Main(cases []Case) int {
     var nseq = len(tests)
     for c in parallel {
         tests = append(tests, c)
+    }
+    if o.inProcess {
+        return await runInProcess(tests, o)
     }
     var i = 0
     for i < len(tests) {
