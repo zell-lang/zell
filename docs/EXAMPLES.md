@@ -17,6 +17,12 @@ that every file on the page is the file in the repository.
 | [bookshelf-api](examples/bookshelf-api/README.md) | an HTTP JSON API on `net.http`: router, handlers over a repository interface, middleware for logging and error mapping, graceful shutdown |
 | [inventory-db](examples/inventory-db/README.md) | `database.sql` with SQLite: migrations, typed `Query<T>`, transactions that roll back, report queries, `Drop` |
 | [validate](examples/validate/README.md) | your own attributes and reflection: a generic validator on `reflect.Fields<T>()`, a command registry on `reflect.TypesWith<A>()`, `reflect.Error` |
+| [jobrunner](examples/jobrunner/README.md) | async workers: a bounded pool over channels, fan-in of results, per-job `task.WithTimeout`, cancelling a run from outside, a `task.Mutex`-protected stats struct, graceful shutdown on SIGTERM |
+| [typed-cache](examples/typed-cache/README.md) | generics and interfaces: `Cache<K: Comparable, V>`, LRU and LFU behind a `Policy` interface, a generic `Maybe<T>`, a custom iterator for `for k, v in c` |
+| [scene-graph](examples/scene-graph/README.md) | memory without a GC: values and references, `Drop` order, `weak` parent links, a cycle freed by the cycle collector, `--leak-check`, arenas |
+| [errors-deep-dive](examples/errors-deep-dive/README.md) | errors through storage, service and api layers: sentinels, typed errors with `Unwrap`, `?("ctx")`, `errors.Is`/`As`, traces, exit codes, a panic in a task as `task.ErrPanic` |
+| [workspace](examples/workspace/README.md) | a multi-package workspace: a library `geo` and an app `mapper` with a path dependency, namespaces across packages, `zell test` per member, `zell.lock`, publishing |
+| [testing-guide](examples/testing-guide/README.md) | `zell test` in practice: table tests, helpers, testing a `T!` boundary, async tests with a fake, examples, benchmarks, `--json` |
 
 Run one with:
 
