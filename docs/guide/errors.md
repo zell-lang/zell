@@ -214,6 +214,105 @@ func main() {
 // timeout after 250ms
 ```
 
+Your own error types can join the chain too: a struct error with a
+method `Unwrap() error` is a link, and `errors.Is`, `errors.As` and
+`errors.Unwrap` continue with its cause. `Unwrap()` is called once, when
+the value becomes an `error`, so the cause is a snapshot taken at that
+moment. The message is only the error's own `Message()`; the cause is not
+appended to it.
+
+```zell
+namespace guide.errors.unwrap
+
+import io
+
+const ErrDisk = error("disk full")
+
+struct SaveError {
+    Path  string
+    cause error
+
+    func Message() string {
+        return "cannot save " + this.Path
+    }
+
+    func Unwrap() error {
+        return this.cause
+    }
+}
+
+func save(path string) void! {
+    return SaveError{Path: path, cause: ErrDisk}
+}
+
+func main() {
+    try save("a.txt") catch err {
+        println(err)
+        println(errors.Is(err, ErrDisk))
+        var se SaveError
+        println(errors.As(err, &se), se.Path)
+        println(errors.Unwrap(err))
+    }
+}
+// Output:
+// cannot save a.txt
+// true
+// true a.txt
+// disk full
+```
+
+To branch on the kind of an error, `switch` on it with type cases. A case
+tests the dynamic type of the error itself (the struct that was boxed),
+not the wrapped chain; use `errors.As` for the chain. A case may name an
+interface, which matches any error struct that implements it. The first
+matching case wins.
+
+```zell
+namespace guide.errors.kinds
+
+import io
+
+interface Coded {
+    func Code() int
+}
+
+struct NotFound {
+    What string
+
+    func Message() string {
+        return this.What + " not found"
+    }
+
+    func Code() int {
+        return 404
+    }
+}
+
+struct Broken {
+    func Message() string {
+        return "broken"
+    }
+}
+
+func classify(err error) string {
+    switch err {
+        case Coded c: return "coded " + strconv.Itoa(c.Code())
+        case Broken b: return "broken"
+        default: return "other"
+    }
+}
+
+func main() {
+    println(classify(NotFound{What: "user"}))
+    println(classify(Broken{}))
+    println(classify(error("x")))
+}
+// Output:
+// coded 404
+// broken
+// other
+```
+
 ## Error traces
 
 Every error remembers where it was created and every `?` it went
@@ -261,6 +360,14 @@ A trace printed by `errors.Trace` looks like this:
 Build with `--no-error-trace` if you use errors for control flow in a
 hot loop; `errors.Trace` then returns `""`.
 
+File names in a trace are printed relative to the current directory when
+the file is under it, so a trace from your project reads `app/fs.zl:42`
+rather than an absolute path; files outside it (dependencies, a build run
+from another directory) keep the path the compiler saw. In logs the
+`{Exception}` part of a template is a single line, the message and where
+the error was created; the full trace is written at the `Debug` and
+`Verbose` levels (see [debugging.md](debugging.md)).
+
 ## Errors and `defer`
 
 A deferred call whose result is `T!` must handle its error, because there
@@ -299,3 +406,10 @@ failures: it prints the message and a stack trace and exits with status
 2. Index out of range, `nil` dereference and integer division by zero
 panic too. A test can check that something panics with
 `testing.Panics` (see [testing.md](testing.md)).
+
+A panic is not an error: `try` and `?` do not see it, and it cannot be
+caught. A nil dereference and an index out of range are runtime panics
+with a message and a backtrace, and the process exits with status 2.
+Nothing recovers a panic, not even a `web` handler: the server process
+ends too, so return an error for anything a request can cause. See
+[debugging.md](debugging.md) for how backtraces look.

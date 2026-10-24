@@ -121,6 +121,92 @@ Handlers may be `async`, may return `T!` (an error becomes a 500 Problem whose `
 or the status of a `web.Error(404, "...")`), and may take a `*Context`
 for the raw request and response.
 
+## Mapping errors to responses
+
+A `web.Error(404, "...")` has its own status and message. Any other
+error is an unexpected failure: the client gets a 500 Problem Details
+(RFC 9457) whose `detail` is the generic `"internal error"`, so SQL, file
+paths and host names do not leak. The real message is always logged; it
+is sent to the client only in development mode (`ZELL_ENV=development`),
+together with the error trace.
+
+For your own domain errors, map them once per application instead of
+converting them in every handler. `app.MapError<E>(status)` answers an
+error of struct type `E` with that status and its `Message()` as the
+`detail`; it also finds `E` inside wrappers (`?("context")`,
+`errors.Wrap`). `app.OnError(hook)` is called first for every error of
+an endpoint or middleware: return your own `*ProblemDetails`, or `nil` to
+fall through to the default mapping (`web.Error`, then `MapError`, then
+the generic 500).
+
+```zell
+namespace guide.web.errors
+
+import io
+import web
+
+struct NotFound {
+    What string
+
+    func Message() string {
+        return this.What + " not found"
+    }
+}
+
+struct Teapot {
+    func Message() string {
+        return "I'm a teapot"
+    }
+}
+
+func find(what string) string! {
+    return NotFound{What: what}
+}
+
+async func main() void! {
+    var app = NewAppWith(AppOptions{
+        Environment: "production",
+        Logger: log.New().MinimumLevel(log.Level.Fatal).CreateLogger(),
+    })
+    app.MapError<NotFound>(404)
+    app.OnError(func(c *Context, err error) *ProblemDetails {
+        switch err {
+            case Teapot t:
+                return &ProblemDetails{Title: "I'm a teapot", Status: 418, Detail: t.Message()}
+        }
+        return nil
+    })
+    app.MapGet("/user", func() string! {
+        return find("user")?("loading")
+    })
+    app.MapGet("/tea", func() string! {
+        return Teapot{}
+    })
+    app.MapGet("/boom", func() string! {
+        return error("database password is hunter2")
+    })
+
+    var c = TestServer(app)?
+    for path in ["/user", "/tea", "/boom"] {
+        var r = await c.Get(path)
+        println(path, r.Status)
+    }
+    var r = await c.Get("/boom")
+    println(strings.Contains(r.Body, "hunter2"), strings.Contains(r.Body, "internal error"))
+}
+// Output:
+// /user 404
+// /tea 418
+// /boom 500
+// false true
+```
+
+A panic in a handler is not an error value, and `web` does not recover
+it: an index out of range or a `nil` dereference ends the whole process
+with status 2, like anywhere else (see [errors.md](errors.md#panics)).
+`UseRecover` turns handler *errors* into logged 500 responses; return a
+`T!` error, not a `panic`, for anything a request can cause.
+
 ## Validation
 
 `@validate` on fields (and parameters) declares the rules; a request

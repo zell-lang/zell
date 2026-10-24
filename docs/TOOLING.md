@@ -441,7 +441,7 @@ Aider, Zed, Copilot) Zell отдаётся двумя каналами; всё �
 | `L0004` | `self-assign` | warning | `x = x`, `a.f = a.f` | удалить |
 | `L0005` | `const-condition` | warning | сравнение литералов (`1 == 2`), сравнение значения с самим собой (`x == x`, кроме float) | заменить на `true`/`false` |
 | `L0006` | `unused-param` | hint | параметр приватной свободной функции, который тело не читает (функция не используется как значение) | переименовать в `_` |
-| `L0007` | `unused-func` | warning | приватная свободная функция без вызовов и ссылок (кроме `main`, `init` и функций с атрибутами) | удалить |
+| `L0007` | `unused-func` | warning | приватная свободная функция без вызовов и ссылок (кроме `main`, `init` и функций с атрибутами; сгенерированные имена тоже пропускаются: `main`, переименованный `zell test` в пакете с `src/main.zl` (`zellUserMain__`), и экземпляры обобщений) | удалить |
 | `L0008` | `defer-in-loop` | info | `defer` в цикле: выполнится при выходе из функции, и все `defer` функции уходят с open-coded пути в кучу | — |
 | `L0009` | `drop-capture` | warning | тип с `Drop` кладёт в своё поле замыкание, захватившее `this`: объект держит сам себя (уточнение `W0001`) | — |
 
@@ -532,6 +532,10 @@ trivia лексера → документ → принтер с алгорит�
 формате, который LSP и IDE умеют показывать (JSON с `--json`), чтобы
 тесты запускались кнопкой из редактора.
 
+В пакете `zell test` строит и зависимости (как `zell build`, включая
+dev-зависимости), но `*_test.zl` зависимостей не компилирует: тесты
+запускаются только у самого пакета.
+
 Реализовано (`compiler/src/testrun.rs`, `testing`): `@test func
 TestX(t *testing.T)` (и `@test func X()`; обе формы могут быть `async`,
 раннер ждёт задачу через `testing.Case.RunAsync`), бенчмарки `@bench func BenchX(b
@@ -565,6 +569,14 @@ TestX(t *testing.T)` (и `@test func X()`; обе формы могут быть
 
 ## Прочие инструменты
 
+- `zell --help` — список команд; `zell <command> --help` — параметры
+  одной команды (`zell run --help`, `zell test --help`).
+- `zell init` не обязателен. `zell run`/`build`/`check` принимают один
+  файл (`zell run main.zl`), обычный каталог с `.zl` (`zell run .`) или
+  минимальный проект: каталог с `main.zl` и `zell.toml` рядом
+  (`[package]` с `name`, `version` и `entry = "main.zl"`; файлы
+  объявляют `namespace <name>`, пока манифест не задаёт `namespace`).
+  `zell init` только создаёт такой манифест и раскладку `src/`.
 - `zell doc` — документация из комментариев перед объявлениями
   (markdown), HTML и JSON для IDE. ✅ Реализовано (`compiler/src/doc.rs`,
   `doc/{markdown,html,site}.rs`): `zell doc strings.Split` / `time` /

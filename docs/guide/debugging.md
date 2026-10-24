@@ -55,6 +55,11 @@ division by zero) prints `panic: <message>` and a native backtrace, and
 exits with status 2. Deferred calls and destructors do not run. Set
 `ZELL_NO_BACKTRACE=1` to print only the message (the test suites do).
 
+A panic is not an error: `try` and `?` do not catch it. The backtrace
+currently shows symbols with offsets (`func+0x1c`); source `file:line` is
+planned. A panic in a `web` handler ends the process as well: the
+server does not recover it.
+
 ## Logging
 
 `log` is structured logging in the style of Serilog: message
@@ -89,6 +94,10 @@ func main() {
 Sinks write text or JSON (CLEF) to the console or rolling files;
 `log.Context.Push("RequestId", id)` adds a property to everything logged
 by the current task and the tasks it starts.
+
+A template's `{Exception}` prints an error as its message plus one line
+saying where it was created; the whole return trace is written only for
+`Debug` and `Verbose` events (the JSON sinks keep it in `ErrorTrace`).
 
 ## Leaks
 

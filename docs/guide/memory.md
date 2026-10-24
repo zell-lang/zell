@@ -127,6 +127,65 @@ func main() {
 Destructors also run on early exits (`return`, `?`, `break`), in reverse
 order of declaration. They do not run on a `panic`.
 
+### `Drop` or `defer Close()`
+
+Types from the standard library that own a resource (files, sockets,
+database connections, rows) have a `Drop` that closes them, so they are
+closed at the end of the block without any code from you. Do not write
+`defer f.Close()` for that. `Close()` is for the cases where you want to
+see the close error (a failed flush on a written file, say): call it
+explicitly and handle the result. Write your own `Close` so that `Drop`
+skips what it already closed, as below.
+
+```zell
+namespace guide.memory.close
+
+import io
+
+struct Conn {
+    name   string
+    closed bool
+
+    func Close() void! {
+        if this.closed {
+            return
+        }
+        this.closed = true
+        println("closing", this.name)
+        return error("flush failed on " + this.name)
+    }
+
+    func Drop() {
+        if !this.closed {
+            this.closed = true
+            println("dropping", this.name)
+        }
+    }
+}
+
+func main() {
+    {
+        var a = Conn{name: "a"}
+        println("using", a.name)
+    }                                  // Drop closes it here
+    var b = Conn{name: "b"}
+    try b.Close() catch err {          // explicit: the error is visible
+        println("error:", err)
+    }
+}
+// Output:
+// using a
+// dropping a
+// closing b
+// error: flush failed on b
+```
+
+Not every type has a `Drop`. `database.sql` transactions (`Tx`) and
+pools (`DB`) do not close themselves, so `defer tx.Rollback()` (a no-op
+after `Commit`) and `defer db.Close()` stay as they are in
+`examples/sql.zl`; `sql.Rows` do have a `Drop`. Check the type's
+documentation before writing the `defer`.
+
 ## Cycles and `weak`
 
 Reference counting cannot free a cycle by itself: a parent pointing to

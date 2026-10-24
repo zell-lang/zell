@@ -72,6 +72,37 @@ Only `var` declares variables; the type comes after the name when you
 write it. Functions return several values as a tuple. Slices (`[]T`) and
 maps work like Go's; `s[a..b]` is a sub-slice or substring.
 
+`m[k]` gives the value, or the zero value when the key is absent. To tell
+an absent key from a stored zero, ask for the second result (Go's
+comma-ok): `var v, ok = m[k]`, also written `var (v, ok) = m[k]`, or
+`v, ok = m[k]` for existing variables. `ok` is a `bool`; when it is false,
+`v` is the zero value. There is no `in` operator for maps.
+
+```zell
+namespace tour.commaok
+
+import io
+
+func main() {
+    var stock = map[string]int{"apple": 3, "pear": 0}
+
+    var n, ok = stock["pear"]
+    println(n, ok)                  // stored zero: ok is true
+
+    var (m, found) = stock["plum"]
+    println(m, found)               // absent: zero value, ok is false
+
+    n, ok = stock["apple"]          // assign to existing variables
+    if ok {
+        println("apples:", n)
+    }
+}
+// Output:
+// 0 true
+// 0 false
+// apples: 3
+```
+
 Control flow is Go's, without parentheses:
 
 ```zell
@@ -107,6 +138,10 @@ func main() {
 // two has three letters
 // n = 1
 ```
+
+`in` is a keyword only between the loop variables and the collection in
+`for … in …`; anywhere else it is an ordinary name, so `var in = 1` and a
+parameter called `in` work.
 
 ## Structs and methods
 
@@ -157,6 +192,103 @@ func main() {
 // 4 100
 // 2 0
 ```
+
+A line that starts with `.` continues the previous one, so a method chain
+can be broken before each dot. Methods that return `this` make a builder:
+
+```zell
+namespace tour.chain
+
+import io
+
+struct Query {
+    table string
+    conds []string
+    max   int
+
+    func Where(c string) *Query {
+        this.conds = append(this.conds, c)
+        return this
+    }
+
+    func Limit(n int) *Query {
+        this.max = n
+        return this
+    }
+
+    func Text() string {
+        return "select * from " + this.table + " where " + strings.Join(this.conds, " and ") + " limit " + strconv.Itoa(this.max)
+    }
+}
+
+func main() {
+    var q = new Query{table: "users"}
+    println(q
+        .Where("age > 18")
+        .Where("active")
+        .Limit(10)
+        .Text())
+}
+// Output:
+// select * from users where age > 18 and active limit 10
+```
+
+`zell fmt` keeps one `.name` per line in such a chain. Inside `( )` and
+`[ ]` no semicolons are inserted either, so argument lists can wrap freely.
+
+## Type aliases
+
+`type Name = Type` gives another name to an existing type. The alias is
+transparent: `Name` and `Type` are the same type and can be used for one
+another everywhere (assignments, signatures, literals, methods). It works
+for structs, slices, maps and function types; generic aliases and aliases
+inside functions are not supported yet.
+
+```zell
+namespace tour.alias
+
+import io
+
+struct Point {
+    X int
+    Y int
+
+    func Sum() int {
+        return this.X + this.Y
+    }
+}
+
+type P = Point
+type Op = func(int, int) int
+type Ints = []int
+
+func apply(f Op, a int, b int) int {
+    return f(a, b)
+}
+
+func main() {
+    var p = P{X: 1, Y: 2}      // a literal through the alias
+    var q Point = p            // the same type: no conversion
+    println(q.Sum(), p.Sum())
+
+    var add Op = (a int, b int) => a + b
+    println(apply(add, 3, 4))
+
+    var xs Ints = [1, 2, 3]
+    var ys []int = xs
+    println(len(ys))
+}
+// Output:
+// 3 3
+// 7
+// 3
+```
+
+Attributes (`@json(name: "id")`, `@deprecated("use Save")`) attach
+metadata to declarations. An attribute is a struct marked `@attribute`,
+so the usual visibility rule applies: to use one from another namespace,
+give its type a capital letter. Keywords are allowed as attribute argument
+and field names, for example `@Conf(enum: "a,b")`.
 
 ## Interfaces
 
