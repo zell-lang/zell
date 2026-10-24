@@ -36,6 +36,8 @@ fn reports_failures_and_summary() {
     for want in [
         "    about to fail\n    got 4, want 5\n    got \"a\", want \"b\"\n--- FAIL: TestFailing (",
         "    stop here\n--- FAIL: TestFatalStops (",
+        // A panic fails only its test, and the report has its message.
+        "panic: runtime error: index out of range [3] with length 0\n",
         "    (exit status 2)\n--- FAIL: TestPanics (",
         "    expected a panic, but the function returned\n--- FAIL: TestPanicsMissing (",
         "FAIL\nFAIL\t6 passed, 4 failed, 1 skipped (",
