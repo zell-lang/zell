@@ -92,15 +92,53 @@ CI releases `YYYY.M.<build>`), examples, benchmarks, performance wave 1–2
 decisions of 2026-10-23 (comma-ok map lookup, leading-dot continuation,
 type aliases, contextual `in`, keywords as attribute/field names), showcase
 repos in `zell-lang` (`zconf`, `example-web-service`, `example-cli`,
-`example-worker`; `docs/EXAMPLES.md`).
+`example-worker`; `docs/EXAMPLES.md`), documentation site
+(`zell-lang/docs`, Docusaurus, synced from this repo by `scripts/sync.mjs`;
+`zell doc --site` stays the offline/API source), task-contained panics with
+`file:line` backtraces on every OS (DESIGN.md "Паника", ABI.md 8.1/8.2),
+release `smoke` job per host in `release.yml`.
+
+**Reflection, state as of 2026-10-24** (`DESIGN.md` "Рефлексия",
+`docs/REFLECTION_PLAN.md`): compile-time `Fields<T>()`/`TypeOf<T>()`/
+`Attribute<A>()` folded per field; `reflect.TypesWith<A>()` — every type of
+the whole program with attribute `A` (package path, file, declaration
+order; one entry per used generic instantiation; tables only for the
+marked types; callable from library code); `reflect.Error(msg)` — the
+library-level `static_assert`, raised per instantiation when reachable
+after static `if`; `TypeInfo.Package`, `MethodInfo.Params []*ParamInfo`
+(name, index, type, attributes); methods called with `Call<F>()` (typed,
+fixed `F`) or `Invoke(recv, []any)`. Not done: static unrolling of
+`for t in TypesWith<A>()` / `for m in t.Methods` / `for p in m.Params`, and
+a descriptor's type as a type argument (`json.Parse<p.Type>`), which
+together give typed binding without boxing (what the removed `sema/web.rs`
+did); constructor injection via `ParamInfo` of `New`. The in-tree `web`
+framework was removed 2026-10-24 (sources at the git tag `web-in-tree`);
+it returns as the package `zell-lang/web` built on `TypesWith` + `Invoke`,
+and its hot paths decide the unrolling/`p.Type` spec.
 
 Next, in this order:
 
-1. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md` items 20
-   (generic/local type aliases) and 25 (panic backtraces with `file:line` from
-   a compact pc table, usable stripped). Simplify the showcase repos to one
-   package now that `zell test` builds dependencies.
-2. **Security tooling** — `zell audit` (OSV-format advisory DB
+1. **Async performance** — the one root of every remaining async loss
+   (`benchmarks/README.md` "Performance wave 2": await_chain 10.9x Go,
+   mutex 2.6x, fanout_fanin 2.3x, channels/select 1.7x, async_io 1.5x,
+   WebSocket 15.7 vs 11.1 us/msg): a task is an allocation plus a trip
+   through the scheduler on every `await` and wake-up, while Go switches
+   stacks directly. Work items: thin await (no task allocation, resume
+   along the chain without the run queue), direct hand-off on channels and
+   mutexes (Go `sudog` style, spin before parking), poller→worker hand-off
+   without the intermediate queue (WebSocket fix 4, async_io), a task pool
+   for `spawn_tasks`/`fanout_fanin`, and cheaper local pinning in async
+   functions (the panic-unwind support pins owning locals: +13% on
+   await_chain — pin only what a suspend point can see). Two Opus runs;
+   correctness first (`make -C runtime tsan`, `spec/async*`, `panics`,
+   `--leak-check`), numbers in `benchmarks/README.md`, rules in
+   `agents/prompts/perf-wave-3.md`.
+2. **`zell-lang/web` package** — port from `web-in-tree` onto
+   `TypesWith<controller>()` + `ParamInfo` + `Invoke`; `example-web-service`
+   builds with it on the current toolchain with identical output; then the
+   unrolling/`p.Type` spec from its profile. Also an HTTP soak test on
+   `net.http` (`scripts/soak-http.sh` went with `web_api`).
+3. **Security tooling** — `zell audit` (OSV-format advisory DB
    `zell-lang/advisory-db`, check `zell.lock` and the toolchain version,
    `--deny` for CI), capability analysis of dependencies written into the
    lock (`zell tree --caps`), security lints in `sema/lint.rs` (SQL by string
@@ -108,22 +146,24 @@ Next, in this order:
    secrets, path traversal, weak hashes), fuzz targets for every parser
    (HTTP/1.1, HTTP/2, TLS records, YAML/TOML/XML, zstd/brotli, regex) like
    `make -C runtime fuzz-json`, release signing (minisign/sigstore).
-3. **LSP pass 3** — `docs/LSP_CONFORMANCE.md` missing items: inline
+4. **LSP pass 3** — `docs/LSP_CONFORMANCE.md` missing items: inline
    function, implement interface, change signature, completion quality
    (textEdit/sortText/snippets), cancellation off the main thread, dynamic
    registration + `workspace/configuration`, incremental analysis per
    namespace; go-to-definition on type aliases.
-4. **Memory and performance** — perf-wave-3 open items: task-per-await
-   structural cost (await_chain 10.9x Go, WebSocket fix 4 poller→worker
-   hand-off), P-256 verify, LTO by default, `--static` = musl/scratch
-   images, package proxy public instance, `zell tool counters`
-   (dotnet-counters analogue over `diag`).
-5. **Language and framework** (`DESIGN.md` stages, `docs/REFLECTION_PLAN.md`,
-   `docs/FRAMEWORK.md`): ownership elision, cycle-collector gaps (maps in
-   threaded processes, tasks, errors), generics completion (block `try` is done),
-   `reflect.TypesWith<A>()` then a new `zell-lang/web` package (the
-   in-tree `web` was removed 2026-10-24, sources at the git tag
-   `web-in-tree`), expression trees
-   then `data` → `zell-lang/data`, run-time reflection, stdlib
-   (`collections`, `net`, `encoding.json` write API — `Value.Set`),
-   platforms (`docs/PLATFORMS.md`, Apple signing).
+5. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md`: generic/local type
+   aliases (20), async `Drop` (27, when a `Close() Task` appears), panics:
+   unwinding of synchronous frames below a task and inlined frames in
+   backtraces (28), `Drop` for `database.sql.DB/Tx`; simplify the showcase
+   repos to one package on the current syntax.
+6. **Other performance and platforms** — crypto asymmetry (Ed25519/P-256
+   sign 6–8x, ChaCha, Argon2), error traces in the general case (5.8x),
+   iface/closure receiver borrowing (1.3x), JSON `Value` lookups (3.3x),
+   LTO by default, `--static` = musl/scratch images, public package proxy +
+   index + docs site plan (`docs/PACKAGES.md` step 5), `zell tool counters`,
+   Apple signing (`docs/PLATFORMS.md`).
+7. **Language and framework** (`DESIGN.md` stages, `docs/FRAMEWORK.md`):
+   ownership elision, cycle-collector gaps (maps in threaded processes,
+   tasks, errors), generics completion, expression trees then `data` →
+   `zell-lang/data`, run-time reflection, stdlib (`collections`, `net`,
+   `encoding.json` write API — `Value.Set`).
