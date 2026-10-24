@@ -438,8 +438,10 @@ jobs:
         run: |
           fail=0
           for e in hello structs enums errors defer slices_maps strings stdlib_strings2 json async stdlib_crypto; do
-            if ! out=$(zell run "examples/$e.zl" 2>&1 | tr -d '\r'); then
-              echo "::error::examples/$e.zl failed:"; printf '%s\n' "$out"; fail=1; continue
+            # stdout only, like compiler/tests/run_examples.rs: compiler warnings
+            # (W0001, L0008) are expected on stderr for some examples
+            if ! out=$(zell run "examples/$e.zl" 2>err.txt | tr -d '\r'); then
+              echo "::error::examples/$e.zl failed:"; printf '%s\n' "$out"; cat err.txt; fail=1; continue
             fi
             if [ "$out" != "$(cat "examples/$e.out")" ]; then
               echo "::error::examples/$e.zl output differs from $e.out"; diff <(printf '%s\n' "$out") "examples/$e.out" || true; fail=1
