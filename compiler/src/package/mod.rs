@@ -56,7 +56,7 @@ pub struct Checked {
 
 /// Display path of `p`: relative to the current directory when inside it.
 pub(crate) fn display_path(p: &Path) -> String {
-    let cwd = std::env::current_dir().ok().and_then(|c| c.canonicalize().ok());
+    let cwd = std::env::current_dir().ok().and_then(|c| crate::paths::canonical(&c).ok());
     match cwd.as_ref().and_then(|c| p.strip_prefix(c).ok()) {
         Some(r) => r.display().to_string(),
         None => p.display().to_string(),
@@ -126,8 +126,8 @@ pub fn check_with(project: &Project, target: PkgId, dev: bool, diags: &mut Diagn
     let mut program = crate::driver::check_with_policy(&files, diags, &policy, &env, checked_ns, &lint_files);
     let t = &project.packages[target];
     if let (Some(prog), Some(entry), true) = (&program, t.entry(), generated.is_empty()) {
-        let entry = entry.canonicalize().unwrap_or(entry);
-        let entry_idx = files.iter().position(|f| Path::new(&f.path).canonicalize().ok().as_ref() == Some(&entry));
+        let entry = crate::paths::canonical(&entry).unwrap_or(entry);
+        let entry_idx = files.iter().position(|f| crate::paths::canonical(&f.path).ok().as_ref() == Some(&entry));
         let main_file = prog.entry.map(|f| prog.funcs[f.0 as usize].file);
         if main_file.is_none() || main_file != entry_idx {
             let found = main_file.map(|i| format!(" (found one in {}, package `{}`)", files[i].path, scopes[file_pkg[i]].0)).unwrap_or_default();

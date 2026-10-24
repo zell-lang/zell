@@ -17,6 +17,7 @@ pub mod lexer;
 pub mod package;
 pub mod parcodegen;
 pub mod parser;
+pub mod paths;
 pub mod sema;
 pub mod session;
 pub mod span;

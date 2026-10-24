@@ -48,7 +48,7 @@ pub fn find_std_dir(env: Option<PathBuf>, exe: Option<PathBuf>) -> Option<PathBu
         }
     }
     let repo = Path::new(REPO_STD);
-    repo.is_dir().then(|| repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf()))
+    repo.is_dir().then(|| crate::paths::canonical(&repo).unwrap_or_else(|_| repo.to_path_buf()))
 }
 
 /// `net.http` + `http.zl` -> `net/http/http.zl`.

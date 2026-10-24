@@ -550,7 +550,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let mut fps = Vec::new();
         for src in &self.prog.sources {
             let pth = std::path::Path::new(&src.path);
-            let abs = std::fs::canonicalize(pth).unwrap_or_else(|_| std::env::current_dir().map(|d| d.join(pth)).unwrap_or_else(|_| pth.to_path_buf()));
+            let abs = crate::paths::canonical_or_absolute(pth);
             fps.push(self.str_lit(&abs.to_string_lossy()));
         }
         let files = self.agent_array(p.const_array(&fps), "zell.dbg.files", true);

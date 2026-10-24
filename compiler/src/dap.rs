@@ -386,7 +386,7 @@ impl Repl {
                 return;
             }
         };
-        let path = std::fs::canonicalize(&path).map(|p| p.to_string_lossy().to_string()).unwrap_or(path);
+        let path = crate::paths::canonical(&path).map(|p| p.to_string_lossy().to_string()).unwrap_or(path);
         match self.bps.iter_mut().find(|(p, _)| *p == path) {
             Some((_, l)) => l.push((line, cond, log.to_string())),
             None => self.bps.push((path.clone(), vec![(line, cond, log.to_string())])),

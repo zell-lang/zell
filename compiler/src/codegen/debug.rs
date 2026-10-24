@@ -108,7 +108,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let producer = concat!("zell ", env!("CARGO_PKG_VERSION"));
         for src in &self.prog.sources {
             let p = std::path::Path::new(&src.path);
-            let abs = std::fs::canonicalize(p).unwrap_or_else(|_| std::env::current_dir().map(|d| d.join(p)).unwrap_or_else(|_| p.to_path_buf()));
+            let abs = crate::paths::canonical_or_absolute(p);
             let name = abs.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| src.path.clone());
             let dir = abs.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
             unsafe {

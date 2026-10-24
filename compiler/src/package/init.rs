@@ -15,7 +15,7 @@ pub fn init(dir: &Path, name: Option<&str>, format: Format, lib: bool) -> Result
     let name = match name {
         Some(n) => n.to_string(),
         None => {
-            let d = dir.canonicalize().map_err(|e| e.to_string())?;
+            let d = crate::paths::canonical(&dir).map_err(|e| e.to_string())?;
             d.file_name().map(|s| s.to_string_lossy().to_lowercase().replace(['_', ' ', '.'], "-")).unwrap_or_else(|| "app".into())
         }
     };

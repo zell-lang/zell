@@ -402,7 +402,7 @@ fn formatter_script(which: &str) -> PathBuf {
     for r in roots {
         let p = r.join(rel);
         if p.is_file() {
-            return p.canonicalize().unwrap_or(p);
+            return zell::paths::canonical(&p).unwrap_or(p);
         }
     }
     let dir = std::env::temp_dir().join(format!("zell-tools-{}", env!("CARGO_PKG_VERSION")));

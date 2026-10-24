@@ -175,7 +175,7 @@ pub fn list(_args: &[String]) -> Result<String, String> {
         let t = Target::parse(&triple)?;
         let (how, what) = match installed(&t) {
             Some(p) => {
-                let bundled = bundled_targets_dir().is_some_and(|b| p.starts_with(b.canonicalize().unwrap_or(b)));
+                let bundled = bundled_targets_dir().is_some_and(|b| p.starts_with(crate::paths::canonical(&b).unwrap_or(b)));
                 let how = match crate::crosslink::bundle_of(&p) {
                     Some(_) if bundled => "bundled",
                     Some(_) => "lld",

@@ -76,7 +76,7 @@ pub fn find_runtime(t: &Target) -> Result<PathBuf, String> {
     let cands = runtime_candidates(t);
     for c in &cands {
         if c.is_file() {
-            return Ok(c.canonicalize().unwrap_or(c.clone()));
+            return Ok(crate::paths::canonical(&c).unwrap_or(c.clone()));
         }
     }
     let hint = if t.os == "windows" { "make -C runtime CROSS=x86_64-w64-mingw32".to_string() } else { format!("make -C runtime CROSS={} (needs the target's C headers)", t.triple) };

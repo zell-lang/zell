@@ -376,7 +376,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let manifest = Manifest::parse(&text, format).map_err(|e| format!("{}: {}", path.display(), e.trim_end()))?;
     manifest.validate().map_err(|e| format!("{}: {e}", path.display()))?;
-    let path = path.canonicalize().map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let path = crate::paths::canonical(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     Ok(LoadedManifest { path, format, manifest })
 }
 

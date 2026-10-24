@@ -220,7 +220,7 @@ pub fn find_runtime() -> Result<PathBuf, String> {
     cands.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/libzell_rt.a"));
     for c in &cands {
         if c.is_file() {
-            return Ok(c.canonicalize().unwrap_or(c.clone()));
+            return Ok(crate::paths::canonical(&c).unwrap_or(c.clone()));
         }
     }
     Err(format!(

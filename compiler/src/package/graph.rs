@@ -81,8 +81,8 @@ impl PackageNode {
             if !e.is_file() {
                 return Err(format!("entry file {} of package `{}` does not exist", e.display(), self.name));
             }
-            let e = e.canonicalize().unwrap_or(e);
-            if !files.iter().any(|f| f.canonicalize().ok().as_ref() == Some(&e)) {
+            let e = crate::paths::canonical(&e).unwrap_or(e);
+            if !files.iter().any(|f| crate::paths::canonical(&f).ok().as_ref() == Some(&e)) {
                 files.push(e);
                 files.sort();
             }
@@ -113,7 +113,7 @@ impl Project {
     /// manifest, or an enclosing workspace that lists it as a member.
     /// `Ok(None)` if there is no manifest up to the filesystem root.
     pub fn discover(start: &Path) -> Result<Option<Project>, String> {
-        let start = start.canonicalize().map_err(|e| format!("cannot read {}: {e}", start.display()))?;
+        let start = crate::paths::canonical(&start).map_err(|e| format!("cannot read {}: {e}", start.display()))?;
         let Some(nearest) = manifest::find_upwards(&start)? else { return Ok(None) };
         let nearest = manifest::load(&nearest)?;
         let mut root = nearest.clone();
@@ -328,7 +328,7 @@ pub fn member_dirs(lm: &LoadedManifest) -> Result<Vec<PathBuf>, String> {
                 }
                 return Err(format!("{}: workspace member `{m}` has no manifest", lm.path.display()));
             }
-            let d = d.canonicalize().map_err(|e| format!("cannot read {}: {e}", d.display()))?;
+            let d = crate::paths::canonical(&d).map_err(|e| format!("cannot read {}: {e}", d.display()))?;
             if !out.contains(&d) {
                 out.push(d);
             }
@@ -374,7 +374,7 @@ struct Pending {
 impl Builder {
     /// Adds the package in `dir` and, recursively, its dependencies.
     fn visit(&mut self, dir: &Path, member: bool) -> Result<PkgId, String> {
-        let dir = dir.canonicalize().map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        let dir = crate::paths::canonical(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         if let Some(&id) = self.by_dir.get(&dir) {
             if let Some(pos) = self.stack.iter().position(|&s| s == id) {
                 let mut chain: Vec<&str> = self.stack[pos..].iter().map(|&s| self.packages[s].name.as_str()).collect();
@@ -489,7 +489,7 @@ impl Builder {
         let mut by_module: HashMap<String, PkgId> = HashMap::new();
         for s in &selected {
             let dir = s.dir.clone().unwrap();
-            let dir = dir.canonicalize().map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+            let dir = crate::paths::canonical(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
             let lm = manifest::load_dir(&dir).map_err(|e| format!("{}@{}: {e}", s.module, s.version))?;
             let pkg = lm.manifest.package.clone().ok_or_else(|| format!("{}@{}: the manifest has no [package] section", s.module, s.version))?;
             let id = self.packages.len();

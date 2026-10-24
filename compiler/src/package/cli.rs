@@ -54,7 +54,7 @@ fn clean_deps(project: &Project) -> usize {
                 continue;
             }
             if e.file_name().to_string_lossy().contains('@') {
-                let canon = p.canonicalize().unwrap_or(p.clone());
+                let canon = crate::paths::canonical(&p).unwrap_or(p.clone());
                 if !keep.contains(&canon) && std::fs::remove_dir_all(&p).is_ok() {
                     *removed += 1;
                 }
@@ -245,7 +245,7 @@ pub fn vendor(args: &[String]) -> Result<(), String> {
         Some(p) => p.clone(),
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
-    if let Some(m) = super::manifest::find_upwards(&start.canonicalize().map_err(|e| e.to_string())?)? {
+    if let Some(m) = super::manifest::find_upwards(&crate::paths::canonical(&start).map_err(|e| e.to_string())?)? {
         let _ = std::fs::remove_dir_all(m.parent().unwrap().join("vendor"));
     }
     resolve::set_options(Options { offline: f.offline, update: Update::None });

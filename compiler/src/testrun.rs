@@ -87,8 +87,8 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let std_mode = zell::sema::stdfs::std_dir().is_some_and(|d| {
-        let d = d.canonicalize().unwrap_or(d);
-        root.canonicalize().is_ok_and(|r| r.starts_with(&d))
+        let d = zell::paths::canonical(&d).unwrap_or(d);
+        zell::paths::canonical(&root).is_ok_and(|r| r.starts_with(&d))
     });
     let mut opts = match zell::build::parse_args(&build_args) {
         Ok((o, _)) => o,
