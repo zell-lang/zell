@@ -118,10 +118,29 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// The exit block: deferred calls, release of locals, return.
     fn emit_exit(&mut self) -> R<()> {
+        let open = self.fs().open_defers.clone();
         self.run_defers()?;
         self.release_locals();
         if self.fs().coro.is_some() {
-            return self.coro_return();
+            self.coro_return()?;
+            // The unwind path of a panic (ABI.md 8.1): the same defers,
+            // each under its armed flag (cleared when it runs).
+            let unwind = self.fs().coro.unwrap().unwind;
+            self.b.position_at_end(unwind);
+            let f = self.fs().hir.expect("coroutine without a body");
+            let owns = f.locals.iter().any(|l| self.has_dtor(l.ty) || self.needs_rc(l.ty));
+            // The destroy path must see the frame as it is now, not as of
+            // the last suspension: the flags, the defer array and the locals
+            // stay in memory (escaped at entry).
+            let full = !open.is_empty() || self.fs().defers.is_some() || owns;
+            self.coro_escape_state(&open, full);
+            if full {
+                self.fs_mut().open_defers = open;
+                self.run_defers()?;
+                self.release_locals();
+            }
+            self.coro_unwind_exit();
+            return Ok(());
         }
         match self.fs().ret_slot {
             Some((p, t)) => {
@@ -255,6 +274,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let a = self.b.build_load(self.ctx.bool_type(), *armed, "armed").unwrap().into_int_value();
             self.b.build_conditional_branch(a, run, next).unwrap();
             self.b.position_at_end(run);
+            // Disarmed first: a panic inside it must not run it again.
+            self.b.build_store(*armed, self.ctx.bool_type().const_zero()).unwrap();
             let d = self.depth();
             self.dbg_span(call.span);
             self.expr_discard(call)?;

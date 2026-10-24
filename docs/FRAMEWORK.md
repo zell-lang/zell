@@ -308,7 +308,12 @@ async func main() {
   первым), `UseHttp(mw)` — middleware `net.http` вокруг всего
   приложения. Встроенные: `UseLogging` (одно событие `log` на запрос:
   `HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed}
-  ms` + `Route`), `UseRecover`, `UseCors(http.CORSOptions)`, `UseGzip`,
+  ms` + `Route`), `UseRecover` (ошибка обработчика → Problem Details;
+  остаток конвейера идёт в отдельной задаче, поэтому паника обработчика
+  даёт 500 с `detail` `internal error`, сообщение в лог уровня Error с
+  трассой в свойстве `PanicTrace`, и сервер обслуживает следующий запрос;
+  без `UseRecover` паника завершает только задачу запроса, DESIGN.md
+  «Паника»), `UseCors(http.CORSOptions)`, `UseGzip`,
   `UseStaticFiles(prefix, dir)`, `UseRateLimit` (token bucket на IP, 429 +
   `Retry-After`), `UseRequestId` (заголовок, `ctx.RequestId`, свойство лога
   `RequestId`), `UseTracing` (span `diag` вида Server `HTTP GET

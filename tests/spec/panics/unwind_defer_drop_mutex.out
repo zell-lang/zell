@@ -1,0 +1,9 @@
+deferred 2
+deferred 1
+drop holder
+holder: panic: runtime error: index out of range [9] with length 3 drops = 1
+other got the mutex
+early deferred
+drop early
+early: panic: early panic drops = 2
+main goes on, drops = 2

@@ -82,6 +82,8 @@ pub const DOCS: &[(&str, &str, &str)] = &[
     ("errors.Unwrap", "err", "Unwrap returns the error err wraps, or nil."),
     ("errors.Is", "err, target", "Is reports whether err or any error it wraps is target."),
     ("errors.Trace", "err", "Trace returns the return trace recorded while err propagated (empty with --no-error-trace)."),
+    ("task.PanicMessage", "err", "PanicMessage returns the message of the task panic in err's chain (\"\" if there is none)."),
+    ("task.PanicTrace", "err", "PanicTrace returns the backtrace of the task panic in err's chain, one frame per line (\"\" if there is none)."),
     // task
     ("task.Delay", "ms", "Delay returns a task that completes after ms milliseconds."),
     ("task.Yield", "", "Yield lets other ready tasks run before the current one continues."),
@@ -315,6 +317,7 @@ pub const CONST_DOCS: &[(&str, &str)] = &[
     ("math.Min*", "Smallest value of the integer type named by the suffix."),
     ("fs.ErrNotFound", "ErrNotFound is wrapped by every error about a missing file or directory (`errors.Is(err, fs.ErrNotFound)`)."),
     ("task.ErrCancelled", "ErrCancelled is returned by a cancelled wait that has a result (`Recv`, network I/O)."),
+    ("task.ErrPanic", "ErrPanic is in the chain of the error a panicked task yields to the awaiter of its `Task<T!>` (`errors.Is(err, task.ErrPanic)`); the error's message is `panic: ` plus the panic message."),
     ("net.Err*", "Sentinel network error; every net error whose cause is of this kind wraps it (`errors.Is`)."),
     ("os.Name", "Name is the target operating system (`linux`, `darwin`, `windows`)."),
     ("os.Arch", "Arch is the target architecture (`x86_64`, `aarch64`)."),

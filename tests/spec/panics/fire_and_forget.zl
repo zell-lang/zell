@@ -1,0 +1,35 @@
+// test: a task nobody awaits (task.Go) that panics prints the panic to stderr and ends alone; the process goes on, and a WaitGroup sees the task as done through its defer
+// status: passing
+// run-flags: --leak-check
+// stderr: panic: worker 2 failed again
+namespace spec.panics.fire_and_forget
+
+import io
+
+async func worker(n int, wg *task.WaitGroup, done *int) {
+    defer wg.Done()
+    await task.Delay(n * 5)
+    if n == 2 {
+        panic("worker 2 failed")
+    }
+    *done += 1
+}
+
+async func main() {
+    var wg = new task.WaitGroup{}
+    var done = new int
+    for n in [1, 2, 3] {
+        wg.Add(1)
+        task.Go(func() Task<void> {
+            return worker(n, wg, done)
+        })
+    }
+    await wg.Wait()
+    println("all workers ended, completed:", *done)
+    // Panics before its first suspension, inside the task Go made.
+    task.Go(async func() {
+        panic("worker 2 failed again")
+    })
+    await task.Delay(20)
+    println("main still runs")
+}

@@ -104,9 +104,17 @@ async func logRequest(l log.Logger, c *Context, next *Next) void! {
 }
 
 async func recoverRequest(c *Context, next *Next) void! {
-    try await next.Run(c) catch err {
+    try await runContained(c, next) catch err {
         writeError(c, err)
     }
+}
+
+// The rest of the pipeline in a task of its own (it suspends first): a
+// panic in a handler ends only that task and comes back to recoverRequest
+// as an error wrapping task.ErrPanic (DESIGN.md "Паника").
+async func runContained(c *Context, next *Next) void! {
+    await task.Yield()
+    await next.Run(c)?
 }
 
 async func staticFiles(prefix string, dir string, c *Context, next *Next) void! {

@@ -1135,7 +1135,8 @@ func writeError(c *Context, err error) {
     // hosts): outside development the client gets a generic detail and
     // the message goes only to the log below.
     var detail = "internal error"
-    if known || dev {
+    var panicked = errors.Is(err, task.ErrPanic)
+    if (known || dev) && !panicked {
         detail = err.Message()
     }
     var p = problemFor(status, detail)
@@ -1153,7 +1154,11 @@ func writeError(c *Context, err error) {
         if c.App != nil {
             l = c.App.logger()
         }
-        l.Error(err, "web: {RequestMethod} {RequestPath} failed: {ErrorMessage}", c.Request.Method, c.Request.Path, err.Message())
+        if panicked {
+            l.ForContext("PanicTrace", task.PanicTrace(err)).Error("web: {RequestMethod} {RequestPath} panicked: {PanicMessage}", c.Request.Method, c.Request.Path, task.PanicMessage(err))
+        } else {
+            l.Error(err, "web: {RequestMethod} {RequestPath} failed: {ErrorMessage}", c.Request.Method, c.Request.Path, err.Message())
+        }
     }
 }
 

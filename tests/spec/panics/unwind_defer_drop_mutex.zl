@@ -1,0 +1,71 @@
+// test: unwinding a panicking task runs its pending defers (a mutex is unlocked by one, so another task acquires it) and drops its live values; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.unwind_defer_drop_mutex
+
+import io
+
+var drops = 0
+
+struct Guard {
+    name string
+
+    func Drop() {
+        drops += 1
+        println("drop", this.name)
+    }
+}
+
+var mu = new task.Mutex{}
+
+async func holder() int! {
+    await mu.Lock()
+    defer mu.Unlock()
+    var g = Guard{name: "holder"}
+    await task.Yield()
+    defer println("deferred 1")
+    defer println("deferred 2")
+    var xs = [1, 2, 3]
+    var i = 3 + len(g.name)
+    println(xs[i])
+    return 0
+}
+
+// Panics before its first suspension: its frame is unwound too.
+async func early() int! {
+    var g = Guard{name: "early"}
+    defer println("early deferred")
+    if len(g.name) > 0 {
+        panic("early panic")
+    }
+    await task.Yield()
+    return 1
+}
+
+// Suspends first, so it has a task of its own, then calls early().
+async func own() int! {
+    await task.Yield()
+    return await early()?
+}
+
+async func other() string {
+    await mu.Lock()
+    defer mu.Unlock()
+    return "other got the mutex"
+}
+
+async func report(name string, t Task<int!>) {
+    var v = try await t catch err {
+        println(name + ":", err.Message(), "drops =", drops)
+        return
+    }
+    println(name, "=", v)
+}
+
+async func main() {
+    await report("holder", holder())
+    println(await other())
+    // early() runs in the task of whoever calls it until it suspends: run it in its own.
+    await report("early", own())
+    println("main goes on, drops =", drops)
+}

@@ -237,6 +237,10 @@ ZELL_PLAT_HIDDEN bool zell__plat_random_bytes(void *buf, size_t n);
 /* Writes a best-effort backtrace of the calling thread to fd, skipping the
  * innermost `skip` frames. */
 ZELL_PLAT_HIDDEN void zell__plat_backtrace(int fd, int skip);
+/* The same frames as text into buf (NUL-terminated, truncated to cap);
+ * only where ZELL_PLAT_HAS_PANIC_CAPTURE (a contained task panic keeps its
+ * trace, ABI.md 8). */
+ZELL_PLAT_HIDDEN void zell__plat_backtrace_buf(char *buf, size_t cap, int skip);
 
 /* ---- CPU profiling (posix.c; diag, runtime/src/profile.c) ---------
  * A process-wide CPU-time timer (SIGPROF on POSIX) calls `fn` from the

@@ -536,6 +536,21 @@ bool  zell_task_is_done(const zell_task *task);
 bool  zell_task_add_continuation(zell_task *task, zell_resume_fn fn, void *frame);
 void *zell_task_result(const zell_task *task);  /* [borrowed] slot; panics if pending */
 void *zell_task_await(zell_task *task);         /* blocking; [borrowed] slot */
+/* Task panics (ABI.md 8.1, 10.3). A panicked task is done with a zero slot:
+ * zell_task_result / zell_task_await re-panic in the reader ("panic in
+ * awaited task: ..."); the _err forms (a Task<T!>) store the task.Panic
+ * error at slot + err_off instead (once) and return the slot. */
+void *zell_task_result_err(zell_task *task, int64_t err_off);
+void *zell_task_await_err(zell_task *task, int64_t err_off);
+/* The entry's await of an async main: a panic ends the process (exit 2). */
+void *zell_task_await_main(zell_task *task);
+/* The destroy path of an unwound coroutine frame: completes `own` as
+ * panicked and drops the frame's reference, or (own NULL, never
+ * suspended) restores the caller's context ctx0 like zell_coro_leave. */
+void zell_coro_unwound(zell_task *own, zell_object *ctx0);
+/* The running coroutine frames of this thread, innermost first: nodes
+ * { prev, hdl } in the frames (hdl NULL = no destroy). */
+extern _Thread_local void *zell_coro_chain;
 zell_task *zell_task_delay(int64_t ms);
 zell_task *zell_task_all(zell_task *const *tasks, int64_t n);
 zell_task *zell_task_any(zell_task *const *tasks, int64_t n); /* result: int64_t index */
@@ -588,6 +603,9 @@ zell_task *zell_task_new_scope(void);                 /* cancellation node under
 zell_task *zell_task_enter_scope(zell_task *scope);  /* returns the previous current (+1) */
 void zell_task_leave_scope(zell_task *prev);          /* borrowed */
 zell_error *zell_task_err_cancelled(void);            /* task.ErrCancelled, immortal */
+zell_error *zell_task_err_panic(void);                /* task.ErrPanic, immortal */
+zell_string *zell_task_panic_message(const zell_error *err);  /* +1, "" if not a panic */
+zell_string *zell_task_panic_trace(const zell_error *err);    /* +1, "" if not a panic */
 int64_t zell_task_next_key(void);
 
 /* task primitives used by the Zell-source parts of task. */

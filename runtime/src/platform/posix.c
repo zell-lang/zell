@@ -279,8 +279,27 @@ bool zell__plat_random_bytes(void *buf, size_t n) {
  * "module(function+0xoff)[0xaddr]", named from the executable's own symbol
  * table (local symbols too, unlike dladdr) where possible. */
 static bool bt_symbolize(uintptr_t pc, char *buf, size_t cap, uintptr_t *start);
+static int bt_format(uintptr_t pc, char *line, size_t cap);
 static void bt_frame(int fd, uintptr_t pc) {
-    char sym[256], line[700];
+    char line[700];
+    int k = bt_format(pc, line, sizeof line);
+    if (k > 0) zell__plat_write_all(fd, line, k < (int)sizeof line ? k : (int)sizeof line - 1);
+}
+
+/* Appends one frame line to buf (len/cap), truncating silently. */
+static void bt_frame_buf(char *buf, size_t cap, size_t *len, uintptr_t pc) {
+    char line[700];
+    int k = bt_format(pc, line, sizeof line);
+    if (k <= 0) return;
+    if (k >= (int)sizeof line) k = (int)sizeof line - 1;
+    if (*len + (size_t)k >= cap) return;
+    memcpy(buf + *len, line, (size_t)k);
+    *len += (size_t)k;
+    buf[*len] = 0;
+}
+
+static int bt_format(uintptr_t pc, char *line, size_t cap) {
+    char sym[256];
     uintptr_t start = 0;
     const char *mod = "";
     Dl_info di;
@@ -288,12 +307,12 @@ static void bt_frame(int fd, uintptr_t pc) {
     int k;
     /* a return address points after the call: look up pc - 1 */
     if (!getenv("ZELL_NO_SYMBOLS") && bt_symbolize(pc - 1, sym, sizeof sym, &start) && start <= pc)
-        k = snprintf(line, sizeof line, "%s(%s+0x%lx)[0x%lx]\n", mod, sym, (unsigned long)(pc - start), (unsigned long)pc);
+        k = snprintf(line, cap, "%s(%s+0x%lx)[0x%lx]\n", mod, sym, (unsigned long)(pc - start), (unsigned long)pc);
     else if (di.dli_fbase && *mod)
-        k = snprintf(line, sizeof line, "%s(+0x%lx)[0x%lx]\n", mod, (unsigned long)(pc - (uintptr_t)di.dli_fbase), (unsigned long)pc);
+        k = snprintf(line, cap, "%s(+0x%lx)[0x%lx]\n", mod, (unsigned long)(pc - (uintptr_t)di.dli_fbase), (unsigned long)pc);
     else
-        k = snprintf(line, sizeof line, "[0x%lx]\n", (unsigned long)pc);
-    if (k > 0) zell__plat_write_all(fd, line, k < (int)sizeof line ? k : (int)sizeof line - 1);
+        k = snprintf(line, cap, "[0x%lx]\n", (unsigned long)pc);
+    return k;
 }
 
 #if defined(ZELL_HAVE_EXECINFO)
@@ -301,6 +320,14 @@ void zell__plat_backtrace(int fd, int skip) {
     void *frames[64];
     int n = backtrace(frames, 64);
     for (int i = skip; i < n; i++) bt_frame(fd, (uintptr_t)frames[i]);
+}
+
+void zell__plat_backtrace_buf(char *buf, size_t cap, int skip) {
+    void *frames[64];
+    size_t len = 0;
+    if (cap) buf[0] = 0;
+    int n = backtrace(frames, 64);
+    for (int i = skip; i < n; i++) bt_frame_buf(buf, cap, &len, (uintptr_t)frames[i]);
 }
 #else
 /* No <execinfo.h> (musl): walk the frame-pointer chain (the runtime and
@@ -312,6 +339,19 @@ void zell__plat_backtrace(int fd, int skip) {
         if (!ret) break;
         if (i >= skip) bt_frame(fd, ret);
         if (next <= fp) break;  /* the chain must go up the stack */
+        fp = next;
+    }
+}
+
+void zell__plat_backtrace_buf(char *buf, size_t cap, int skip) {
+    size_t len = 0;
+    if (cap) buf[0] = 0;
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+    for (int i = 0; i < 64 && fp && !(fp & (sizeof(void *) - 1)); i++) {
+        uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
+        if (!ret) break;
+        if (i >= skip) bt_frame_buf(buf, cap, &len, ret);
+        if (next <= fp) break;
         fp = next;
     }
 }

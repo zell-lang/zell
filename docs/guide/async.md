@@ -276,6 +276,48 @@ async func main() {
 // ticks: 3
 ```
 
+## When a task panics
+
+A panic ends only the task it happens in. Its pending `defer`s run
+(a `defer m.Unlock()` releases the mutex), and the owner of the task
+learns about it: awaiting a `Task<T!>` gives an error wrapping
+`task.ErrPanic`, awaiting a `Task<T>` panics again in the awaiter, and a
+task nobody awaits prints the panic to stderr. An async function runs in
+its caller's task until it first suspends, so a panic before that point
+belongs to the caller.
+
+```zell
+namespace guide.async.panics
+
+import io
+
+async func risky(n int) int! {
+    await task.Yield()
+    defer println("cleanup runs")
+    var xs = [1, 2, 3]
+    return xs[n]
+}
+
+async func main() {
+    var v = try await risky(1) catch err {
+        return
+    }
+    println("got", v)
+    var w = try await risky(7) catch err {
+        println("task panicked:", errors.Is(err, task.ErrPanic))
+        println(task.PanicMessage(err))
+        return
+    }
+    println("unreachable", w)
+}
+// Output:
+// cleanup runs
+// got 2
+// cleanup runs
+// task panicked: true
+// runtime error: index out of range [7] with length 3
+```
+
 ## What things cost
 
 Rough costs on a 16-core x86-64 machine, from the async benchmarks

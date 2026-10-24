@@ -1,0 +1,29 @@
+// test: a panic in a Task<int!> ends that task, runs its defers and reaches the awaiter as an error wrapping task.ErrPanic
+// status: passing
+// run-flags: --leak-check
+// A panic in a task whose function is fallible (`Task<int!>`): the task
+// ends, its pending defers run, and the awaiter gets an error in the chain
+// of task.ErrPanic whose message is "panic: " + the panic message.
+namespace spec.panics.fallible_task_panic
+
+import io
+
+async func boom(n int) int! {
+    await task.Yield()
+    defer println("deferred in boom")
+    if n > 0 {
+        panic("boom")
+    }
+    return n
+}
+
+async func main() {
+    var r = try await boom(3) catch err {
+        println("caught:", err.Message())
+        println("is panic:", errors.Is(err, task.ErrPanic))
+        println("message:", task.PanicMessage(err))
+        println("has trace:", len(task.PanicTrace(err)) > 0)
+        return
+    }
+    println("unreachable", r)
+}
