@@ -276,6 +276,35 @@ typedef struct zell__panic_capture {
 } zell__panic_capture;
 ZELL_HIDDEN extern _Thread_local zell__panic_capture *zell__panic_capture_tls;
 
+/* Task panics (ABI.md 8.1): every scheduler job runs under an unwind
+ * point (task.c run_job). A panic in a job with a current task destroys
+ * the coroutine frames on the thread's frame chain (zell_coro_chain, set
+ * up by compiled coroutines), which run their pending defers and complete
+ * their tasks as panicked, then jumps back to the job's start. */
+typedef struct zell__job_unwind {
+    void *jb[5];                       /* __builtin_setjmp buffer */
+    void *chain0;                      /* zell_coro_chain when the job started */
+    struct zell__job_unwind *prev;
+} zell__job_unwind;
+ZELL_HIDDEN extern _Thread_local zell__job_unwind *zell__job_unwind_tls;
+/* Whether the calling thread runs code of a task (task.c t_cur != NULL). */
+ZELL_HIDDEN int zell__task_running(void);
+/* Destroys the frames on the chain down to `stop` (task.c). */
+ZELL_HIDDEN void zell__coro_unwind(void *stop);
+/* The panic being unwound on this thread (borrowed strings), counted as
+ * delivered to a task (panic.c); NULL message when none. */
+ZELL_HIDDEN void zell__panic_current(zell_string **msg, zell_string **trace);
+/* Re-panics with `prefix` + msg and the given trace text (task.c, the
+ * awaiter of a panicked Task<T>). quiet: no debugger stop (the original
+ * site already stopped). */
+ZELL_HIDDEN ZELL_NORETURN void zell__panic_traced(const char *prefix, const zell_string *msg, const zell_string *trace, int quiet);
+/* Prints a panic nobody observes (a fire-and-forget task's): the usual
+ * panic text, and the process goes on. */
+ZELL_HIDDEN void zell__panic_print(const zell_string *msg, const zell_string *trace);
+/* The `error` an awaiter of a panicked Task<T!> receives (task.Panic,
+ * wrapping task.ErrPanic), +1. */
+ZELL_HIDDEN zell_error *zell__panic_error(zell_string *msg, zell_string *trace);
+
 /* Debug agent (debug.c, ABI.md 22): the hook flag, the panic and error
  * hooks, and task.c's view of the per-task debug records. */
 ZELL_HIDDEN extern uint8_t zell_dbg_on;

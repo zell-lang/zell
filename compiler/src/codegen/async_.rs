@@ -112,6 +112,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let ctx0 = self.call_rt_v("zell_task_get_ctx", &[]);
         self.b.build_store(ctx_slot, ctx0).unwrap();
         let res = func.get_last_param().unwrap().into_pointer_value();
+        let begin_end = self.b.get_insert_block().unwrap();
         let cleanup = self.block("coro.cleanup");
         let free = self.block("coro.free");
         let done = self.block("coro.done");
@@ -128,7 +129,34 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let none = self.token_none();
         self.intrinsic("llvm.coro.end", &mut [hdl.as_value_ref(), fls, none]);
         self.b.build_return(None).unwrap();
-        self.fs_mut().coro = Some(Coro { hdl, ret: f.ret, ret_size, ret_ops, task_slot, ctx_slot, res, cleanup, done });
+        let unwind = self.block("coro.unwind");
+        let awaiting = self.entry_alloca(self.ptr_ty().into(), "coro.awaiting", true);
+        // The frame chain (ABI.md 8.1): the node records the frame handle,
+        // or NULL when no frame was allocated (no destroy function to call).
+        let chain = if self.module.get_triple().as_str().to_string_lossy().contains("windows") {
+            None
+        } else {
+            let g = match self.module.get_global("zell_coro_chain") {
+                Some(g) => g,
+                None => {
+                    let g = self.module.add_global(self.ptr_ty(), None, "zell_coro_chain");
+                    g.set_thread_local(true);
+                    g.set_linkage(inkwell::module::Linkage::External);
+                    g
+                }
+            };
+            let node_ty = self.ctx.struct_type(&[self.ptr_ty().into(), self.ptr_ty().into()], false);
+            let node = self.entry_alloca(node_ty.into(), "coro.node", false);
+            self.b.position_at_end(begin_end);
+            let has = self.b.build_is_not_null(memphi.as_basic_value().into_pointer_value(), "").unwrap();
+            let h = self.b.build_select(has, hdl, null, "").unwrap();
+            let hp = self.b.build_struct_gep(node_ty, node, 1, "").unwrap();
+            self.b.build_store(hp, h).unwrap();
+            Some((node, g.as_pointer_value()))
+        };
+        self.fs_mut().coro = Some(Coro { hdl, ret: f.ret, ret_size, ret_ops, task_slot, ctx_slot, res, cleanup, done, unwind, chain, awaiting });
+        self.b.position_at_end(begin_end);
+        self.coro_chain_push();
         self.b.position_at_end(body);
         Ok(())
     }
@@ -137,6 +165,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// body suspended, else hands the result to the caller through `res`.
     pub(crate) fn coro_return(&mut self) -> R<()> {
         let co = self.fs().coro.unwrap();
+        self.coro_chain_pop();
         let (slot, rt) = match self.fs().ret_slot {
             Some((p, t)) => (p, Some(t)),
             None => (self.ptr_ty().const_null(), None),
@@ -180,9 +209,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     /// Waits for task `t`; returns its (borrowed) result slot.
-    fn await_slot(&mut self, t: PointerValue<'ctx>) -> PointerValue<'ctx> {
+    fn await_slot(&mut self, t: PointerValue<'ctx>, err_off: Option<u64>) -> PointerValue<'ctx> {
         let Some(co) = self.fs().coro else {
-            return self.call_rt_v("zell_task_await", &[t.into()]).into_pointer_value();
+            return match err_off {
+                Some(off) => {
+                    let o = self.i64_ty().const_int(off, false);
+                    self.call_rt_v("zell_task_await_err", &[t.into(), o.into()]).into_pointer_value()
+                }
+                None => self.call_rt_v("zell_task_await", &[t.into()]).into_pointer_value(),
+            };
         };
         let ready = self.block("await.ready");
         let try_ = self.block("await.try");
@@ -206,19 +241,110 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_unconditional_branch(save).unwrap();
         self.b.position_at_end(save);
         self.dbga_suspend();
+        // Off the thread's frame chain before the frame may resume elsewhere.
+        self.coro_chain_pop();
+        let repush = self.block("await.repush");
         let sv = self.intrinsic("llvm.coro.save", &mut [co.hdl.as_value_ref()]);
         let resume = self.rt("zell_coro_resume").as_global_value().as_pointer_value();
         let reg = self.call_rt_v("zell_task_add_continuation", &[t.into(), resume.into(), co.hdl.into()]).into_int_value();
-        self.b.build_conditional_branch(reg, susp, ready).unwrap();
+        self.b.build_conditional_branch(reg, susp, repush).unwrap();
         self.b.position_at_end(susp);
         let fls = self.ctx.bool_type().const_zero().as_value_ref();
         let s = self.intrinsic("llvm.coro.suspend", &mut [sv, fls]);
         let sv = unsafe { IntValue::new(s) };
         let i8t = self.ctx.i8_type();
-        self.b.build_switch(sv, co.done, &[(i8t.const_zero(), ready), (i8t.const_int(1, false), co.cleanup)]).unwrap();
+        self.b.build_switch(sv, co.done, &[(i8t.const_zero(), repush), (i8t.const_int(1, false), co.unwind)]).unwrap();
+        self.b.position_at_end(repush);
+        self.coro_chain_push();
+        self.b.build_unconditional_branch(ready).unwrap();
         self.b.position_at_end(ready);
         self.dbga_resume();
-        self.call_rt_v("zell_task_result", &[t.into()]).into_pointer_value()
+        self.task_result_rt(t, err_off)
+    }
+
+    /// The `T!` error word's byte offset in a task result of type `t`
+    /// (None for other types): a panicked `Task<T!>` yields its error there.
+    pub(crate) fn fallible_err_off(&mut self, t: TypeId) -> Option<u64> {
+        let Type::Fallible(inner) = self.ty(t).clone() else { return None };
+        if *self.ty(inner) == Type::Void {
+            return Some(0);
+        }
+        let st = self.llty(t).into_struct_type();
+        self.td.offset_of_element(&st, 1)
+    }
+
+    /// The result slot of done task `t` (`zell_task_result`, or the `_err`
+    /// form for a `Task<T!>`).
+    fn task_result_rt(&mut self, t: PointerValue<'ctx>, err_off: Option<u64>) -> PointerValue<'ctx> {
+        match err_off {
+            Some(off) => {
+                let o = self.i64_ty().const_int(off, false);
+                self.call_rt_v("zell_task_result_err", &[t.into(), o.into()]).into_pointer_value()
+            }
+            None => self.call_rt_v("zell_task_result", &[t.into()]).into_pointer_value(),
+        }
+    }
+
+    /// Makes the defer flags, the defer array and every local slot escape
+    /// (an empty inline asm taking each address, at the function's entry),
+    /// so no store to them is promoted to a register or dropped as dead:
+    /// the unwind path then reads their current values from the frame.
+    pub(crate) fn coro_escape_state(&mut self, open: &[(PointerValue<'ctx>, *const hir::Expr)], full: bool) {
+        let mut ptrs: Vec<PointerValue<'ctx>> = vec![self.fs().coro.unwrap().awaiting];
+        if full {
+            ptrs.extend(open.iter().map(|(a, _)| *a));
+            if let Some((arr, n)) = self.fs().defers {
+                ptrs.push(arr);
+                ptrs.push(n);
+            }
+            for s in self.fs().locals.iter().flatten() {
+                ptrs.push(s.ptr);
+            }
+            for f in self.fs().flags.iter().flatten() {
+                ptrs.push(*f);
+            }
+        }
+        let fty = self.ctx.void_type().fn_type(&[self.ptr_ty().into()], false);
+        let asm = self.ctx.create_inline_asm(fty, String::new(), "r,~{memory}".to_string(), true, false, None, false);
+        let init_b = &self.fs().init_b;
+        for p in ptrs {
+            init_b.build_indirect_call(fty, asm, &[p.into()], "").unwrap();
+        }
+    }
+
+    /// Records (or clears) the task an `await` owns while it waits.
+    fn set_awaiting(&mut self, t: Option<PointerValue<'ctx>>) {
+        let Some(co) = self.fs().coro else { return };
+        let v = t.unwrap_or(self.ptr_ty().const_null());
+        self.b.build_store(co.awaiting, v).unwrap();
+    }
+
+    /// Pushes this frame's node on the thread's coroutine chain.
+    fn coro_chain_push(&mut self) {
+        let Some((node, chain)) = self.fs().coro.and_then(|c| c.chain) else { return };
+        let prev = self.b.build_load(self.ptr_ty(), chain, "chain").unwrap();
+        self.b.build_store(node, prev).unwrap();
+        self.b.build_store(chain, node).unwrap();
+    }
+
+    /// Pops this frame's node (the innermost one) off the chain.
+    fn coro_chain_pop(&mut self) {
+        let Some((node, chain)) = self.fs().coro.and_then(|c| c.chain) else { return };
+        let prev = self.b.build_load(self.ptr_ty(), node, "chain.prev").unwrap();
+        self.b.build_store(chain, prev).unwrap();
+    }
+
+    /// The unwind path (a suspend point's destroy edge, taken when a panic
+    /// destroys the frame): the pending defers, then the task completes as
+    /// panicked (`zell_coro_unwound`); live locals are not released.
+    pub(crate) fn coro_unwind_exit(&mut self) {
+        let co = self.fs().coro.unwrap();
+        let aw = self.b.build_load(self.ptr_ty(), co.awaiting, "").unwrap();
+        self.call_rt("zell_release", &[aw.into()]);
+        let own = self.b.build_load(self.ptr_ty(), co.task_slot, "coro.own").unwrap();
+        let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
+        self.call_rt("zell_coro_unwound", &[own.into(), ctx0.into()]);
+        self.b.build_unconditional_branch(co.cleanup).unwrap();
     }
 
     /// Loads an owned copy of a `T` result from `slot`.
@@ -274,9 +400,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let fast_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(join).unwrap();
         self.b.position_at_end(slow);
-        let slot = self.await_slot(t);
+        let eo = self.fallible_err_off(ty);
+        self.set_awaiting(Some(t));
+        let slot = self.await_slot(t, eo);
         let sv = self.load_result(ty, slot);
         self.call_rt("zell_release", &[t.into()]);
+        self.set_awaiting(None);
         let slow_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(join).unwrap();
         self.b.position_at_end(join);
@@ -305,9 +434,16 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         let tv = self.expr(t)?;
         let tp = tv.get().into_pointer_value();
-        let slot = self.await_slot(tp);
+        let eo = self.fallible_err_off(ty);
+        if tv.owned {
+            self.set_awaiting(Some(tp));
+        }
+        let slot = self.await_slot(tp, eo);
         let r = self.load_result(ty, slot);
         self.drop_val(t.ty, tv);
+        if tv.owned {
+            self.set_awaiting(None);
+        }
         Ok(match r {
             Some(v) => Val::owned(v),
             None => Val::void(),
@@ -331,12 +467,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         self.forget_from(d);
         let any = self.call_rt_v("zell_task_any", &[arr.into(), self.i64_ty().const_int(n as u64, false).into()]).into_pointer_value();
-        let slot = self.await_slot(any);
+        let slot = self.await_slot(any, None);
         let idx = self.b.build_load(self.i64_ty(), slot, "any.idx").unwrap().into_int_value();
         self.call_rt("zell_release", &[any.into()]);
         let p = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[self.i64_ty().const_zero(), idx], "") }.unwrap();
         let winner = self.b.build_load(self.ptr_ty(), p, "").unwrap().into_pointer_value();
-        let rslot = self.call_rt_v("zell_task_result", &[winner.into()]).into_pointer_value();
+        let eo = self.fallible_err_off(ty);
+        let rslot = self.task_result_rt(winner, eo);
         let r = self.load_result(ty, rslot);
         for (t, tv) in tasks.iter().zip(tvs) {
             self.drop_val(t.ty, tv);
@@ -361,7 +498,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let mut results = Vec::new();
         for (t, tv) in tasks.iter().zip(&tvs) {
             let Type::Task(rt) = self.ty(t.ty).clone() else { return unsupported("task.All over a non-task") };
-            let slot = self.await_slot(tv.get().into_pointer_value());
+            let eo = self.fallible_err_off(rt);
+            let slot = self.await_slot(tv.get().into_pointer_value(), eo);
             results.push((rt, self.load_result(rt, slot)));
         }
         for (t, tv) in tasks.iter().zip(tvs) {

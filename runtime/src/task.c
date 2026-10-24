@@ -437,7 +437,22 @@ static void run_job(const jobrec *j) {
     zell_task *saved_cur = t_cur;
     t_ctx = j->ctx;   /* the job's references move to the thread */
     t_cur = j->cur;
+#if ZELL_PLAT_HAS_PANIC_CAPTURE
+    /* The unwind point of a task panic (ABI.md 8.1): the panic destroys
+     * the job's coroutine frames and jumps back here. */
+    zell__job_unwind uw;
+    uw.chain0 = zell_coro_chain;
+    uw.prev = zell__job_unwind_tls;
+    zell__job_unwind_tls = &uw;
+    if (__builtin_setjmp(uw.jb) == 0) {
+        j->fn(j->arg);
+    } else {
+        zell_coro_chain = uw.chain0;
+    }
+    zell__job_unwind_tls = uw.prev;
+#else
     j->fn(j->arg);
+#endif
     PROF_START();
     /* Restore the thread-locals before dropping the job's references:
      * the release may free the task (or context) and run destructors
@@ -808,6 +823,14 @@ struct zell_task {
     /* Threads blocked in zell_task_await (guarded by mu): each is woken
      * through its own condition variable, exactly once, by task_complete. */
     struct awaiter *awaiters;
+    /* A panicked task (ABI.md 8.1): done with a zero slot; the panic's
+     * message and trace (owned). panic_seen: an awaiter observed it (else
+     * the drop prints it); panic_filled: the task.Panic error was stored
+     * into the slot for a Task<T!> reader (guarded by mu). */
+    zell_string *panic_msg;
+    zell_string *panic_trace;
+    int32_t panic_seen;          /* atomic */
+    int32_t panic_filled;
     unsigned char slot[];       /* result_size bytes (8-aligned) */
 };
 
@@ -884,6 +907,12 @@ static void task_drop(void *obj) {
     while (h) { hook *n = h->next; hook_free(h); h = n; }
     if (t->ctx_saved) zell_release(t->caller_ctx);
     if (t->dbg_id) zell__dbg_task_drop(t->dbg_id);
+    if (t->panic_msg) {
+        /* Nobody awaited the panicked task (fire-and-forget): say so now. */
+        if (!__atomic_load_n(&t->panic_seen, __ATOMIC_ACQUIRE)) zell__panic_print(t->panic_msg, t->panic_trace);
+        zell_release(t->panic_msg);
+        zell_release(t->panic_trace);
+    }
     if (t->parent) {
         zell_task *p = t->parent;
         task_lock(p);
@@ -994,7 +1023,13 @@ static void restore_parent(zell_task *t) {
 }
 
 /* Completes t; returns false (and does nothing) if it already was done. */
+static bool task_complete_ex(zell_task *t, const void *result, zell_string *pmsg, zell_string *ptrace);
 static bool task_complete(zell_task *t, const void *result) {
+    return task_complete_ex(t, result, NULL, NULL);
+}
+
+/* pmsg/ptrace (borrowed, retained here): complete t as panicked. */
+static bool task_complete_ex(zell_task *t, const void *result, zell_string *pmsg, zell_string *ptrace) {
     if (!t) zell_panic_nil();
     /* A waiter that sees DONE may drop the last reference at once, while
      * this thread still writes t (conts, the lock word, t_cur): hold one
@@ -1008,7 +1043,12 @@ static bool task_complete(zell_task *t, const void *result) {
         if (!held) zell_release(t);
         return false;
     }
-    if (result && t->result_size > 0) {
+    if (pmsg) {
+        zell_retain(pmsg);
+        zell_retain(ptrace);
+        t->panic_msg = pmsg;
+        t->panic_trace = ptrace;
+    } else if (result && t->result_size > 0) {
         memcpy(t->slot, result, (size_t)t->result_size);
         if (t->ops && t->ops->retain) t->ops->retain(t->slot + t->ops_offset);
     }
@@ -1130,9 +1170,40 @@ bool zell_task_add_continuation(zell_task *t, zell_resume_fn fn, void *frame) {
     return true;
 }
 
+/* A panicked Task<T> read by an awaiter: the panic goes on in the reader. */
+static void *checked_slot(zell_task *t) {
+    if (t->panic_msg) {
+        __atomic_store_n(&t->panic_seen, 1, __ATOMIC_RELEASE);
+        zell__panic_traced("panic in awaited task: ", t->panic_msg, t->panic_trace, 0);
+    }
+    return t->slot;
+}
+
+/* A panicked Task<T!>: the task.Panic error goes into the slot's error
+ * word (once; the slot's ops release it with the task). */
+static void *checked_slot_err(zell_task *t, int64_t err_off) {
+    if (t->panic_msg) {
+        if (err_off < 0 || err_off + 8 > ZELL_ROUND8(t->result_size)) zell__panicf("zell_task_result_err: bad error offset");
+        task_lock(t);
+        if (!t->panic_filled) {
+            zell_error *e = zell__panic_error(t->panic_msg, t->panic_trace);
+            memcpy(t->slot + err_off, &e, sizeof e);
+            t->panic_filled = 1;
+        }
+        task_unlock(t);
+        __atomic_store_n(&t->panic_seen, 1, __ATOMIC_RELEASE);
+    }
+    return t->slot;
+}
+
 void *zell_task_result(const zell_task *t) {
     if (!zell_task_is_done(t)) zell_panic("task result read before completion");
-    return (void *)t->slot;
+    return checked_slot((zell_task *)t);
+}
+
+void *zell_task_result_err(zell_task *t, int64_t err_off) {
+    if (!zell_task_is_done(t)) zell_panic("task result read before completion");
+    return checked_slot_err(t, err_off);
 }
 
 /* A worker blocked over the spare limit, STALL_NS after it blocked (or
@@ -1154,7 +1225,30 @@ static void stall_check(worker *w, int64_t *unblocks0) {
     zell__plat_mutex_unlock(&q_mu);
 }
 
+static void *task_wait(zell_task *t);
+
 void *zell_task_await(zell_task *t) {
+    task_wait(t);
+    return checked_slot(t);
+}
+
+void *zell_task_await_err(zell_task *t, int64_t err_off) {
+    task_wait(t);
+    return checked_slot_err(t, err_off);
+}
+
+/* The entry's await of an async main (ABI.md 11): a panic of main's task
+ * ends the process as it always did (message, trace, exit code 2). */
+void *zell_task_await_main(zell_task *t) {
+    task_wait(t);
+    if (t->panic_msg) {
+        __atomic_store_n(&t->panic_seen, 1, __ATOMIC_RELEASE);
+        zell__panic_traced("", t->panic_msg, t->panic_trace, 1);
+    }
+    return t->slot;
+}
+
+static void *task_wait(zell_task *t) {
     if (!t) zell_panic_nil();
     if (zell_task_is_done(t)) return t->slot;
     int over = 0;            /* blocked past the spare limit: watch for a stall */
@@ -1833,4 +1927,104 @@ zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *result
     if (result && result_size > 0) memcpy(t->slot, result, (size_t)result_size);
     __atomic_store_n(&t->state, TASK_DONE, __ATOMIC_RELEASE);
     return t;
+}
+
+
+/* ======================================================================
+ * Task panics (ABI.md 8.1)
+ * ====================================================================== */
+
+_Thread_local void *zell_coro_chain;
+_Thread_local zell__job_unwind *zell__job_unwind_tls;
+
+int zell__task_running(void) { return t_cur != NULL; }
+
+typedef struct coro_node {
+    struct coro_node *prev;
+    void *hdl;
+} coro_node;
+
+void zell__coro_unwind(void *stop) {
+    coro_node *n;
+    while ((n = zell_coro_chain) != NULL && (void *)n != stop) {
+        zell_coro_chain = n->prev;   /* read before the frame (and n) is freed */
+        void *hdl = n->hdl;
+        if (hdl) {
+            /* LLVM switched-resume frame: word 1 is the destroy function,
+             * which takes the frame's unwind path (compiled code). */
+            void (*destroy)(void *) = ((void (**)(void *))hdl)[1];
+            destroy(hdl);
+        }
+    }
+}
+
+void zell_coro_unwound(zell_task *own, zell_object *ctx0) {
+    if (!own) {
+        zell_coro_leave(ctx0);
+        return;
+    }
+    zell_string *msg, *trace;
+    zell__panic_current(&msg, &trace);
+    if (!msg) zell_panic("zell_coro_unwound outside a panic");
+    task_complete_ex(own, NULL, msg, trace);
+    zell_release(own);
+}
+
+/* task.ErrPanic and task.Panic errors. */
+static ZELL_STRING_STORAGE(14) panic_sentinel_msg = ZELL_STRING_INIT(panic_sentinel_msg, "task panicked");
+
+static zell_error panic_sentinel = {
+    .hdr = { ZELL_RC_IMMORTAL, &zell_type_error }, .message = (zell_string *)&panic_sentinel_msg,
+};
+
+zell_error *zell_task_err_panic(void) { return &panic_sentinel; }
+
+typedef struct panic_payload {
+    zell_object hdr;
+    zell_string *msg;
+    zell_string *trace;
+} panic_payload;
+
+static void panic_payload_drop(void *obj) {
+    panic_payload *p = obj;
+    zell_release(p->msg);
+    zell_release(p->trace);
+}
+
+static const zell_type_info panic_type = { "task.Panic", 0, panic_payload_drop };
+
+static zell_string *panic_message_fn(void *payload) {
+    panic_payload *p = payload;
+    static ZELL_STRING_STORAGE(8) prefix = ZELL_STRING_INIT(prefix, "panic: ");
+    return zell_string_concat((zell_string *)&prefix, p->msg);
+}
+
+zell_error *zell__panic_error(zell_string *msg, zell_string *trace) {
+    panic_payload *p = zell_object_new(&panic_type, (int64_t)sizeof(panic_payload));
+    zell_retain(msg);
+    zell_retain(trace);
+    p->msg = msg;
+    p->trace = trace;
+    zell_error *e = zell_error_new_typed(&panic_type, p, panic_message_fn);
+    zell_release(p);
+    e->inner = &panic_sentinel;   /* errors.Is(err, task.ErrPanic); immortal */
+    return e;
+}
+
+static const panic_payload *panic_find(const zell_error *e) {
+    return zell_error_as(e, &panic_type);
+}
+
+zell_string *zell_task_panic_message(const zell_error *err) {
+    const panic_payload *p = panic_find(err);
+    if (!p) return zell_string_new("", 0);
+    zell_retain(p->msg);
+    return p->msg;
+}
+
+zell_string *zell_task_panic_trace(const zell_error *err) {
+    const panic_payload *p = panic_find(err);
+    if (!p) return zell_string_new("", 0);
+    zell_retain(p->trace);
+    return p->trace;
 }

@@ -429,6 +429,7 @@ areas!(
     spec_memory2 = "memory2",
     spec_errors2 = "errors2",
     spec_async2 = "async2",
+    spec_panics = "panics",
     spec_strings2 = "strings2",
     spec_diagnostics = "diagnostics",
     spec_programs = "programs",

@@ -485,6 +485,7 @@ pub const CONSTS: &[(&str, &str, StdConst)] = &[
     ("math", "MaxUint", StdConst::Int(u64::MAX as i128)),
     ("fs", "ErrNotFound", StdConst::Error("zell_fs_err_not_found")),
     ("task", "ErrCancelled", StdConst::Error("zell_task_err_cancelled")),
+    ("task", "ErrPanic", StdConst::Error("zell_task_err_panic")),
     // net sentinels (runtime/src/std_net.c); every net error wraps one
     // of them when its cause is of that kind
     ("net", "ErrClosed", StdConst::Error("zell_net_err_closed")),
@@ -725,6 +726,8 @@ pub const FUNCS: &[StdFunc] = &[
     f!("arena", "rtArenaLen", "int", "int", "zell_arena_objects"),
     f!("task", "Delay", "int", "Task<void>", "zell_task_delay"),
     f!("task", "Yield", "", "Task<void>", "zell_task_yield"),
+    f!("task", "PanicMessage", "error", "string", "zell_task_panic_message"),
+    f!("task", "PanicTrace", "error", "string", "zell_task_panic_trace"),
     // internal primitives of the Zell-source task (sema/stdlib_src/task.zl)
     f!("task", "rtSignal", "", "Task<void>", "zell_task_rt_signal"),
     f!("task", "rtWaker", "", "Task<void>", "zell_task_rt_waker"),

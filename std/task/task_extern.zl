@@ -12,6 +12,16 @@ extern func Delay(ms int) Task<void>
 // C: zell_task_yield (runtime/src/std_*.c).
 extern func Yield() Task<void>
 
+// PanicMessage returns the message of the task panic in err's chain ("" if there is none).
+//
+// C: zell_task_panic_message (runtime/src/std_*.c).
+extern func PanicMessage(err error) string
+
+// PanicTrace returns the backtrace of the task panic in err's chain, one frame per line ("" if there is none).
+//
+// C: zell_task_panic_trace (runtime/src/std_*.c).
+extern func PanicTrace(err error) string
+
 // Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_task_rt_signal (runtime/src/std_*.c).
 extern func rtSignal() Task<void>

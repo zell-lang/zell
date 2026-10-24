@@ -1,0 +1,5 @@
+deferred in boom
+caught: panic: boom
+is panic: true
+message: boom
+has trace: true

@@ -1,0 +1,25 @@
+// test: awaiting a panicked Task<int> (no `!`) cannot swallow the panic: it panics again in the awaiting task, here main, so the process ends with exit code 2
+// status: passing
+// exit: 2
+// stderr: panic: panic in awaited task: runtime error: invalid memory address or nil pointer dereference
+namespace spec.panics.plain_task_repanic
+
+import io
+
+struct Box {
+    n int
+}
+
+async func deref(b *Box) int {
+    await task.Yield()
+    return b.n
+}
+
+async func main() {
+    var ok = new Box{n: 7}
+    println("first:", await deref(ok))
+    var t = deref(nil)
+    println("started")
+    var v = await t
+    println("unreachable", v)
+}

@@ -383,6 +383,15 @@ pub(crate) struct Coro<'ctx> {
     pub res: PointerValue<'ctx>,
     pub cleanup: BasicBlock<'ctx>,
     pub done: BasicBlock<'ctx>,
+    /// The destroy edge of every suspend point: a panic unwinding the frame
+    /// runs the pending defers and completes the task as panicked (ABI.md 8.1).
+    pub unwind: BasicBlock<'ctx>,
+    /// This frame's node `{ prev, hdl }` on the thread's `zell_coro_chain`
+    /// and the chain itself (None on Windows: no task panics there).
+    pub chain: Option<(PointerValue<'ctx>, PointerValue<'ctx>)>,
+    /// Frame slot holding the task an `await` waits for while the frame
+    /// owns it (NULL otherwise): the unwind path releases it.
+    pub awaiting: PointerValue<'ctx>,
 }
 
 /// Per-function emission state.
@@ -909,7 +918,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
             self.b.build_unconditional_branch(join).unwrap();
             self.b.position_at_end(slow);
-            let slot = self.call_rt_v("zell_task_await", &[t.into()]).into_pointer_value();
+            let slot = self.call_rt_v("zell_task_await_main", &[t.into()]).into_pointer_value();
             if let Some(es) = err_slot {
                 let e = self.b.build_load(self.ptr_ty(), slot, "").unwrap();
                 self.call_rt("zell_retain", &[e.into()]);
