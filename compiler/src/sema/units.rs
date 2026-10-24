@@ -18,6 +18,12 @@
 //!   signature;
 //! * bodies of stdlib functions that are not instances are not checked
 //!   (they cannot report anything about user code).
+//!
+//! `reflect.TypesWith<A>()` depends on the whole program, but only its
+//! value does (its type is always `[]*TypeInfo` and it reports nothing
+//! program-wide), so a unit run needs no special handling: its list may be
+//! partial, and the list that matters is the one computed by the compiler
+//! run over all packages (`Sema::types_with_finish`).
 
 use super::generics::Inst;
 use super::index::{self, SymbolIndex};

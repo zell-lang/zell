@@ -112,6 +112,28 @@ fn compile_time_reflection_errors() {
 }
 
 #[test]
+fn types_with_only_emits_tables_for_the_marked_types() {
+    let p = ok("@attribute(targets: [reflect.Target.Struct])\nstruct job {}\n@job\nstruct A {\n    func Run() int {\n        return 1\n    }\n}\nstruct Other {\n    func Run() int {\n        return 2\n    }\n}\nfunc main() {\n    println(len(reflect.TypesWith<job>()), Other{}.Run())\n}");
+    let r = p.reflect.as_ref().expect("reflection on");
+    let (a, other) = (struct_ty(&p, "A"), struct_ty(&p, "Other"));
+    assert_eq!(r.types_with.len(), 1, "one TypesWith<job> list");
+    assert_eq!(r.types_with[0].1, vec![a]);
+    assert!(r.full.contains(&a), "a marked type is full (methods, New)");
+    assert!(!r.full.contains(&other), "an unmarked type gets no method table");
+    assert_eq!(r.method_types.len(), 1, "only A.Run is listed");
+}
+
+#[test]
+fn types_with_and_error_diagnostics() {
+    err("struct NotAttr {}\nfunc main() {\n    println(len(reflect.TypesWith<NotAttr>()))\n}", "needs an attribute type");
+    err("func main() {\n    reflect.Error(\"bad \" + \"config\")\n}", "bad config");
+    err("func main() {\n    var m = \"x\"\n    reflect.Error(m)\n}", "reflect.Error needs a constant string message");
+    // In a branch dropped by a static if, and in a generic function never
+    // instantiated, nothing is raised.
+    ok("func G<T>() {\n    reflect.Error(\"never\")\n}\nfunc main() {\n    if reflect.TypeOf<int>().Kind == reflect.Kind.String {\n        reflect.Error(\"dead\")\n    }\n    println(1)\n}");
+}
+
+#[test]
 fn private_table_fields_stay_private() {
     err("func main() {\n    println(len(reflect.TypeOf<int>().attrs))\n}", "private");
 }

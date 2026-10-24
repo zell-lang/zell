@@ -1,0 +1,8 @@
+// test: reflect.TypesWith<A>() lists the marked structs of every file, by file path then declaration order; unmarked types are left out
+// status: passing
+namespace spec.reflection.types_with_basic.models
+
+@spec.reflection.types_with_basic.Entity(Table: "products")
+struct Product {
+    Sku string
+}

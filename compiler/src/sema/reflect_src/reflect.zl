@@ -127,6 +127,8 @@ struct TypeInfo {
     attrs    []any
     ptrTo    *TypeInfo
     canon    *TypeInfo
+    // Namespace path of the declaration (empty for builtin and composite types).
+    Package  string
 
     // Attribute returns the attribute of type A on the type, or nil.
     func Attribute<A>() *A {
@@ -220,6 +222,8 @@ struct MethodInfo {
     invoke int
     fnval  int
     attrs  []any
+    // The parameters without the receiver.
+    Params []*ParamInfo
 
     // Attribute returns the attribute of type A on the method, or nil.
     func Attribute<A>() *A {
@@ -251,6 +255,24 @@ struct MethodInfo {
             )
         }
         return asFunc<F>(this.fnval)
+    }
+}
+
+// ParamInfo describes a method parameter.
+struct ParamInfo {
+    Name  string
+    Type  *TypeInfo
+    Index int
+    attrs []any
+
+    // Attribute returns the attribute of type A on the parameter, or nil.
+    func Attribute<A>() *A {
+        return attrOf<A>(this.attrs)
+    }
+
+    // Attributes returns every attribute of type A on the parameter.
+    func Attributes<A>() []*A {
+        return attrsOf<A>(this.attrs)
     }
 }
 
@@ -396,6 +418,18 @@ func attrsOf<A>(attrs []any) []*A {
 func TypeOf<T>() *TypeInfo {
     return nil
 }
+
+// TypesWith returns every type of the program (all packages) declared
+// with attribute A, by package, file and declaration order (computed at
+// compile time; a constant slice).
+func TypesWith<A>() []*TypeInfo {
+    var none []*TypeInfo = []
+    return none
+}
+
+// Error stops compilation with msg (a constant string) when the call is
+// reachable after compile-time folding: a library-level static_assert.
+func Error(msg string) {}
 
 func anyType(x any) *TypeInfo {
     return nil

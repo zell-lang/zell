@@ -963,13 +963,21 @@ typedef struct zell_reflect_field {    /* reflect.FieldInfo, 72 bytes */
     zell_slice attrs;                  /* +40 []any, each holding a *A */
 } zell_reflect_field;
 
-typedef struct zell_reflect_method {   /* reflect.MethodInfo, 72 bytes */
+typedef struct zell_reflect_param {    /* reflect.ParamInfo, 56 bytes */
+    zell_string *name;                 /* +0 */
+    const zell_reflect_type *type;     /* +8 */
+    int64_t index;                      /* +16 (receiver excluded) */
+    zell_slice attrs;                  /* +24 []any */
+} zell_reflect_param;
+
+typedef struct zell_reflect_method {   /* reflect.MethodInfo, 104 bytes */
     zell_string *name;                 /* +0 */
     const zell_reflect_type *type;     /* +8  func(*S, params) ret (no receiver if static) */
     bool is_static;                     /* +16 */
     void *invoke;                       /* +24 packed thunk: {any, error*} (any recv, []any args) */
     void *fnval;                        /* +32 closure-convention thunk fn(env, recv, args...) */
     zell_slice attrs;                  /* +40 */
+    zell_slice params;                 /* +72 []*ParamInfo (receiver excluded) */
 } zell_reflect_method;
 
 typedef struct zell_reflect_variant {  /* reflect.VariantInfo, 80 bytes */
@@ -979,7 +987,7 @@ typedef struct zell_reflect_variant {  /* reflect.VariantInfo, 80 bytes */
     zell_slice attrs;                  /* +48 */
 } zell_reflect_variant;
 
-struct zell_reflect_type {             /* reflect.TypeInfo, 232 bytes */
+struct zell_reflect_type {             /* reflect.TypeInfo, 240 bytes */
     zell_type_info rt;                 /* +0  name, size (16 + sizeof T), drop */
     int32_t kind;                       /* +24 zell_reflect_kind */
     zell_string *name;                 /* +32 short name: User, *User, []int */
@@ -995,6 +1003,7 @@ struct zell_reflect_type {             /* reflect.TypeInfo, 232 bytes */
     zell_slice attrs;                  /* +184 []any */
     const zell_reflect_type *ptr_to;   /* +216 *T (full types only; TypeInfo.New) */
     const zell_reflect_type *canon;    /* +224 for a spelling alias (int64): the int table */
+    zell_string *package;              /* +232 namespace path of the declaration (NULL = "") */
 };
 
 /* The table of a box (a heap object made by compiled code), or NULL. */

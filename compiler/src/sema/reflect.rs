@@ -78,7 +78,7 @@ const ALIAS_SPELLINGS: &[&str] = &["int64", "uint", "uint8", "float64"];
 
 /// Intrinsic functions of `reflect` (non-generic and generic).
 const INTRINSIC_FUNCS: &[&str] = &["anyType", "anyAddr", "anyBox", "errType", "loadAddr", "newOf", "invokeMethod"];
-const INTRINSIC_TEMPLATES: &[&str] = &["TypeOf", "ifaceType", "load", "store", "asFunc", "storeTag"];
+const INTRINSIC_TEMPLATES: &[&str] = &["TypeOf", "ifaceType", "load", "store", "asFunc", "storeTag", "TypesWith"];
 
 /// The parsed [`MODULES`] (parsed once per process).
 fn module_asts() -> &'static [ast::File] {
@@ -136,6 +136,28 @@ pub(crate) struct ReflState {
     loads: Vec<(usize, usize)>,
     /// Namespace index of each module (filled on first lookup).
     module_ns: Vec<NsIdx>,
+}
+
+impl ReflState {
+    /// `reflect` is loaded.
+    pub(crate) fn loaded_reflect(&self) -> bool {
+        self.loaded.first() == Some(&true)
+    }
+
+    /// Template id of a generic `reflect` function.
+    pub(crate) fn template(&self, name: &str) -> Option<u32> {
+        self.templates.get(name).copied()
+    }
+
+    /// Struct id of a `reflect` struct (or builtin attribute value struct).
+    pub(crate) fn struct_id(&self, name: &str) -> Option<u32> {
+        self.structs.get(name).copied()
+    }
+
+    /// Function id of a non-generic `reflect` function.
+    pub(crate) fn func(&self, name: &str) -> Option<FuncId> {
+        self.funcs.get(name).copied()
+    }
 }
 
 /// Result of a compile-time condition.
@@ -881,6 +903,8 @@ impl<'a> Sema<'a> {
     /// was never loaded). Also maps the file indices of library sources to
     /// file 0 (they are not user files).
     pub(crate) fn reflect_finish(&mut self) -> Option<hir::Reflect> {
+        let tw = if self.refl.loaded_reflect() { self.refl.template("TypesWith") } else { None };
+        let types_with = self.types_with_finish(tw);
         let nfiles = self.files.len();
         for f in &mut self.funcs {
             if f.file >= nfiles {
@@ -913,7 +937,13 @@ impl<'a> Sema<'a> {
             field_spellings: Vec::new(),
             pointers: Vec::new(),
             method_types: Vec::new(),
+            param_info: st("ParamInfo"),
+            types_with,
         };
+        // Types listed by TypesWith are full (methods, ptrTo).
+        for (_, ts) in &r.types_with {
+            r.full.extend(ts.iter().copied());
+        }
         for n in INTRINSIC_FUNCS {
             if let Some(&f) = self.refl.funcs.get(*n) {
                 let k = match *n {
@@ -942,6 +972,7 @@ impl<'a> Sema<'a> {
                 "load" => Intrinsic::Load(a),
                 "store" => Intrinsic::Store(a),
                 "asFunc" => Intrinsic::AsFunc(a),
+                "TypesWith" => Intrinsic::TypesWith(a),
                 _ => Intrinsic::StoreTag(a),
             };
             insts.push((*f, k));
@@ -994,6 +1025,9 @@ impl<'a> Sema<'a> {
         }
         for f in &self.funcs {
             collect(&f.attrs);
+            for p in &f.param_attrs {
+                collect(p);
+            }
         }
         for s in attr_sids {
             ptr_of.push(self.tt.intern(Type::Struct(crate::types::DeclId(s))));

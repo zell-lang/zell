@@ -1,0 +1,25 @@
+// test: a marked generic struct appears once per instantiation used in the program, the template itself not at all
+// status: passing
+namespace spec.reflection.types_with_generic
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct component {}
+
+@component
+struct Box<T> {
+    Value T
+}
+
+@component
+struct Plain {}
+
+func main() {
+    var a = Box<int>{Value: 1}
+    var b = Box<string>{Value: "x"}
+    println(a.Value, b.Value)
+    for t in reflect.TypesWith<component>() {
+        println(t.Name, len(t.Fields))
+    }
+}

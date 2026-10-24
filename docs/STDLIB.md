@@ -43,6 +43,7 @@
 | `encoding/binary` | `encoding.binary` | ✅ есть (`BigEndian/LittleEndian.*`, varint, `Encode/Decode/Read/Write<T>` через compile-time рефлексию, `@binary(endian:)`) | `Read<T>`/`Write<T>` структур через compile-time рефлексию, `@binary(endian)` |
 | `time` (типы) | `time` | ✅ есть (`Duration`, `Time` с раскладками Go и strftime, `ParseTime`, `Location` из tzdata + POSIX-правила, `Instant`, `Ticker/Timer` async); имена `Now/Since/Sleep/Parse` заняты старыми int-функциями: `Time.Now()`, `Elapsed`, `SleepFor`, `ParseTime` | типы `Time`, `Duration`, `Instant` монотонный |
 | `unsafe` | `unsafe` (только FFI) | 🟡 частично (`ReadInt/ReadUint/ReadFloat/WriteInt/ReadBytes/WriteBytes/CString/AddrOf/TypeOf/CallFunc`; импорт только с `[capabilities] unsafe = true`, ABI.md §22.5) | минимальный, помечает capability |
+| `reflect` | `reflect` | ✅ есть (статические таблицы `TypeInfo`/`FieldInfo`/`MethodInfo`/`ParamInfo`/`VariantInfo`, `TypeOf<T>`, `typeof`, `ValueOf`, `Fields<T>()` с развёртыванием при компиляции, статический `if`, атрибуты как значения, `Call<F>`/`Invoke`, `New`, `TypeInfo.Package`, `MethodInfo.Params`; `TypesWith<A>()` — типы всей программы с атрибутом, константный срез; `Error(msg)` — ошибка компиляции из библиотеки; DESIGN.md «Рефлексия») | быстрее C#: указатели на функции, без boxing в `Call<F>`; таблицы урезаются, если `reflect` не используется |
 | `weak`, `unique` | `weak *T` в языке; `intern` | ✅ есть (weak) / нет | язык |
 
 ## Уровень 1 — базовый ввод-вывод, ОС, синхронизация
@@ -135,7 +136,7 @@
 
 | Аналог | Zell | Статус | Лучше чем в Go |
 |---|---|---|---|
-| ASP.NET Core, `gin`/`echo` + `wire` + `viper` + `golang-jwt` + `swag` | будущий пакет `zell-lang/web` | ⏸ вынесен из дерева до `reflect.TypesWith<A>()` (был в stdlib как `web`; исходники — тег git `web-in-tree`, последний тулчейн с ним — `v0.1.0-rc.3`); пока — `net.http` (роутер, middleware, HTTP/2, WebSocket) | атрибутная маршрутизация и DI без рефлексии в рантайме |
+| ASP.NET Core, `gin`/`echo` + `wire` + `viper` + `golang-jwt` + `swag` | будущий пакет `zell-lang/web` | ⏸ вынесен из дерева; `reflect.TypesWith<A>()`, `MethodInfo.Params` и `reflect.Error` для него готовы (2026-10-24), пакет пишется (был в stdlib как `web`; исходники — тег git `web-in-tree`, последний тулчейн с ним — `v0.1.0-rc.3`); пока — `net.http` (роутер, middleware, HTTP/2, WebSocket) | атрибутная маршрутизация и DI без рефлексии в рантайме |
 
 ## Чего в Go нет, а в Zell будет в stdlib
 

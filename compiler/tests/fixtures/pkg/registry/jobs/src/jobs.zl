@@ -1,0 +1,24 @@
+namespace jobs
+
+// A library that collects the jobs of the whole program, including the
+// application that depends on it.
+@attribute(targets: [reflect.Target.Struct])
+struct Job {
+    Name string
+}
+
+@Job(Name: "cleanup")
+struct Cleanup {
+    static func Run() string {
+        return "library job"
+    }
+}
+
+func RunAll() []string {
+    var out []string = []
+    for t in reflect.TypesWith<Job>() {
+        var run = t.Method("Run").Call<func() string>()
+        out = append(out, t.Package + "." + t.Name + " " + t.Attribute<Job>().Name + ": " + run())
+    }
+    return out
+}

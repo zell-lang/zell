@@ -1,6 +1,6 @@
 # Reflection: what is compile-time today, what is planned
 
-Status as of 2026-10-23 (master `024a992`). Spec: DESIGN.md "Рефлексия";
+Status as of 2026-10-24. Spec: DESIGN.md "Рефлексия";
 the framework motivation is docs/FRAMEWORK.md "План: тонкое ядро,
 фреймворк в пакетах".
 
@@ -31,38 +31,66 @@ codecs, `data` materialisation, `web` binding) — not measured separately;
 `encodings` (XML 3.0x, TOML 2.2x Go) should be checked for whether they
 use `Fields<T>` at all.
 
-## 2. Planned: `reflect.TypesWith<A>()`
+## 2. Done: `reflect.TypesWith<A>()` and `reflect.Error(msg)`
 
-All types of the program carrying attribute `A`, computed by the compiler
-at build time like `Fields<T>`, returned as a constant slice of type
-descriptors (each with `Fields`, attributes, and typed constructors /
-method pointers as DESIGN.md "Рефлексия" already specifies: `Call<F>`
-through a typed function pointer, no boxing).
+Landed 2026-10-24; spec: DESIGN.md "Рефлексия", subsection "Типы с
+атрибутом и ошибки из библиотек" (decisions of the maintainer, same day).
 
-Why: the in-tree `web` built its route table and DI container inside the
-compiler (`compiler/src/sema/web.rs`) by scanning every type for
-`@controller`/`@route` attributes; it was removed from the tree on
-2026-10-24 (sources: git tag `web-in-tree`). With `TypesWith<A>()` the
-same table is built by ordinary package code, so `web` returns as
-`zell-lang/web` (FRAMEWORK.md plan) without compiler hooks. It also
-makes the table a constant: no start-up scan.
+- `reflect.TypesWith<A>() []*TypeInfo`: every struct, enum and interface
+  of the whole program (the binary's package, all dependencies, the
+  stdlib) declared with attribute `A` (`A` must be an attribute type, a
+  compile error otherwise). Order: package name, file path, declaration
+  order; generic types once per instantiation used. It is an intrinsic
+  template: `Sema::types_with_finish` (`compiler/src/sema/reflect_with.rs`)
+  collects the lists at the end of the analysis, when the whole program is
+  known (a build analyses all packages in one run, so a library call sees
+  the application's types: `compiler/tests/package.rs`
+  `library_types_with_sees_the_application_types`); codegen emits each
+  list once as a constant NULL-backed slice. Only the marked types become
+  *full* (method tables, `ptrTo`): cost O(types with `A`); programs that
+  never call it emit nothing extra (`compiler/tests/reflection.rs`
+  `types_with_only_emits_tables_for_the_marked_types`, and
+  `no_reflection_without_use` stays green).
+- Units/LSP: `TypesWith` has no diagnostics that depend on the whole
+  program (its type is always `[]*TypeInfo`), so per-unit IDE analysis
+  needs no special handling; it may see a partial list, which only matters
+  for code generation, which always runs over the whole program.
+- `reflect.Error(msg)`: a compile error `error: <msg>` with a note
+  `raised by <function>` at a reachable call (not in a branch dropped by a
+  static `if`, not in the abstract check of a generic body). `msg` must
+  fold to a constant (`Sema::const_string`: literals and concatenation,
+  `f.Name` of `Fields<T>()`, attribute string fields,
+  `reflect.TypeOf<T>().Name/FullName/Package`).
+- For frameworks: `TypeInfo.Package` (namespace path), `MethodInfo.Params
+  []*ParamInfo` (`Name`, `Type`, `Index`, `Attribute<A>()`,
+  `Attributes<A>()`, parameter attributes kept in HIR as
+  `Function::param_attrs`), interface tables carry their attributes. ABI
+  change is additive (runtime/ABI.md 17.1: `package` at +232 of
+  `TypeInfo`, `params` at +72 of `MethodInfo`, new 56-byte `ParamInfo`).
+- Spec tests: `tests/spec/reflection/types_with_*`,
+  `reflect_error_static_if`, `reflect_error_raised`; example
+  `examples/reflect_registry.zl`; guide `docs/guide/tour.md`
+  "Reflection and attributes".
 
-Design points to settle in DESIGN.md before implementing:
-- whole-program semantics with packages: types from dependencies count
-  (the attribute's package decides; `@controller` from `web` matches types
-  in the application) — the result is per program, so it is computed in
-  the final link unit, which means the function is only callable from the
-  binary's package or must be re-evaluated per package graph;
-- determinism: ordering by package path then declaration order, so route
-  tables and generated OpenAPI are stable;
-- generics: instantiated types with the attribute appear once per
-  instantiation actually used;
-- cost: must stay O(types with the attribute), not O(all types), in the
-  generated code.
+What a `zell-lang/web` package can do with it today: collect controllers
+(`TypesWith<controller>()`), read type, method and parameter attributes
+(`@route`, `@fromQuery`), create a controller (`t.New()`) and call an
+action with bound arguments (`m.Invoke(recv, args)`, arguments as `[]any`
+built from the request using `p.Type`), call fixed-signature hooks
+typed (`m.Call<F>()`), and reject bad declarations at compile time from
+generic helpers (`reflect.Error`). Not yet: unrolling `for t in
+TypesWith<A>()` at compile time (so binding would be typed, no boxing) and
+using `p.Type` as a type argument (`json.Parse<p.Type>`), DI by
+constructor parameters of structs (fields can be used: `Fields`).
 
-Acceptance: spec paragraph + EBNF untouched (library function), spec tests
-in `tests/spec/reflection`, the `web_app` example of tag `web-in-tree`
-rewritten on it in `zell-lang/web` with identical output.
+### Remaining steps
+
+1. Static unrolling of `for t in reflect.TypesWith<A>()` like
+   `Fields<T>()` (`t` a compile-time type, `t.Methods` unrolled too).
+2. A compile-time type as a type argument (`Parse<p.Type>(text)`) inside
+   such loops.
+3. The `web_app` example of tag `web-in-tree` rewritten in
+   `zell-lang/web` with identical output.
 
 ## 3. Run-time reflection: spec is written, implementation partial
 
@@ -91,8 +119,8 @@ node set and evaluation rules (`Compile()` back to a closure).
 
 ## 5. Order and sizing
 
-1. `TypesWith<A>()` — spec 1 h, compiler 1 agent run (45-60 min),
-   `zell-lang/web` rewrite 1 run (`sema/web.rs` is already gone).
+1. `TypesWith<A>()` — done 2026-10-24 (section 2); next the
+   `zell-lang/web` rewrite (1 run), then static unrolling of the loop.
 2. Expression trees — spec first (needs a decision on the node set), then
    2 runs (compiler, `data` rewrite).
 3. Attributes as values / run-time `reflect` — after the two above; sized

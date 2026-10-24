@@ -1,0 +1,25 @@
+namespace app
+
+import io
+
+@jobs.Job(Name: "mail")
+struct SendMail {
+    static func Run() string {
+        return "sent"
+    }
+}
+
+struct NotAJob {}
+
+@jobs.Job(Name: "report")
+struct Report {
+    static func Run() string {
+        return "reported"
+    }
+}
+
+func main() {
+    for line in jobs.RunAll() {
+        println(line)
+    }
+}

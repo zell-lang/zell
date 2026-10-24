@@ -403,11 +403,11 @@ TEST(fuzz_mutations) {
 ZELL_STATIC_STRING(name_int, "int");
 ZELL_STATIC_STRING(name_p, "P");
 ZELL_STATIC_STRING(name_x, "X");
-static zell_reflect_type ti_int = { { "int", 24, NULL }, ZELL_KIND_INT, NULL, NULL, 8, 8, { 0 }, { 0 }, { 0 }, NULL, NULL, 0, { 0 }, NULL, NULL };
+static zell_reflect_type ti_int = { { "int", 24, NULL }, ZELL_KIND_INT, NULL, NULL, 8, 8, { 0 }, { 0 }, { 0 }, NULL, NULL, 0, { 0 }, NULL, NULL, NULL };
 static zell_reflect_field field_x = { NULL, &ti_int, 0, 0, false, true, { 0 } };
 static zell_reflect_field *fields_p[] = { &field_x };
-static zell_reflect_type ti_p = { { "t.P", 24, NULL }, ZELL_KIND_STRUCT, NULL, NULL, 8, 8, { fields_p, 1, 1, NULL }, { 0 }, { 0 }, NULL, NULL, 0, { 0 }, NULL, NULL };
-static zell_reflect_type ti_int64 = { { "int", 24, NULL }, ZELL_KIND_INT, NULL, NULL, 8, 8, { 0 }, { 0 }, { 0 }, NULL, NULL, 0, { 0 }, NULL, &ti_int };
+static zell_reflect_type ti_p = { { "t.P", 24, NULL }, ZELL_KIND_STRUCT, NULL, NULL, 8, 8, { fields_p, 1, 1, NULL }, { 0 }, { 0 }, NULL, NULL, 0, { 0 }, NULL, NULL, NULL };
+static zell_reflect_type ti_int64 = { { "int", 24, NULL }, ZELL_KIND_INT, NULL, NULL, 8, 8, { 0 }, { 0 }, { 0 }, NULL, NULL, 0, { 0 }, NULL, &ti_int, NULL };
 
 TEST(reflect_lookups) {
     ti_int.name = name_int;

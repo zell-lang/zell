@@ -100,6 +100,7 @@ impl<'a> Sema<'a> {
                 let sig = self.sigs[f.0 as usize].clone();
                 let fname = self.funcs[f.0 as usize].name.clone();
                 let args = self.check_args(&sig.params, args, &fname, span);
+                self.reflect_error_call(f, &args, span);
                 let ty = if sig.is_async { self.tt.task(sig.ret) } else { sig.ret };
                 mk(ExprKind::Call { callee: Callee::Func(f), args }, ty, span)
             }

@@ -1,0 +1,27 @@
+// test: with no marked type TypesWith<A>() is an empty slice, and unmarked types do not become full (no method tables)
+// status: passing
+namespace spec.reflection.types_with_none
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct job {}
+
+struct Other {
+    N int
+
+    func Run() int {
+        return this.N
+    }
+}
+
+func Inspect(x any) {
+    var t = typeof(x)
+    println(t.Name, len(t.Methods))
+}
+
+func main() {
+    var ts = reflect.TypesWith<job>()
+    println(len(ts))
+    Inspect(Other{N: 1})
+}

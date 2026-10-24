@@ -1,0 +1,19 @@
+// error: Describe: unsupported type bool
+// status: passing
+// stderr: raised by Describe<bool>
+namespace spec.reflection.reflect_error_raised
+
+import io
+
+func Describe<T>(x T) string {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Int {
+        return "int"
+    } else {
+        reflect.Error("Describe: unsupported type " + reflect.TypeOf<T>().Name)
+    }
+    return ""
+}
+
+func main() {
+    println(Describe(1), Describe(true))
+}

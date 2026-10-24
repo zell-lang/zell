@@ -1,0 +1,78 @@
+// test: a framework-style registry: iterate Methods of the marked types, read a method attribute, Call<F> a static method with a fixed signature, Invoke an instance method on a fresh value
+// status: passing
+namespace spec.reflection.types_with_methods
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct controller {
+    prefix string
+}
+
+@attribute(targets: [reflect.Target.Func])
+struct route {
+    path string
+}
+
+@controller(prefix: "/users")
+struct Users {
+    Count int
+
+    static func Name() string {
+        return "users"
+    }
+
+    @route(path: "/list")
+    func List() string {
+        return "list of users"
+    }
+
+    @route(path: "/count")
+    func Total() int {
+        return this.Count + 3
+    }
+
+    func helper() int {
+        return 0
+    }
+}
+
+@controller(prefix: "/health")
+struct Health {
+    static func Name() string {
+        return "health"
+    }
+
+    @route(path: "")
+    func Ping() string {
+        return "pong"
+    }
+}
+
+func serve() void! {
+    for t in reflect.TypesWith<controller>() {
+        var prefix = t.Attribute<controller>().prefix
+        var name = t.Method("Name").Call<func() string>()
+        println("controller", name())
+        var recv = t.New()
+        for m in t.Methods {
+            var r = m.Attribute<route>()
+            if r == nil {
+                continue
+            }
+            var res = m.Invoke(recv, [])?
+            switch res {
+                case string s:
+                    println(prefix + r.path, "->", s)
+                case int n:
+                    println(prefix + r.path, "->", n)
+            }
+        }
+    }
+}
+
+func main() {
+    try serve() catch e {
+        println("error:", e)
+    }
+}

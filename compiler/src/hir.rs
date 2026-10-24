@@ -133,6 +133,11 @@ pub struct Reflect {
     /// Signature type (`func(*S, params) ret`, receiver first unless
     /// static) of every method listed in a table.
     pub method_types: Vec<(FuncId, TypeId)>,
+    /// Struct id of `reflect.ParamInfo`.
+    pub param_info: u32,
+    /// `reflect.TypesWith<A>()`: attribute type `A` -> the marked types of
+    /// the whole program in package, file, declaration order.
+    pub types_with: Vec<(TypeId, Vec<TypeId>)>,
 }
 
 /// Name of the `reflect.Kind` variant describing type `t`.
@@ -206,6 +211,9 @@ pub enum Intrinsic {
     AsFunc(TypeId),
     /// `storeTag<T>(p *T, tag int)`: sets the tag of a plain enum.
     StoreTag(TypeId),
+    /// `TypesWith<A>() []*TypeInfo`: the constant slice of the types
+    /// marked with `A` ([`Reflect::types_with`]).
+    TypesWith(TypeId),
 }
 
 /// Path and line table of one source file.
@@ -373,6 +381,9 @@ pub struct Function {
     pub captures: Vec<Capture>,
     pub body: Block,
     pub attrs: Vec<Attr>,
+    /// Attributes of each declared parameter (receiver excluded), in order;
+    /// empty when the function has none.
+    pub param_attrs: Vec<Vec<Attr>>,
     pub exported: bool,
     pub file: FileId,
     pub span: Span,

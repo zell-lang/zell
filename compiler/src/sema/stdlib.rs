@@ -1410,6 +1410,11 @@ pub fn with_source_paths<R>(paths: Vec<String>, f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// The path of source file `file` (empty if unknown).
+pub(crate) fn source_path(file: usize) -> String {
+    SOURCE_PATHS.with(|p| p.borrow().get(file).cloned().unwrap_or_default())
+}
+
 /// The directory of source file `file` (for `@embed`; empty if unknown).
 pub(crate) fn embed_source_dir(file: usize) -> std::path::PathBuf {
     SOURCE_PATHS.with(|p| {

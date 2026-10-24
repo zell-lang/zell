@@ -1,0 +1,54 @@
+// A tiny job registry built with reflect.TypesWith<A>(): every struct
+// marked @job is found by the compiler (in this package and in all its
+// dependencies) and run through a typed method pointer — no registration
+// code, no start-up scan.
+namespace examples.reflect_registry
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct job {
+    name     string
+    priority int = 0
+}
+
+@job(name: "backup", priority: 2)
+struct Backup {
+    static func Run() string {
+        return "copied 3 files"
+    }
+}
+
+@job(name: "mail")
+struct SendMail {
+    static func Run() string {
+        return "sent 1 message"
+    }
+}
+
+// Not a job: no attribute, not listed.
+struct Helper {
+    static func Run() string {
+        return "never"
+    }
+}
+
+// A compile-time check a library can make: every job needs a Run method
+// with the fixed signature (reflect.Error is the library static_assert;
+// this branch is dropped because the type is a struct).
+func Check<T>() {
+    if reflect.TypeOf<T>().Kind != reflect.Kind.Struct {
+        reflect.Error("jobs must be structs, " + reflect.TypeOf<T>().Name + " is not")
+    }
+}
+
+func main() {
+    Check<Backup>()
+    var jobs = reflect.TypesWith<job>()
+    println(len(jobs), "jobs")
+    for t in jobs {
+        var j = t.Attribute<job>()
+        var run = t.Method("Run").Call<func() string>()
+        println(j.name, "priority", j.priority, "->", run())
+    }
+}

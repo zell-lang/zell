@@ -2410,7 +2410,7 @@ deduplicated by type in the compiler). Only types that some code or table
 refers to get a table; unreferenced ones are removed by `globaldce`.
 
 ```c
-struct zell_reflect_type {             /* reflect.TypeInfo, 232 bytes */
+struct zell_reflect_type {             /* reflect.TypeInfo, 240 bytes */
     zell_type_info rt;                 /* +0   name (C string), 16 + sizeof T, drop */
     int32_t kind;                       /* +24  zell_reflect_kind (reflect.Kind order) */
     zell_string *name;                 /* +32  short name: User, *User, []int, map[string]int */
@@ -2425,13 +2425,16 @@ struct zell_reflect_type {             /* reflect.TypeInfo, 232 bytes */
     zell_slice attrs;                  /* +184 []any, see 17.2 */
     const zell_reflect_type *ptr_to;   /* +216 table of *T (full types only, for TypeInfo.New) */
     const zell_reflect_type *canon;    /* +224 alias tables only */
+    zell_string *package;              /* +232 namespace path of a struct/enum/interface (NULL = "") */
 };
 ```
 
 `zell_reflect_field` (FieldInfo, 72 bytes: `name`, `type`, `offset`,
 `index`, `embedded`, `exported`, `attrs` at +40), `zell_reflect_method`
-(MethodInfo, 72 bytes: `name`, `type`, `is_static` at +16, `invoke` at +24,
-`fnval` at +32, `attrs` at +40) and `zell_reflect_variant` (VariantInfo, 80
+(MethodInfo, 104 bytes: `name`, `type`, `is_static` at +16, `invoke` at +24,
+`fnval` at +32, `attrs` at +40, `params` at +72 — a `[]*ParamInfo` without
+the receiver), `zell_reflect_param` (ParamInfo, 56 bytes: `name`, `type`,
+`index` at +16, `attrs` at +24) and `zell_reflect_variant` (VariantInfo, 80
 bytes: `name`, `index`, `fields` at +16, `attrs` at +48) are immortal objects
 too; the slices holding them (and every other table slice) have a NULL
 backing, so retaining or releasing them is a no-op. Strings are immortal
@@ -2441,8 +2444,14 @@ literals.
   alignment). Variant fields have offsets from the start of the enum value
   (`{i32 tag, payload}`, payload at +8).
 - *Full* types — named in `reflect.TypeOf<T>()`, in a static `typeof(x)`, in
-  `reflect.Fields<T>()`, or declared `@reflect` — list their non-async
-  methods and get `ptr_to`; other tables have no methods.
+  `reflect.Fields<T>()`, declared `@reflect`, or listed by
+  `reflect.TypesWith<A>()` — list their non-async methods and get `ptr_to`;
+  other tables have no methods. Interface tables carry `attrs` (no methods).
+- `reflect.TypesWith<A>()` returns a constant slice (NULL backing) of the
+  tables of the marked types, computed by the compiler over the whole
+  program; it is emitted once per attribute type `A`.
+- The layout grows only by appending (`package` at +232, `params` at +72 of
+  a method were added on 2026-10-24); existing offsets never move.
 - A struct field spelled with a builtin alias (`int64`, `uint`, `uint8`,
   `float64`) points at an *alias table*: a copy with that name whose `canon`
   is the real table (`Value.Get/Set` compare canonical tables).

@@ -47,6 +47,7 @@ mod litcheck;
 mod logtmpl;
 mod ownership;
 mod reflect;
+mod reflect_with;
 mod resolve;
 mod stmt;
 pub mod stdfs;
@@ -981,6 +982,7 @@ impl<'a> Sema<'a> {
             captures: Vec::new(),
             body: hir::Block::default(),
             attrs: Vec::new(),
+            param_attrs: Vec::new(),
             exported: false,
             file: self.cur_file,
             span: Span::DUMMY,

@@ -199,6 +199,7 @@ impl<'a> Sema<'a> {
         if let Some(e) = self.reflect_generic_call(t, span) {
             return e;
         }
+        self.types_with_check(t, targs, span);
         // data: models, contexts and migrations generated at compile time (orm.rs).
         if recv.is_none() {
             if let Some(e) = self.orm_generic_call(t, targs, args, span) {
