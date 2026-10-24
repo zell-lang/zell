@@ -38,7 +38,7 @@ const AREAS: &[&str] = &[
     "basics", "control", "structs", "interfaces", "enums", "errors", "generics", "memory", "async", "attributes", "reflection", "stdlib",
     "namespaces", "switch", "closures", "pointers", "interfaces2", "generics2", "memory2", "errors2", "async2", "strings2",
     "diagnostics", "programs", "attributes2", "platform", "stdlib2", "stdlib3", "stdlib4", "operators", "iteration",
-    "stdlib5",
+    "stdlib5", "panics",
     "web",
     "data",
     "memory3",
