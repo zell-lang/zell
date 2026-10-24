@@ -409,8 +409,13 @@ jobs:
           VERSION: ${{ needs.meta.outputs.version }}
           HOST: ${{ matrix.host }}
         run: |
-          arc=$(ls "dist/zell-$VERSION-$HOST.tar.xz" "dist/zell-$VERSION-$HOST.tar.gz" 2>/dev/null | head -1)
-          [ -n "$arc" ] || { echo "::error::no archive for $HOST in dist/"; ls dist; exit 1; }
+          ls -l dist
+          arc=
+          for f in "dist/zell-$VERSION-$HOST.tar.xz" "dist/zell-$VERSION-$HOST.tar.gz"; do
+            if [ -f "$f" ]; then arc=$f; break; fi
+          done
+          [ -n "$arc" ] || { echo "::error::no archive zell-$VERSION-$HOST.tar.{xz,gz} in dist/"; exit 1; }
+          echo "installing $arc"
           mkdir -p "$HOME/zell" && tar xf "$arc" -C "$HOME/zell" --strip-components=1
           ls "$HOME/zell/bin" "$HOME/zell/targets"
           echo "$HOME/zell/bin" >> "$GITHUB_PATH"
