@@ -288,7 +288,16 @@ TEST(io_waits) {
     assert(s_read(sv[0], buf, sizeof buf) == 2);
     /* timeout */
     int64_t t0 = now_ms();
-    assert(wait_code(zell_io_wait_readable(sv[0], 30)) == 1);
+    int64_t code = wait_code(zell_io_wait_readable(sv[0], 30));
+    if (code == 0) {
+        /* a spurious report (ABI.md 10.9): a poller fetched the readiness
+         * between the data's arrival and its wake-up callback, which then
+         * reported the fd again; the read fails and the caller waits again */
+        assert(s_read(sv[0], buf, sizeof buf) < 0);
+        t0 = now_ms();
+        code = wait_code(zell_io_wait_readable(sv[0], 30));
+    }
+    assert(code == 1);
     assert(now_ms() - t0 >= 29);
     /* read and write waiters on one fd at once; the writer completes at
      * once (writable; on an edge-triggered poller the writability reported
@@ -323,6 +332,172 @@ TEST(io_many_fds) {
         s_close(sv[i][0]);
         s_close(sv[i][1]);
     }
+}
+
+/* ---- network polling from the workers (ABI.md 10.1, 10.9 netpoll) ---- */
+
+bool zell__sched_hub_parked(void);
+int64_t zell__io_netpoll_watchdog(void);
+
+/* Waits until a worker blocks in the hub (netpoll mode only). */
+static void wait_hub_parked(void) {
+    if (zell__io_netpoll_watchdog() < 0) return;
+    int64_t until = now_ms() + 5000;
+    while (!zell__sched_hub_parked()) {
+        assert(now_ms() < until);
+        zell__plat_sleep_ns(1000000);
+    }
+}
+
+typedef struct np_probe {
+    zell_task *done;   /* completed by np_cont */
+    int on_worker;
+} np_probe;
+
+static void np_cont(void *arg) {
+    np_probe *p = arg;
+    p->on_worker = zell_sched_is_worker();
+    zell_task_complete(p->done, NULL);
+}
+
+/* Waits for p->done without zell_task_await, failing after 5 s (a lost
+ * wake-up must fail the test, not hang it). */
+static void np_expect(np_probe *p) {
+    int64_t until = now_ms() + 5000;
+    while (!zell_task_is_done(p->done)) {
+        assert(now_ms() < until);
+        zell__plat_yield();
+    }
+    assert(p->on_worker);
+    zell_release(p->done);
+}
+
+typedef struct np_job {
+    int64_t fd[2];
+    np_probe *p;
+    zell_task *wait;
+} np_job;
+
+/* On a worker: waits for readability, makes the fd readable and keeps
+ * this worker busy for 2 ms: another worker (blocked in the hub, or
+ * polling when out of work) must pick the readiness up; no poller thread. */
+static void np_busy(zell_task *t, void *arg) {
+    np_job *j = arg;
+    j->wait = zell_io_wait_readable(j->fd[0], -1);
+    assert(zell_task_add_continuation(j->wait, np_cont, j->p));
+    assert(s_write(j->fd[1], "x", 1) == 1);
+    int64_t until = zell__plat_mono_ns() + 2000000;
+    while (zell__plat_mono_ns() < until) {}
+    zell_task_complete(t, NULL);
+}
+
+TEST(netpoll_worker_pickup) {
+    int64_t wd0 = zell__io_netpoll_watchdog();
+    for (int i = 0; i < 200; i++) {
+        np_job j;
+        np_probe p = { zell_task_rt_waker(), 0 };
+        sock_pair(j.fd, true);
+        j.p = &p;
+        zell_task *t = zell_task_spawn(np_busy, &j);
+        zell_task_await(t);
+        zell_release(t);
+        np_expect(&p);
+        zell_release(j.wait);
+        char c[4];
+        assert(s_read(j.fd[0], c, sizeof c) == 1);
+        zell_io_forget(j.fd[0]);
+        s_close(j.fd[0]);
+        s_close(j.fd[1]);
+    }
+    /* the watchdog only serves the network when no worker could: at most
+     * once here (the first wait, if the I/O started with every worker asleep) */
+    if (wd0 >= 0) assert(zell__io_netpoll_watchdog() - wd0 <= 1);
+}
+
+TEST(netpoll_deadline_while_parked) {
+    int64_t sv[2];
+    sock_pair(sv, true);
+    for (int i = 0; i < 20; i++) {
+        wait_hub_parked();   /* the I/O deadline is the hub blocker's timeout */
+        int64_t t0 = now_ms();
+        assert(wait_code(zell_io_wait_readable(sv[0], 15)) == 1);
+        int64_t el = now_ms() - t0;
+        assert(el >= 14 && el < 2000);
+    }
+    zell_io_forget(sv[0]);
+    s_close(sv[0]);
+    s_close(sv[1]);
+}
+
+static void *np_foreign_post(void *arg) {
+    zell_sched_post(np_cont, arg);
+    return NULL;
+}
+
+/* In a child with one worker, which then parks in the hub whenever it is
+ * idle: a post from a foreign thread, a timer and readiness must wake it. */
+static void np_one_worker(void) {
+    setenv("ZELL_WORKERS", "1", 1);
+    setenv("ZELL_IO_POLLERS", "1", 1);
+    static char *argv[] = { "test_platform", NULL };
+    zell_runtime_init(1, argv);
+    int64_t sv[2];
+    sock_pair(sv, true);
+    zell_io_register(sv[0]);   /* starts the I/O */
+    /* the worker went to sleep before the I/O started (the watchdog covers
+     * the network then): one job, and it parks in the hub from now on */
+    np_probe warm = { zell_task_rt_waker(), 0 };
+    zell_sched_post(np_cont, &warm);
+    np_expect(&warm);
+    for (int i = 0; i < 400; i++) {
+        np_probe p = { zell_task_rt_waker(), 0 };
+        zell_task *w = NULL;
+        wait_hub_parked();
+        switch (i % 4) {
+        case 0: {   /* a post from a fresh foreign thread kicks the hub */
+            zell__plat_thread th;
+            assert(zell__plat_thread_start(&th, np_foreign_post, &p));
+            zell__plat_thread_join(th);
+            break;
+        }
+        case 1:     /* ... and from this (non-worker) thread */
+            zell_sched_post(np_cont, &p);
+            break;
+        case 2: {   /* a timer fires: the timer thread posts */
+            w = zell_task_delay(2);
+            assert(zell_task_add_continuation(w, np_cont, &p));
+            break;
+        }
+        default:    /* readiness wakes the blocker itself */
+            w = zell_io_wait_readable(sv[0], -1);
+            while (zell_task_is_done(w)) {   /* a spurious report left over (ABI.md 10.9) */
+                char c[4];
+                assert(s_read(sv[0], c, sizeof c) < 0);
+                zell_release(w);
+                w = zell_io_wait_readable(sv[0], -1);
+            }
+            assert(zell_task_add_continuation(w, np_cont, &p));
+            assert(s_write(sv[1], "y", 1) == 1);
+            break;
+        }
+        np_expect(&p);
+        if (w) zell_release(w);
+        if (i % 4 == 3) {
+            char c[4];
+            assert(s_read(sv[0], c, sizeof c) == 1);
+        }
+    }
+    zell_io_forget(sv[0]);
+    s_close(sv[0]);
+    s_close(sv[1]);
+    zell_runtime_shutdown();
+}
+
+TEST(netpoll_one_worker) {
+    char buf[256];
+    int rc = run_child(np_one_worker, buf, sizeof buf);
+    if (rc != 0) fprintf(stderr, "%s", buf);
+    assert(rc == 0);
 }
 
 /* ---- task context, signals, spin locks, yield ---- */
@@ -410,6 +585,7 @@ TEST(spin_lock) {
 
 int main(int argc, char **argv) {
     printf("test_platform\n");
+    RUN(netpoll_one_worker);   /* first: the child must not inherit a running scheduler */
     setenv("ZELL_WORKERS", "3", 1);
     int64_t live = zell_live_objects();
     zell_runtime_init(argc, argv);
@@ -420,6 +596,8 @@ int main(int argc, char **argv) {
     RUN(poller_raw);
     RUN(io_waits);
     RUN(io_many_fds);
+    RUN(netpoll_worker_pickup);
+    RUN(netpoll_deadline_while_parked);
     RUN(context_follows_continuations);
     RUN(signals_and_cancel);
     RUN(spin_lock);

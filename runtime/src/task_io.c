@@ -69,6 +69,8 @@ typedef struct io_shard {
     int32_t stopping;
     int32_t index;
     bool edge;               /* the poller is edge-triggered (armed once per fd) */
+    int32_t claim;           /* atomic, netpoll: 1 while a thread is inside poller_wait */
+    int64_t next_deadline;   /* atomic: heap[0]'s deadline, INT64_MAX = none (written under mu) */
 } io_shard;
 
 typedef struct io_done {
@@ -86,6 +88,29 @@ static io_shard *io_shards;
 static int32_t io_nshards;
 static int32_t io_running;               /* atomic */
 static uint32_t io_rr;                   /* atomic: round-robin tie breaker */
+
+/* Netpoll mode (shared pollers, see "polling from the workers" below). */
+static bool io_netpoll;                  /* set before io_running */
+static zell__plat_poller *io_hub;        /* reports the shards that have events (token = index) */
+static int32_t io_hub_claim;             /* atomic: 1 while a thread is inside poller_wait(io_hub) */
+static int32_t io_hub_blocking;          /* atomic: the claim holder blocks (timeout != 0) */
+static int64_t io_hub_until;             /* atomic: the deadline it blocks toward */
+static int64_t io_last_poll;             /* atomic: monotonic ns of the last hub poll */
+static int32_t io_hub_wd;                /* atomic: the watchdog is the hub's blocker (a worker should be) */
+static zell__plat_thread io_wthread;     /* the watchdog */
+static zell__plat_mutex io_wmu = ZELL_PLAT_MUTEX_INIT;
+static zell__plat_cond io_wcv = ZELL_PLAT_COND_INIT;
+static int32_t io_wstop;                 /* under io_wmu */
+static int32_t io_watch_timed;           /* atomic: the watchdog sleeps toward io_watch_until */
+static int64_t io_watch_until;           /* atomic */
+static int32_t io_watch_idle;            /* atomic: the watchdog sleeps without a timeout (no worker awake) */
+static int64_t io_wd_done;               /* atomic, diag: waits the watchdog completed */
+#define IO_WATCH_NS 10000000
+/* Events taken from one shard per poll. Small: a worker posts a few
+ * continuations and leaves the rest to the next worker that runs out of
+ * work (the hub keeps reporting the shard), which spreads a burst over the
+ * workers; on benchmarks/async_io 4 gives p99 1.8 ms where 256 gave 3.5. */
+#define IO_POLL_BATCH 4             /* poll for the workers when they have not for this long */
 
 /* ---- descriptor table ---- */
 
@@ -184,6 +209,7 @@ static void heap_push(io_shard *sh, io_wait *w) {
     w->heap = sh->nheap++;
     sh->heap[w->heap] = w;
     heap_up(sh, w->heap);
+    __atomic_store_n(&sh->next_deadline, sh->heap[0]->deadline, __ATOMIC_SEQ_CST);
 }
 
 static void heap_remove(io_shard *sh, io_wait *w) {
@@ -197,6 +223,7 @@ static void heap_remove(io_shard *sh, io_wait *w) {
         heap_down(sh, i);
         heap_up(sh, i);
     }
+    __atomic_store_n(&sh->next_deadline, sh->nheap ? sh->heap[0]->deadline : INT64_MAX, __ATOMIC_SEQ_CST);
 }
 
 /* ---- completions ---- */
@@ -274,6 +301,51 @@ static void rearm(io_shard *sh, io_fd *e, int64_t fd) {
 
 /* ---- the poller threads ---- */
 
+/* Shard mutex held: applies n poller reports to the waits (completions to d). */
+static void shard_events(io_shard *sh, const zell__plat_event *evs, int n, done_buf *d) {
+    for (int i = 0; i < n; i++) {
+        if (evs[i].token == ZELL_PLAT_WAKE_TOKEN) continue;
+        int64_t fd = (int64_t)(uint32_t)evs[i].token;
+        uint32_t gen = (uint32_t)(evs[i].token >> 32);
+        io_fd *e = entry(fd, false);
+        /* stale: the fd was forgotten (and maybe reused) since it was armed */
+        if (!e || __atomic_load_n(&e->shard, __ATOMIC_RELAXED) != sh->index || e->gen != gen) continue;
+        if (sh->edge) {
+            /* edge-triggered: wake the waiters, or keep the readiness for
+             * the next wait. End of stream and errors stay: a short read
+             * may return the last data without the EOF behind it, and no
+             * new edge would come for the EOF. */
+            if (evs[i].events & ZELL_PLAT_HUP) e->sticky |= ZELL_PLAT_READ;
+            if (evs[i].events & ZELL_PLAT_ERROR) e->sticky |= ZELL_PLAT_READ | ZELL_PLAT_WRITE;
+            if (evs[i].events & ZELL_PLAT_READ) {
+                if (e->rd) take_all(sh, &e->rd, IO_READY, d);
+                else e->ready |= ZELL_PLAT_READ;
+            }
+            if (evs[i].events & ZELL_PLAT_WRITE) {
+                if (e->wr) take_all(sh, &e->wr, IO_READY, d);
+                else e->ready |= ZELL_PLAT_WRITE;
+            }
+            continue;
+        }
+        e->armed = 0;  /* one-shot: the report disarmed it */
+        if (evs[i].events & ZELL_PLAT_READ) take_all(sh, &e->rd, IO_READY, d);
+        if (evs[i].events & ZELL_PLAT_WRITE) take_all(sh, &e->wr, IO_READY, d);
+        rearm(sh, e, fd);
+    }
+}
+
+/* Shard mutex held: completes the waits whose deadline passed. */
+static void shard_expire(io_shard *sh, int64_t now, done_buf *d) {
+    while (sh->nheap > 0 && sh->heap[0]->deadline <= now) {
+        io_wait *w = sh->heap[0];
+        heap_remove(sh, w);
+        io_fd *e = entry(w->fd, false);
+        if (e) unlink_wait(e, w);
+        done_push(d, w->task, IO_TIMEOUT);
+        free(w);
+    }
+}
+
 static void *io_main(void *arg) {
     io_shard *sh = arg;
     zell__plat_event evs[256];
@@ -293,44 +365,8 @@ static void *io_main(void *arg) {
         zell__plat_mutex_unlock(&sh->mu);
         int n = zell__plat_poller_wait(sh->poller, evs, 256, timeout);
         zell__plat_mutex_lock(&sh->mu);
-        for (int i = 0; i < n; i++) {
-            if (evs[i].token == ZELL_PLAT_WAKE_TOKEN) continue;
-            int64_t fd = (int64_t)(uint32_t)evs[i].token;
-            uint32_t gen = (uint32_t)(evs[i].token >> 32);
-            io_fd *e = entry(fd, false);
-            /* stale: the fd was forgotten (and maybe reused) since it was armed */
-            if (!e || __atomic_load_n(&e->shard, __ATOMIC_RELAXED) != sh->index || e->gen != gen) continue;
-            if (sh->edge) {
-                /* edge-triggered: wake the waiters, or keep the readiness for
-                 * the next wait. End of stream and errors stay: a short read
-                 * may return the last data without the EOF behind it, and no
-                 * new edge would come for the EOF. */
-                if (evs[i].events & ZELL_PLAT_HUP) e->sticky |= ZELL_PLAT_READ;
-                if (evs[i].events & ZELL_PLAT_ERROR) e->sticky |= ZELL_PLAT_READ | ZELL_PLAT_WRITE;
-                if (evs[i].events & ZELL_PLAT_READ) {
-                    if (e->rd) take_all(sh, &e->rd, IO_READY, &d);
-                    else e->ready |= ZELL_PLAT_READ;
-                }
-                if (evs[i].events & ZELL_PLAT_WRITE) {
-                    if (e->wr) take_all(sh, &e->wr, IO_READY, &d);
-                    else e->ready |= ZELL_PLAT_WRITE;
-                }
-                continue;
-            }
-            e->armed = 0;  /* one-shot: the report disarmed it */
-            if (evs[i].events & ZELL_PLAT_READ) take_all(sh, &e->rd, IO_READY, &d);
-            if (evs[i].events & ZELL_PLAT_WRITE) take_all(sh, &e->wr, IO_READY, &d);
-            rearm(sh, e, fd);
-        }
-        int64_t now = zell__plat_mono_ns();
-        while (sh->nheap > 0 && sh->heap[0]->deadline <= now) {
-            io_wait *w = sh->heap[0];
-            heap_remove(sh, w);
-            io_fd *e = entry(w->fd, false);
-            if (e) unlink_wait(e, w);
-            done_push(&d, w->task, IO_TIMEOUT);
-            free(w);
-        }
+        shard_events(sh, evs, n, &d);
+        shard_expire(sh, zell__plat_mono_ns(), &d);
         if (d.n) {
             zell__plat_mutex_unlock(&sh->mu);
             done_finish(&d);
@@ -338,6 +374,237 @@ static void *io_main(void *arg) {
         }
     }
     zell__plat_mutex_unlock(&sh->mu);
+    done_free(&d);
+    return NULL;
+}
+
+/* ---- polling from the workers (netpoll mode) ----
+ *
+ * When every shard's poller is shared (zell__plat_poller_shared: epoll),
+ * the shards get no threads of their own. Their pollers are linked into
+ * one hub poller that reports which shards have events (level-triggered,
+ * token = shard index), and the scheduler polls (task.c, ABI.md 10.1):
+ *   - a worker out of work calls np_poll before stealing: the hub with
+ *     timeout 0, then each shard it reports with timeout 0, plus the due
+ *     deadlines; the waits it completes post their continuations to that
+ *     worker's ring. No thread is woken for readiness while workers run;
+ *   - the last worker to go idle claims the hub (np_claim, under q_mu) and
+ *     blocks in it (np_block) with the earliest deadline of all shards as
+ *     timeout; a post kicks it through the hub's wake-up channel (np_kick);
+ *   - one watchdog thread (io_watch_main) blocks in the hub only when no
+ *     worker is awake and nobody holds the hub (the I/O started while every
+ *     worker slept, or all of them block in zell_task_await), and while
+ *     workers are awake it polls for them when nobody polled the hub for
+ *     IO_WATCH_NS (every worker busy: Go's sysmon) and serves deadlines.
+ * Exclusion: a thread inside poller_wait holds that poller's claim (hub:
+ * io_hub_claim, shard: sh->claim; others skip it), so events of one poller
+ * are fetched and applied by one thread at a time, and the hub's wake-up
+ * channel is only ever read by the thread a kick was meant for (or after
+ * it left, when the kick no longer matters).
+ * Deadlines: a new wait whose deadline is earlier than what the hub
+ * blocker or the timed watchdog sleeps toward wakes it. Both publish
+ * "blocking" before reading the shards' next_deadline, and io_wait_for
+ * stores next_deadline before reading "blocking" (all sequentially
+ * consistent): one of the two sees the other. */
+
+static int64_t earliest_deadline(void) {
+    int64_t m = INT64_MAX;
+    for (int32_t i = 0; i < io_nshards; i++) {
+        int64_t d = __atomic_load_n(&io_shards[i].next_deadline, __ATOMIC_SEQ_CST);
+        if (d < m) m = d;
+    }
+    return m;
+}
+
+static bool try_claim(int32_t *claim) {
+    int32_t zero = 0;
+    return __atomic_load_n(claim, __ATOMIC_RELAXED) == 0 &&
+           __atomic_compare_exchange_n(claim, &zero, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+/* Fetches and applies sh's events (timeout 0), unless somebody else is in
+ * its poller right now (then that thread applies them). */
+static void shard_poll(io_shard *sh, done_buf *d) {
+    if (!try_claim(&sh->claim)) return;
+    zell__plat_event evs[IO_POLL_BATCH];
+    int n = zell__plat_poller_wait(sh->poller, evs, IO_POLL_BATCH, 0);
+    if (n > 0) {
+        zell__plat_mutex_lock(&sh->mu);
+        shard_events(sh, evs, n, d);
+        zell__plat_mutex_unlock(&sh->mu);
+    }
+    __atomic_store_n(&sh->claim, 0, __ATOMIC_RELEASE);
+}
+
+/* Applies the hub's reports (polls the shards it names) and the deadlines
+ * that are due. */
+static void hub_reports(const zell__plat_event *evs, int n, done_buf *d) {
+    for (int i = 0; i < n; i++)
+        if (evs[i].token < (uint64_t)io_nshards) shard_poll(&io_shards[evs[i].token], d);
+    int64_t now = zell__plat_mono_ns();
+    /* a shared line: written about once per millisecond, not per poll */
+    if (now - __atomic_load_n(&io_last_poll, __ATOMIC_RELAXED) > 1000000) __atomic_store_n(&io_last_poll, now, __ATOMIC_RELAXED);
+    if (earliest_deadline() > now) return;
+    for (int32_t i = 0; i < io_nshards; i++) {
+        io_shard *sh = &io_shards[i];
+        if (__atomic_load_n(&sh->next_deadline, __ATOMIC_SEQ_CST) > now) continue;
+        zell__plat_mutex_lock(&sh->mu);
+        shard_expire(sh, now, d);
+        zell__plat_mutex_unlock(&sh->mu);
+    }
+}
+
+/* One look with timeout 0 (skipped while somebody blocks in the hub: it
+ * gets the reports), then the due deadlines. */
+static void netpoll_once(done_buf *d) {
+    zell__plat_event evs[64];
+    int n = 0;
+    if (try_claim(&io_hub_claim)) {
+        n = zell__plat_poller_wait(io_hub, evs, 64, 0);
+        __atomic_store_n(&io_hub_claim, 0, __ATOMIC_RELEASE);
+    }
+    hub_reports(evs, n, d);
+}
+
+/* The hub is claimed: blocks in it until readiness, the earliest deadline
+ * or a wake-up, then drops the claim and applies the reports. */
+static void hub_block(done_buf *d) {
+    __atomic_store_n(&io_hub_until, INT64_MAX, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&io_hub_blocking, 1, __ATOMIC_SEQ_CST);
+    int64_t dl = earliest_deadline();
+    __atomic_store_n(&io_hub_until, dl, __ATOMIC_SEQ_CST);
+    int64_t timeout = -1;
+    if (dl != INT64_MAX) {
+        int64_t left = dl - zell__plat_mono_ns();
+        timeout = left <= 0 ? 0 : (left + 999999) / 1000000;
+    }
+    zell__plat_event evs[64];
+    int n = zell__plat_poller_wait(io_hub, evs, 64, timeout);
+    __atomic_store_n(&io_hub_blocking, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&io_hub_claim, 0, __ATOMIC_RELEASE);
+    hub_reports(evs, n, d);
+}
+
+/* io_wait_for, after adding a wait with deadline dl (no shard lock held). */
+static void netpoll_deadline(int64_t dl) {
+    if (__atomic_load_n(&io_hub_blocking, __ATOMIC_SEQ_CST) && dl < __atomic_load_n(&io_hub_until, __ATOMIC_SEQ_CST))
+        zell__plat_poller_wake(io_hub);
+    if (__atomic_load_n(&io_watch_timed, __ATOMIC_SEQ_CST) && dl < __atomic_load_n(&io_watch_until, __ATOMIC_SEQ_CST)) {
+        zell__plat_mutex_lock(&io_wmu);
+        zell__plat_cond_signal(&io_wcv);
+        zell__plat_mutex_unlock(&io_wmu);
+    }
+}
+
+/* The scheduler's hooks (rt_internal.h zell__netpoll), on workers. */
+static _Thread_local done_buf t_np_done;   /* np_block -> np_finish */
+
+static bool np_poll(void) {
+    done_buf d;
+    done_init(&d);
+    netpoll_once(&d);
+    bool got = d.n > 0;
+    done_finish(&d);
+    done_free(&d);
+    return got;
+}
+
+static bool np_claim(void) {
+    if (try_claim(&io_hub_claim)) return true;
+    /* The watchdog blocks there because no worker could when it looked:
+     * make it hand over (it pokes us, and we claim the hub next time). */
+    if (__atomic_load_n(&io_hub_wd, __ATOMIC_SEQ_CST) && __atomic_exchange_n(&io_hub_wd, 0, __ATOMIC_SEQ_CST))
+        zell__plat_poller_wake(io_hub);
+    return false;
+}
+
+static void np_block(void) {
+    if (!t_np_done.v) done_init(&t_np_done);
+    hub_block(&t_np_done);
+}
+
+static void np_finish(void) {
+    if (!t_np_done.v) return;
+    done_finish(&t_np_done);
+    done_free(&t_np_done);
+}
+
+static void np_kick(void) { zell__plat_poller_wake(io_hub); }
+
+static void np_awake(void) {
+    if (!__atomic_load_n(&io_watch_idle, __ATOMIC_SEQ_CST) || !__atomic_exchange_n(&io_watch_idle, 0, __ATOMIC_SEQ_CST)) return;
+    zell__plat_mutex_lock(&io_wmu);
+    zell__plat_cond_signal(&io_wcv);
+    zell__plat_mutex_unlock(&io_wmu);
+}
+
+static const zell__netpoll np_hooks = { np_poll, np_claim, np_block, np_finish, np_kick, np_awake };
+
+/* The watchdog thread of netpoll mode. */
+static void *io_watch_main(void *unused) {
+    (void)unused;
+    done_buf d;
+    done_init(&d);
+    int idle_rounds = 0;   /* timed rounds in a row that found no worker awake */
+    zell__plat_mutex_lock(&io_wmu);
+    while (!io_wstop) {
+        int64_t awake = zell__sched_awake();
+        /* Nobody would poll and nobody is in the hub: wake a parked worker,
+         * which then goes idle again as the last one and blocks in the hub
+         * (the I/O started while every worker slept); with none parked
+         * (all of them block in zell_task_await) wait for the network
+         * ourselves. */
+        if (awake <= 0 && !__atomic_load_n(&io_hub_claim, __ATOMIC_SEQ_CST) && !zell__sched_poke()) {
+            /* the flag goes up before the claim: a worker whose claim
+             * fails after ours sees it and kicks us out (np_claim) */
+            __atomic_store_n(&io_hub_wd, 1, __ATOMIC_SEQ_CST);
+            if (!try_claim(&io_hub_claim)) {
+                __atomic_store_n(&io_hub_wd, 0, __ATOMIC_SEQ_CST);
+                continue;
+            }
+            zell__plat_mutex_unlock(&io_wmu);
+            hub_block(&d);
+            __atomic_store_n(&io_hub_wd, 0, __ATOMIC_SEQ_CST);
+            __atomic_add_fetch(&io_wd_done, d.n, __ATOMIC_RELAXED);
+            done_finish(&d);
+            zell__plat_mutex_lock(&io_wmu);
+            continue;
+        }
+        if (awake > 0) idle_rounds = 0;
+        else if (++idle_rounds >= 5) {
+            /* Idle for a while with a worker in the hub (it covers the
+             * network and the deadlines): sleep until a worker wakes up.
+             * The flag goes first, then the count: a worker that leaves
+             * q_idle after we read it sees the flag (np_awake). */
+            __atomic_store_n(&io_watch_idle, 1, __ATOMIC_SEQ_CST);
+            if (zell__sched_awake() <= 0 && __atomic_load_n(&io_hub_blocking, __ATOMIC_SEQ_CST))
+                zell__plat_cond_wait_ns(&io_wcv, &io_wmu, 1000000000);  /* the timeout is a safety net */
+            __atomic_store_n(&io_watch_idle, 0, __ATOMIC_SEQ_CST);
+            idle_rounds = 0;
+            continue;
+        }
+        /* Look again in IO_WATCH_NS or at the earliest deadline: poll for
+         * the workers if none of them has polled meanwhile (all busy). */
+        __atomic_store_n(&io_watch_until, INT64_MAX, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&io_watch_timed, 1, __ATOMIC_SEQ_CST);
+        int64_t now = zell__plat_mono_ns();
+        int64_t until = now + IO_WATCH_NS;
+        int64_t dl = earliest_deadline();
+        if (dl < until) until = dl;
+        __atomic_store_n(&io_watch_until, until, __ATOMIC_SEQ_CST);
+        if (until > now) zell__plat_cond_wait_ns(&io_wcv, &io_wmu, until - now);
+        __atomic_store_n(&io_watch_timed, 0, __ATOMIC_SEQ_CST);
+        if (io_wstop) break;
+        now = zell__plat_mono_ns();
+        if (now - __atomic_load_n(&io_last_poll, __ATOMIC_RELAXED) >= IO_WATCH_NS || earliest_deadline() <= now) {
+            zell__plat_mutex_unlock(&io_wmu);
+            netpoll_once(&d);
+            __atomic_add_fetch(&io_wd_done, d.n, __ATOMIC_RELAXED);
+            done_finish(&d);
+            zell__plat_mutex_lock(&io_wmu);
+        }
+    }
+    zell__plat_mutex_unlock(&io_wmu);
     done_free(&d);
     return NULL;
 }
@@ -359,20 +626,38 @@ static void io_start(void) {
     if (!io_running) {
         io_shard *s = calloc((size_t)n, sizeof *s);
         if (!s) zell_panic("out of memory (io)");
+        const char *env = getenv("ZELL_IO_NETPOLL");
+        bool np = !(env && env[0] == '0');   /* ZELL_IO_NETPOLL=0: dedicated poller threads */
         for (int32_t i = 0; i < n; i++) {
             zell__plat_mutex_init(&s[i].mu);
             s[i].index = i;
             s[i].sleep_until = INT64_MAX;
+            s[i].next_deadline = INT64_MAX;
             s[i].poller = zell__plat_poller_new();
             if (!s[i].poller) zell_panic("cannot create the I/O poller");
             s[i].edge = zell__plat_poller_edge(s[i].poller);
+            np = np && zell__plat_poller_shared(s[i].poller);
         }
+        zell__plat_poller *hub = np ? zell__plat_poller_new() : NULL;
+        np = hub && zell__plat_poller_shared(hub);
+        for (int32_t i = 0; np && i < n; i++) np = zell__plat_poller_link(hub, s[i].poller, (uint64_t)i) == 0;
+        if (!np && hub) { zell__plat_poller_free(hub); hub = NULL; }
         io_shards = s;
         io_nshards = n;
+        io_netpoll = np;
+        io_hub = hub;
+        io_hub_claim = io_hub_blocking = 0;
+        io_last_poll = zell__plat_mono_ns();
+        io_wstop = 0;
         zell__io_stop_fn = zell__io_stop;  /* shutdown stops the shards */
-        for (int32_t i = 0; i < n; i++)
-            if (!zell__plat_thread_start(&s[i].thread, io_main, &s[i])) zell_panic("cannot create an I/O poller thread");
+        if (np) {
+            if (!zell__plat_thread_start(&io_wthread, io_watch_main, NULL)) zell_panic("cannot create the I/O watchdog thread");
+        } else {
+            for (int32_t i = 0; i < n; i++)
+                if (!zell__plat_thread_start(&s[i].thread, io_main, &s[i])) zell_panic("cannot create an I/O poller thread");
+        }
         __atomic_store_n(&io_running, 1, __ATOMIC_RELEASE);
+        if (np) __atomic_store_n(&zell__netpoll_hooks, &np_hooks, __ATOMIC_RELEASE);
     }
     zell__plat_mutex_unlock(&io_start_mu);
 }
@@ -447,14 +732,19 @@ static zell_task *io_wait_for(int64_t fd, bool write, int64_t timeout_ms) {
         }
     }
     bool wake = false;
+    int64_t deadline = 0;
     if (immediate < 0 && w->deadline) {
         heap_push(sh, w);
-        wake = w->deadline < sh->sleep_until;
-        if (wake) sh->sleep_until = w->deadline;
+        deadline = w->deadline;
+        if (!io_netpoll) {
+            wake = w->deadline < sh->sleep_until;
+            if (wake) sh->sleep_until = w->deadline;
+        }
     }
     zell__plat_poller *p = sh->poller;
     zell__plat_mutex_unlock(&sh->mu);
     if (wake) zell__plat_poller_wake(p);
+    if (deadline && io_netpoll) netpoll_deadline(deadline);
     if (immediate >= 0) {
         zell_task_complete(t, &immediate);
         zell_release(t);
@@ -502,19 +792,35 @@ int64_t zell__io_shard_of(int64_t fd) {
     return e ? __atomic_load_n(&e->shard, __ATOMIC_ACQUIRE) : -1;
 }
 
+int64_t zell__io_netpoll_watchdog(void) {
+    if (!__atomic_load_n(&io_running, __ATOMIC_ACQUIRE) || !io_netpoll) return -1;
+    return __atomic_load_n(&io_wd_done, __ATOMIC_RELAXED);
+}
+
 int64_t zell__io_shards(void) { return __atomic_load_n(&io_running, __ATOMIC_ACQUIRE) ? io_nshards : 0; }
 
 void zell__io_stop(void) {
     zell__net_stop();
     zell__plat_mutex_lock(&io_start_mu);
     if (!io_running) { zell__plat_mutex_unlock(&io_start_mu); return; }
-    for (int32_t i = 0; i < io_nshards; i++) {
-        zell__plat_mutex_lock(&io_shards[i].mu);
-        io_shards[i].stopping = 1;
-        zell__plat_mutex_unlock(&io_shards[i].mu);
-        zell__plat_poller_wake(io_shards[i].poller);
+    if (io_netpoll) {
+        /* the workers have stopped (zell_runtime_shutdown order) */
+        __atomic_store_n(&zell__netpoll_hooks, NULL, __ATOMIC_RELEASE);
+        zell__plat_mutex_lock(&io_wmu);
+        io_wstop = 1;
+        zell__plat_cond_signal(&io_wcv);
+        zell__plat_mutex_unlock(&io_wmu);
+        zell__plat_poller_wake(io_hub);
+        zell__plat_thread_join(io_wthread);
+    } else {
+        for (int32_t i = 0; i < io_nshards; i++) {
+            zell__plat_mutex_lock(&io_shards[i].mu);
+            io_shards[i].stopping = 1;
+            zell__plat_mutex_unlock(&io_shards[i].mu);
+            zell__plat_poller_wake(io_shards[i].poller);
+        }
+        for (int32_t i = 0; i < io_nshards; i++) zell__plat_thread_join(io_shards[i].thread);
     }
-    for (int32_t i = 0; i < io_nshards; i++) zell__plat_thread_join(io_shards[i].thread);
     /* Waits still pending at shutdown are dropped without completing (the
      * scheduler has stopped: nobody would run their continuations). */
     for (int64_t c = 0; c < IO_MAX_CHUNKS; c++) {
@@ -539,6 +845,9 @@ void zell__io_stop(void) {
         free(io_shards[i].heap);
         zell__plat_mutex_destroy(&io_shards[i].mu);
     }
+    if (io_hub) zell__plat_poller_free(io_hub);
+    io_hub = NULL;
+    io_netpoll = false;
     free(io_shards);
     io_shards = NULL;
     io_nshards = 0;

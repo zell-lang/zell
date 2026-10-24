@@ -19,6 +19,33 @@
  * posts (it runs next on the same worker, without any queue), and one
  * global FIFO for posts from other threads (I/O, timers, main) and ring
  * overflow. ABI.md 10.1 describes the policy; the rules are Go's.
+ *
+ * Network polling (netpoll, ABI.md 10.9), when task_io.c installs
+ * zell__netpoll_hooks (shared pollers: epoll): readiness is picked up by
+ * the workers themselves, as in Go's findrunnable, instead of by poller
+ * threads that would post through the global queue and wake a worker.
+ *   - find_work: out of local and global work, a worker polls the network
+ *     with timeout 0 before stealing; the completed waits post their
+ *     continuations to its own ring (t_ring_only: FIFO, no run-next), so
+ *     the readiness costs no thread switch. The spinning worker polls too
+ *     (every 64 rounds of spin_for_work).
+ *   - park: the worker that makes the pool idle (q_idle + q_blocked ==
+ *     q_alive) blocks in the hub poller instead of on q_cv, with the next
+ *     deadline of an I/O wait as timeout ("one M in netpoll"); it is
+ *     q_hub_w. It counts in q_idle like a q_cv sleeper, so the store-then-
+ *     load protocol of posters and parkers is unchanged: a poster that sees
+ *     q_idle > 0 takes q_mu and, with nobody on q_cv to signal, kicks the
+ *     hub (zell__plat_poller_wake through the hook) and reserves the
+ *     spinning token for q_hub_w (q_hub_kicked), exactly like a q_cv wake.
+ *     The claim on the hub is taken under q_mu before q_hub_w is set, and
+ *     only the claim holder waits on the hub, so a kick is never consumed
+ *     by another thread's poll: no lost wake-up.
+ *   - task_io.c keeps one watchdog thread that blocks in the hub only
+ *     when no worker is awake to poll (the I/O started while every worker
+ *     slept) and otherwise polls on the workers' behalf when they have not
+ *     polled for 10 ms (all of them busy), like Go's sysmon.
+ * The spin/park protocol itself (spinning token, lingering run-next) is
+ * the same with and without netpoll.
  * ====================================================================== */
 
 /* One unit of work: fn(arg) run with the task context `ctx` as task `cur`
@@ -90,6 +117,8 @@ static int64_t q_unblocks;    /* under q_mu: workers that left zell_task_await, 
 #define STALL_NS 10000000     /* a blocked pool with queued work and no progress for this long gets one more thread */
 static int64_t q_spinning;    /* atomic: 1 while a worker polls for work before parking */
 static int64_t q_wake_pending; /* under q_mu: wake-ups sent whose spinning token is not yet taken */
+static worker *q_hub_w;        /* under q_mu: the idle worker blocked in the network hub (netpoll), if any */
+static int q_hub_kicked;       /* under q_mu: q_hub_w was kicked for a post and inherits the spinning token */
 
 /* How long an out-of-work worker polls the queues before it parks on q_cv
  * (and at most one does at a time). A job posted meanwhile is taken
@@ -117,6 +146,9 @@ static int64_t pr_lazy, pr_addcont, pr_complete, pr_drop, pr_findwork, pr_jobtai
 #endif
 
 static _Thread_local int t_is_worker;
+static _Thread_local int t_ring_only;  /* posts from this worker skip run-next (netpoll completions: FIFO) */
+const zell__netpoll *zell__netpoll_hooks;
+static inline const zell__netpoll *netpoll(void) { return __atomic_load_n(&zell__netpoll_hooks, __ATOMIC_ACQUIRE); }
 /* Posts from a non-worker thread that batches them (timer_main): the jobs
  * are collected here and pushed to the global queue in one lock round
  * trip by post_batch_flush. NULL on every other thread. */
@@ -289,15 +321,26 @@ static inline bool runnext_full(const worker *w) { return __atomic_load_n(&w->rn
 /* Wakes one parked worker if nobody is polling for work. The woken worker
  * inherits the spinning token (q_spinning is raised here, on its behalf),
  * so posts made before it runs do not wake more workers (Go's wakep). */
-static void wake_one(void) {
-    if (__atomic_load_n(&q_idle, __ATOMIC_SEQ_CST) == 0 || __atomic_load_n(&q_spinning, __ATOMIC_SEQ_CST) != 0) return;
-    zell__plat_mutex_lock(&q_mu);
-    if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) - q_wake_pending > 0 && __atomic_load_n(&q_spinning, __ATOMIC_RELAXED) == 0) {
+static void wake_locked(void) {
+    if (__atomic_load_n(&q_spinning, __ATOMIC_RELAXED) != 0) return;
+    /* a worker on q_cv first: the one in the hub keeps covering the network */
+    if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) - (q_hub_w ? 1 : 0) - q_wake_pending > 0) {
         __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
         q_wake_pending++;
         STAT(wake);
         zell__plat_cond_signal(&q_cv);
+    } else if (q_hub_w && !q_hub_kicked) {
+        __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
+        q_hub_kicked = 1;
+        STAT(wake);
+        netpoll()->kick();
     }
+}
+
+static void wake_one(void) {
+    if (__atomic_load_n(&q_idle, __ATOMIC_SEQ_CST) == 0 || __atomic_load_n(&q_spinning, __ATOMIC_SEQ_CST) != 0) return;
+    zell__plat_mutex_lock(&q_mu);
+    wake_locked();
     zell__plat_mutex_unlock(&q_mu);
 }
 
@@ -392,6 +435,21 @@ static bool steal_work(worker *w, jobrec *out) {
     return false;
 }
 
+/* Polls the network for w (netpoll, timeout 0): the completions go to
+ * w's ring in order. Returns whether any was posted. */
+__attribute__((noinline)) static bool netpoll_poll(const zell__netpoll *np) {
+    t_ring_only = 1;
+    bool got = np->poll();
+    t_ring_only = 0;
+    return got;
+}
+
+static inline bool netpoll_here(worker *w) {
+    (void)w;
+    const zell__netpoll *np = netpoll();
+    return np && netpoll_poll(np);
+}
+
 static bool find_work(worker *w, jobrec *out) {
     w->tick++;
     if (w->tick % GLOBAL_EVERY == 0 && global_get(w, out)) { w->rn_streak = 0; return true; }
@@ -403,6 +461,9 @@ static bool find_work(worker *w, jobrec *out) {
     if (ring_pop(w, out)) { w->rn_streak = 0; STAT(jobs_ring); return true; }
     if (ring_first && runnext_take(w, out)) { w->rn_streak = 1; STAT(jobs_rn); return true; }
     if (global_get(w, out)) { w->rn_streak = 0; STAT(jobs_glob); return true; }
+    /* The network before the other workers (Go's findrunnable): ready
+     * waits complete here and their continuations land in our ring. */
+    if (netpoll_here(w) && ring_pop(w, out)) { w->rn_streak = 0; STAT(jobs_ring); return true; }
     if (steal_work(w, out)) { w->rn_streak = 0; return true; }
     return false;
 }
@@ -417,6 +478,7 @@ static bool spin_for_work(worker *w, jobrec *out, bool *taken) {
         if (queued_work()) return true;
         if ((i & 63) == 0) {
             if (zell__plat_mono_ns() >= w->spin_until) return false;
+            if (netpoll_here(w)) return true;
             if (lingering_runnext(w, out)) { *taken = true; return true; }
             zell__plat_yield();   /* a shared machine: let the poster run */
         }
@@ -527,6 +589,34 @@ static void *worker_main(void *arg) {
             continue;
         }
         if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == q_alive) zell__plat_cond_broadcast(&idle_cv);  /* drained */
+        /* The last worker to go idle waits for the network (and the next
+         * I/O deadline) in the hub poller instead of on q_cv; a post kicks
+         * it (wake_locked). */
+        const zell__netpoll *np = netpoll();
+        if (np && __atomic_load_n(&q_idle, __ATOMIC_RELAXED) + q_blocked == q_alive && !q_hub_w && np->claim()) {
+            q_hub_w = w;
+            q_hub_kicked = 0;
+            zell__plat_mutex_unlock(&q_mu);
+            zell__rc_park(0);
+            if (zell__cycles_park) zell__cycles_park();
+            STAT(park);
+            np->block();
+            zell__plat_mutex_lock(&q_mu);
+            q_hub_w = NULL;
+            __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
+            if (q_hub_kicked) {   /* the kicker reserved the spinning token for us */
+                q_hub_kicked = 0;
+                w->spinning = 1;
+                w->spin_until = zell__plat_mono_ns() + SPIN_NS;
+            }
+            zell__plat_mutex_unlock(&q_mu);
+            zell__rc_unpark();
+            np->awake();
+            t_ring_only = 1;
+            np->finish();
+            t_ring_only = 0;
+            continue;
+        }
         zell__rc_park(0);
         if (zell__cycles_park) zell__cycles_park();   /* weak: the collector is linked */
         STAT(park);
@@ -539,10 +629,11 @@ static void *worker_main(void *arg) {
         }
         zell__plat_mutex_unlock(&q_mu);
         zell__rc_unpark();
+        if (np) np->awake();
     }
     /* q_mu held */
     w->alive = 0;
-    q_alive--;
+    __atomic_sub_fetch(&q_alive, 1, __ATOMIC_SEQ_CST);
     zell__plat_cond_broadcast(&idle_cv);
     zell__plat_mutex_unlock(&q_mu);
     return NULL;
@@ -568,7 +659,7 @@ static bool spawn_worker_locked(int spare) {
     w->spinning = 0;
     w->tick = w->rn_streak = 0;
     if (!zell__plat_thread_start_detached(worker_main, w)) zell_panic("cannot create worker thread");
-    q_alive++;
+    __atomic_add_fetch(&q_alive, 1, __ATOMIC_SEQ_CST);
     if (q_alive > q_alive_peak) q_alive_peak = q_alive;
     return true;
 }
@@ -591,6 +682,27 @@ static int64_t spare_limit(int64_t n) {
 
 /* The most worker threads alive at once since the previous call (the
  * count restarts from the threads alive now). */
+bool zell__sched_poke(void) {
+    zell__plat_mutex_lock(&q_mu);
+    bool parked = __atomic_load_n(&q_idle, __ATOMIC_RELAXED) - (q_hub_w ? 1 : 0) > 0;
+    if (parked) wake_locked();
+    zell__plat_mutex_unlock(&q_mu);
+    return parked;
+}
+
+bool zell__sched_hub_parked(void) {
+    zell__plat_mutex_lock(&q_mu);
+    bool r = q_hub_w != NULL;
+    zell__plat_mutex_unlock(&q_mu);
+    return r;
+}
+
+int64_t zell__sched_awake(void) {
+    /* q_alive and q_blocked are written under q_mu with atomic stores, so
+     * this lock-free read is a snapshot (the I/O watchdog's hint) */
+    return __atomic_load_n(&q_alive, __ATOMIC_SEQ_CST) - __atomic_load_n(&q_idle, __ATOMIC_SEQ_CST) - __atomic_load_n(&q_blocked, __ATOMIC_SEQ_CST);
+}
+
 int64_t zell__sched_threads_peak(void) {
     zell__plat_mutex_lock(&q_mu);
     int64_t n = q_alive_peak;
@@ -669,6 +781,7 @@ static void sched_stop_started(void) {
     while (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) != q_alive || q_head) zell__plat_cond_wait(&idle_cv, &q_mu);
     q_stopping = 1;
     zell__plat_cond_broadcast(&q_cv);
+    if (q_hub_w) netpoll()->kick();
     while (q_alive > 0) zell__plat_cond_wait(&idle_cv, &q_mu);
     zell__plat_mutex_unlock(&q_mu);
 #ifdef ZELL_SCHED_STATS
@@ -699,7 +812,7 @@ static void sched_post_ctx(zell_resume_fn fn, void *arg, zell_object *ctx, zell_
     jobrec r = { fn, arg, ctx, cur };
     worker *w = t_w;
     if (w) {
-        if (next) runnext_put(w, &r);
+        if (next && !t_ring_only) runnext_put(w, &r);
         else ring_push_slow(w, &r);
         wake_one();
         return;
@@ -724,12 +837,7 @@ static void post_batch_flush(post_batch *b) {
     if (b->n == 0) return;
     zell__plat_mutex_lock(&q_mu);
     global_push_locked(b->head, b->tail, b->n);
-    if (__atomic_load_n(&q_spinning, __ATOMIC_RELAXED) == 0 && __atomic_load_n(&q_idle, __ATOMIC_RELAXED) - q_wake_pending > 0) {
-        __atomic_store_n(&q_spinning, 1, __ATOMIC_SEQ_CST);
-        q_wake_pending++;
-        STAT(wake);
-        zell__plat_cond_signal(&q_cv);
-    }
+    wake_locked();
     zell__plat_mutex_unlock(&q_mu);
     b->head = b->tail = NULL;
     b->n = 0;
@@ -1351,7 +1459,7 @@ static void *task_wait(zell_task *t) {
         if (runnext_take(w, &rn)) ring_push_slow(w, &rn);
         if (ring_len(w) != 0) wake_one();
         zell__plat_mutex_lock(&q_mu);
-        q_blocked++;
+        __atomic_add_fetch(&q_blocked, 1, __ATOMIC_SEQ_CST);
         if (__atomic_load_n(&q_idle, __ATOMIC_RELAXED) == 0 && !q_stopping) {
             if (q_alive - q_nworkers < q_max_spares) spawn_worker_locked(1);
             else { over = 1; unblocks0 = q_unblocks; }
@@ -1389,7 +1497,7 @@ static void *task_wait(zell_task *t) {
     if (parked) zell__rc_unpark();
     if (t_is_worker) {
         zell__plat_mutex_lock(&q_mu);
-        q_blocked--;
+        __atomic_sub_fetch(&q_blocked, 1, __ATOMIC_SEQ_CST);
         q_unblocks++;
         zell__plat_mutex_unlock(&q_mu);
     }

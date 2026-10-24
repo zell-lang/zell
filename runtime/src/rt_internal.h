@@ -33,6 +33,40 @@ ZELL_HIDDEN void zell__io_stop(void);
  * and zell__net_stop (std_net.c). Defined in task.c. */
 ZELL_HIDDEN extern void (*zell__io_stop_fn)(void);
 ZELL_HIDDEN extern void (*zell__net_stop_fn)(void);
+/* Network polling from the scheduler's workers (ABI.md 10.1, 10.9), set
+ * by task_io.c when its pollers are shared (zell__plat_poller_shared) and
+ * NULL otherwise. Called by task.c on worker threads only. */
+typedef struct zell__netpoll {
+    /* Out of local work: a poll with timeout 0 of the shards that have
+     * readiness, plus due deadlines. The completed waits post their
+     * continuations to this worker. Returns whether it completed any. */
+    bool (*poll)(void);
+    /* q_mu held, by the last worker to go idle: takes the right to block
+     * in the hub poller; false when somebody already blocks there. */
+    bool (*claim)(void);
+    /* Blocks in the hub (claimed) until readiness, the next deadline of a
+     * wait or kick(); collects the completions and drops the claim. */
+    void (*block)(void);
+    /* Completes what block() collected (the worker is no longer idle). */
+    void (*finish)(void);
+    /* Makes a concurrent or the next block() return (q_mu held is fine). */
+    void (*kick)(void);
+    /* A worker left the idle state: wakes the I/O watchdog thread if it
+     * sleeps without a timeout. */
+    void (*awake)(void);
+} zell__netpoll;
+ZELL_HIDDEN extern const zell__netpoll *zell__netpoll_hooks;  /* atomic */
+/* Workers neither parked nor blocked in zell_task_await (task.c): the
+ * ones that will poll the network when they run out of work. */
+ZELL_HIDDEN int64_t zell__sched_awake(void);
+/* Wakes one parked worker unless one is already polling (task.c); false
+ * when no worker is parked on q_cv. */
+ZELL_HIDDEN bool zell__sched_poke(void);
+/* diag (tests): whether a worker is blocked in the hub (task.c); -1 when
+ * the I/O pollers are not shared, else the waits the I/O watchdog thread
+ * completed so far (task_io.c). */
+ZELL_HIDDEN bool zell__sched_hub_parked(void);
+ZELL_HIDDEN int64_t zell__io_netpoll_watchdog(void);
 /* Debug agent hooks (debug.c), set by zell_dbg_boot. */
 ZELL_HIDDEN extern void (*zell__dbg_panic_fn)(const char *msg, int64_t len);
 ZELL_HIDDEN extern void (*zell__dbg_error_fn)(const zell_error *err);

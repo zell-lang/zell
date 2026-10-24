@@ -1327,6 +1327,21 @@ built as `*_async` variants that return a `zell_task *`.
     taken it by then, so a job that never yields (a loop that keeps finding
     completed tasks) cannot starve the continuation it posted while every
     other worker sleeps.
+  - **Network polling (netpoll, 10.9)**, when the I/O pollers are shared
+    (epoll): an out-of-work worker polls the network with timeout 0 after
+    the global queue and before stealing (and the spinning worker every 64
+    rounds); the waits it completes post their continuations to its own
+    ring, in order, never to run-next. The worker that makes the pool idle
+    (`q_idle + q_blocked == q_alive`) blocks in the hub poller instead of on
+    the condition variable, with the earliest I/O deadline as timeout. It
+    counts as parked: a poster that sees `q_idle > 0` takes the lock and,
+    with no worker on the condition variable, wakes the hub through its
+    wake-up channel and reserves the spinning token for that worker, so the
+    store-then-load protocol above is unchanged and covers it. The right to
+    block in the hub is claimed under the scheduler lock before the worker
+    is recorded as its blocker, and only the claim holder waits on the hub,
+    so the wake-up channel is never drained by another thread first: no
+    lost wake-up.
   - A worker that blocks inside `zell_task_await` first moves its run-next
     job to its ring and wakes a worker to steal from it; a spare worker is
     started if nobody is idle (10.5), up to the spare limit: 4 per core
@@ -1714,7 +1729,8 @@ Propagation, with no help from compiled code:
 default half the scheduler workers, at least 1, at most 8), started on the
 first wait and stopped by `zell_runtime_shutdown` after the timers. Each
 shard owns one platform poller (an epoll instance on Linux, a kqueue on
-macOS/BSD; section 15), the thread that waits on it, a mutex and a binary
+macOS/BSD; section 15), the thread that waits on it (none with netpoll,
+below), a mutex and a binary
 min-heap of its waits' deadlines. A descriptor is assigned to the least
 loaded shard (ties round-robin) when it is registered — `zell_io_register`
 at socket creation, or implicitly by its first wait — and stays there until
@@ -1766,6 +1782,32 @@ Rules and guarantees:
   earlier deadline than the one the shard sleeps toward, or at shutdown.
 - A descriptor that cannot be polled (a regular file) is always ready (the
   wait completes with 0 at once); a closed one completes with 2.
+- **Polling from the workers (netpoll; epoll today).** When every shard's
+  poller is shared (`zell__plat_poller_shared`) and `ZELL_IO_NETPOLL` is not
+  `0`, the shards get no threads. Their pollers are linked into one hub
+  poller (`zell__plat_poller_link`: the hub reports, level-triggered, the
+  index of every shard that has events) and the scheduler polls (10.1):
+  idle workers poll the hub and then the shards it names with timeout 0;
+  the last worker to go idle blocks in the hub until readiness, the
+  earliest deadline of all shards or a post. A thread inside a poller's
+  wait holds that poller's claim (the others skip it), so the events of a
+  shard are fetched and applied by one thread at a time, as with a shard
+  thread. One watchdog thread remains: it blocks in the hub only when no
+  worker can (none awake and none parked, e.g. all of them inside
+  `zell_task_await`; when the I/O starts with every worker asleep it wakes
+  one instead, and a worker that wants the hub kicks the watchdog out),
+  and while workers are awake it polls for them when nobody polled the hub
+  for 10 ms (every worker busy, like Go's sysmon) and completes due
+  deadlines; idle with a worker in the hub, it sleeps until a worker wakes
+  up. A wait with an earlier deadline than the hub blocker or the watchdog
+  sleeps toward wakes it (both publish that they sleep before reading the
+  deadlines; the wait stores its deadline before reading that flag).
+  Polling from several threads makes spurious reports more frequent: a
+  poll that runs between the data's arrival and its wake-up callback sees
+  the data, and the callback then reports the fd once more. The io_uring,
+  kqueue, IOCP and WSAPoll backends keep a dedicated thread per shard; a
+  backend opts in by implementing `zell__plat_poller_shared` and
+  `zell__plat_poller_link` (a kqueue can watch another kqueue).
 - **io_uring backend (Linux 6.0+, `src/platform/poll_uring.c`, opt-in with
   `ZELL_IO_BACKEND=io_uring`)**: when `io_uring_setup` works (and the kernel has `IORING_FEAT_EXT_ARG`,
   `NODROP` and `IORING_REGISTER_SYNC_CANCEL`), each shard's poller is an io_uring instead of an epoll

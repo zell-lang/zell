@@ -891,6 +891,27 @@ per `Get`/`Index`; LTO between program and runtime, or a cheaper key
 compare in `rtGet`, is the next step), `fanout_fanin`'s pool phase and
 `timers` lateness (timer wake-ups go through the global queue).
 
+## Netpoll in the scheduler (2026-10-24, docs/ASYNC_PLAN.md R4, same machine as wave 2)
+
+Idle workers poll epoll themselves and the last idle worker blocks in it
+(ABI.md 10.1/10.9) instead of one poller thread per shard waking a worker
+through the global queue. Three runs each, `perf stat`:
+
+| bench | before (7a4dc64) | after | Go |
+|---|---|---|---|
+| async_io round trips/s | 637k | 742k | 802k |
+| async_io p99 | 6.2 ms | 2.0 ms | 2.4 ms |
+| async_io CPU (task-clock) | 24.2 s | 21.0 s | 18.8 s |
+| async_io context switches | 794k | 5.9k | 3.2k |
+| websocket_echo, zell client -> zell server | 378k msg/s | 442k msg/s | - |
+| websocket_echo, go client -> zell server | 491k msg/s | 514k msg/s | - |
+| http_hello h2 over TLS, go load -> zell | 84.1k req/s, 31.5 us/req | 86.8k req/s, 28.5 us/req | 77.6k, 23.2 us |
+
+channel_pingpong and select_many (no I/O) are unchanged within noise.
+What is left of the async_io CPU gap is outside the scheduler: `sendto`
+is 59% of samples (as in Go), nftables 11% (host), the runtime's own code
+16% with `worker_main` under 1%.
+
 ## json_codec on .NET
 
 `benchmarks/json_codec/dotnet/` is the same program on System.Text.Json (typed path through a `[JsonSerializable]` source-generated context, schema-less path through `JsonDocument`/`JsonElement`, net10.0, workstation GC, invariant globalization). `dotnet/run.sh` publishes once (`dotnet publish -c Release -r linux-x64 --self-contained false -o bin`) and runs it with the same `SCALE`, `JSON_DOC_BYTES` and `JSON_DOC_FILE` variables as the others. `benchmarks/json_codec/compare.sh` (`ZELL=... JSON_DOC_FILE=... ./compare.sh`) builds and runs Zell, Go and .NET once each on one document and prints the checksum and phase lines side by side, then states whether the checksum lines are identical. The .NET value-format phase writes sorted keys and shortest-round-trip numbers to match Go's `json.Marshal(any)` byte for byte.
