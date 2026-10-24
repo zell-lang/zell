@@ -402,14 +402,29 @@ func main() {
 ## Panics
 
 `panic("message")` is for bugs and broken invariants, not for expected
-failures: it prints the message and a stack trace and exits with status
-2. Index out of range, `nil` dereference and integer division by zero
-panic too. A test can check that something panics with
+failures. Index out of range, `nil` dereference and integer division by
+zero panic too. A test can check that something panics with
 `testing.Panics` (see [testing.md](testing.md)).
 
-A panic is not an error: `try` and `?` do not see it, and it cannot be
-caught. A nil dereference and an index out of range are runtime panics
-with a message and a backtrace, and the process exits with status 2.
-Nothing recovers a panic, not even a `web` handler: the server process
-ends too, so return an error for anything a request can cause. See
+A panic is not an error: `try` and `?` do not see it where it happens,
+and nothing recovers it. It **ends the task it happens in**: the
+task's pending `defer`s run and its async frames release their values
+on the way out. In `main`, or in code that runs outside any task, the
+process prints the message and a backtrace and exits with status 2.
+
+Whoever waits for a task that panicked hears about it:
+
+- awaiting a `Task<T!>` gives an error with `task.ErrPanic` in its
+  chain (`errors.Is`), its message is `panic: <message>`, and
+  `task.PanicMessage` / `task.PanicTrace` give the parts;
+- awaiting a `Task<T>` (no `!`) panics again in the waiting task
+  (`panic in awaited task: ...`), so a panic is never silently lost;
+- a task nobody awaits (`task.Go`) prints the panic to stderr and the
+  program goes on.
+
+`web` apps get a 500 for a panicking handler with `UseRecover`, and the
+server keeps serving. Still, return an error for anything a request can
+cause: a panic in a plain (non-async) function does not run that
+function's `defer`s, and what it held leaks. See
+[async.md](async.md#when-a-task-panics) and
 [debugging.md](debugging.md) for how backtraces look.

@@ -120,14 +120,20 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     first and `Drop` is then a no-op. Not needed yet: every stdlib `Close()`
     is synchronous.
 
-28. **A panic in one request kills the whole web server.** `web.UseRecover`
-    turns handler *errors* into 500s; a panic (nil dereference, index out of
-    range) in a handler ends the process, since panics are not recoverable
-    (DESIGN.md). Go's `http.Server` and .NET contain the failure to the
-    request. Spec decision needed: make a panic terminate its *task* (the
-    request) rather than the process, with the scheduler unwinding the task,
-    releasing its ARC objects, and reporting the panic to the task's owner
-    (`web` → 500 + log; `task.Go` → `Task` completes with a panic error;
-    `main` → exit 2 as today). Related: `database.sql.DB`/`Tx` have no `Drop`
-    (only `Rows`), so `examples/sql.zl` still needs `defer tx.Rollback()`
-    and `defer db.Close()`; give them a `Drop`.
+28. **Done (2026-10-24): a panic ends its task, not the process.**
+    DESIGN.md "Паника", ABI.md 8.1: the runtime destroys the task's
+    coroutine frames (defers run, locals and `Drop`s released) and
+    completes the task as panicked; `Task<T!>` awaiters get an error
+    wrapping `task.ErrPanic`, `Task<T>` awaiters panic again, unobserved
+    tasks print the panic; `main` exits 2 as before; `web.UseRecover`
+    answers 500 "internal error" and keeps serving
+    (`tests/spec/panics/*`, `tests/spec/web/recover_panic`). Follow-ups:
+    (a) synchronous frames are not unwound (their defers do not run, what
+    they own leaks: e.g. a handler that panics in a plain function leaks
+    its request objects), which needs unwind tables or per-call landing
+    pads; (b) Windows still ends the process (no setjmp unwinding there);
+    (c) `UseRecover` costs one `task.Yield` per request; (d) without
+    `UseRecover` the request's connection is dropped without a response.
+    Still open from the original item: `database.sql.DB`/`Tx` have no
+    `Drop` (only `Rows`), so `examples/sql.zl` still needs `defer
+    tx.Rollback()` and `defer db.Close()`; give them a `Drop`.

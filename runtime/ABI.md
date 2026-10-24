@@ -1048,18 +1048,108 @@ attribute and follow the call with `unreachable`.
 | `zell_panic_bounds(int64 idx, int64 len)` | `runtime error: index out of range [idx] with length len` |
 | `zell_panic_slice_bounds(int64 lo, int64 hi, int64 cap)` | `runtime error: slice bounds out of range [lo:hi] with capacity cap` |
 
-Behaviour:
+Behaviour of a panic that ends the process (on the main thread, on a
+thread outside the scheduler, in a job without a current task, on
+Windows, or a panic while unwinding another one):
 
 1. `stdout` is flushed, so output printed before the panic is not lost.
 2. `panic: <msg>\n` is written to stderr.
 3. Unless `ZELL_NO_BACKTRACE` is set, a blank line, then
    `backtrace (most recent call first):`, then `backtrace_symbols_fd` frames.
-4. The process exits immediately with **exit code 2** (`_exit`). No `defer`, no
+4. The process exits immediately with **exit code 2** (`_Exit`). No `defer`, no
    destructors, no atexit handlers.
 
-A panic in any thread kills the whole process. If two threads panic at the same
-time, only the first message is printed. Out-of-memory in any runtime allocation
-panics with `out of memory (...)`.
+If two threads end the process with a panic at the same time, only the
+first message is printed. Out-of-memory in any runtime allocation panics
+with `out of memory (...)`.
+
+### 8.1 Task panics (DESIGN.md "Паника")
+
+A panic in a scheduler job whose thread has a current task (10.11) ends
+that task only (not on Windows: `ZELL_PLAT_HAS_PANIC_CAPTURE` 0 keeps the
+behaviour above):
+
+1. **Unwind point.** `run_job` (task.c) runs every job under a
+   `__builtin_setjmp` buffer (`zell__job_unwind`, thread-local, with the
+   value of `zell_coro_chain` at the job's start).
+2. **Frame chain.** `_Thread_local void *zell_coro_chain` (exported, read
+   and written by compiled code) lists the coroutine frames running on
+   the thread, innermost first. A node is `{ ptr prev; ptr hdl }` in the
+   frame (an alloca of the coroutine; `hdl` is the frame handle, or NULL
+   when no frame was allocated: `coro.alloc` false, so there is no
+   destroy function). The coroutine pushes its node after `coro.begin`
+   and again whenever it continues after an `await` that suspended or
+   tried to (the resume edge of `coro.suspend` and the
+   `zell_task_add_continuation`-returned-false edge); it pops it right
+   before `coro.save` (so before `zell_task_add_continuation`: the frame
+   may resume elsewhere at once) and at the start of the return path
+   (after the defers and the release of the locals). Not emitted for
+   Windows targets.
+3. **The panic** (`die` in panic.c, after the debug agent's panic stop):
+   the message and the backtrace as text (`zell__plat_backtrace_buf`) are
+   kept thread-locally, then every frame on the chain down to the job's
+   start is popped and **destroyed** by calling its LLVM destroy function
+   (word 1 of a switched-resume frame). Then the runtime
+   `__builtin_longjmp`s to `run_job`, which restores the chain and the
+   thread's context and current task as after any job.
+4. **The destroy path** (compiler side). Every suspend point's destroy
+   edge (`coro.suspend` result 1) goes to one `coro.unwind` block; it is
+   only ever reached through the runtime's destroy call, from any
+   suspend index (also index 0 for a ramp that has not suspended yet: the
+   frame is zeroed). It runs the armed open-coded defers and the defer
+   array (each open-coded defer is disarmed before it runs, so a defer
+   that panics at the normal exit is not run again), releases every
+   local like the normal exit (`release_locals`), releases the task the
+   frame was awaiting while it owned it (frame slot `coro.awaiting`), then
+   calls `zell_coro_unwound(load task.slot, load ctx.slot)` and frees the
+   frame (`coro.free`). So that this path sees the frame as it is *now*
+   and not as of the last suspension, a coroutine that has defers or
+   locals that own something makes the defer flags, the defer array and
+   every local slot escape at its entry (an empty `asm sideeffect` with
+   each address and a memory clobber): their stores stay in memory and
+   are never dropped as dead. Other coroutines escape only
+   `coro.awaiting` and skip the defers and locals.
+5. `void zell_coro_unwound(zell_task *own, zell_object *ctx0)`: `own`
+   NULL (the body never suspended, so it made no task) is
+   `zell_coro_leave(ctx0)`; otherwise `own` is completed **as panicked**
+   (below) and the frame's reference is released.
+6. **A panicked task** is done, its result slot stays zero, and it keeps
+   the panic's message and trace (owned strings). Readers:
+   - `zell_task_result(t)` and `zell_task_await(t)` re-panic in the reader
+     with `panic in awaited task: <msg>` (not repeated if the message
+     already starts with it) and the original trace;
+   - `void *zell_task_result_err(zell_task *t, int64_t err_off)` and
+     `void *zell_task_await_err(zell_task *t, int64_t err_off)` (the
+     compiler's reads of a `Task<T!>`; `err_off` is the byte offset of the
+     error word, 0 for `void!`) store, once under the task lock, a +1
+     error into the slot at `err_off` (released with the slot by its ops)
+     and return the slot;
+   - `void *zell_task_await_main(zell_task *t)` (program entry, 11) ends
+     the process with the panic's message and trace, exit code 2.
+   A panicked task dropped while no reader observed the panic prints it
+   to stderr (`panic: <msg>` and the trace) from its drop.
+7. **The error** of a panicked `Task<T!>`: a typed error (C payload type
+   `task.Panic`, `Message()` = `panic: <msg>`) whose `inner` is the
+   immortal sentinel `zell_task_err_panic()` (`task.ErrPanic`, message
+   `task panicked`), so `errors.Is(err, task.ErrPanic)` holds.
+   `zell_string *zell_task_panic_message(const zell_error *)` and
+   `zell_task_panic_trace` (+1, `""` when the chain has no task panic)
+   are `task.PanicMessage` / `task.PanicTrace`.
+8. **Not unwound**: synchronous frames (plain functions called from a
+   coroutine), C frames of runtime callbacks between the job and the
+   panic (locks they hold stay held), temporaries in the middle of an
+   expression, and coroutine frames elided into their caller's frame
+   (`coro.alloc` false). Their defers do not run and what they own is
+   leaked; nothing is released twice. A job with a current task whose
+   chain holds no task-owning frame (a C callback running Zell code)
+   prints the panic and ends the job; its task is not completed.
+9. A panic while unwinding (in a deferred call or a destructor run by the
+   destroy path) ends the process: the first panic's message and trace,
+   `panic while unwinding the panic above:`, then the second one, exit
+   code 2.
+10. The debug agent's panic stop (`zell__dbg_panic_fn`, 22) happens
+    before anything is unwound; the re-panic of an awaiter stops again,
+    `zell_task_await_main` does not.
 
 **Panic capture** (`src/std_testing.c`, for `testing.Panics`; not on
 Windows). `int64_t zell_testing_rt_capture(void *fn, void *env)` runs the
@@ -1255,7 +1345,7 @@ entry:
   save = llvm.coro.save(hdl)
   if !zell_task_add_continuation(t, @zell_coro_resume, hdl) goto ready
   s = llvm.coro.suspend(save, false)               ; must come IMMEDIATELY after
-  switch s: 0 -> ready, 1 -> cleanup, default -> done
+  switch s: 0 -> ready, 1 -> unwind, default -> done   ; unwind: 8.1
 ready:
   x = load U from zell_task_result(t); retain x if U is a reference type
   zell_release(t)
@@ -1311,8 +1401,10 @@ Rules the compiler must respect:
   is gone by then.
 - **No final suspend point.** Once the result is published with
   `zell_task_complete`, nobody ever resumes the frame again, so the coroutine
-  destroys its own frame (`coro.free` + `zell_coro_frame_free`). Nothing outside the
-  coroutine ever calls `llvm.coro.destroy`, and cancellation does not exist in 0.1.
+  destroys its own frame (`coro.free` + `zell_coro_frame_free`). The only
+  outside caller of the destroy function is the runtime unwinding a task
+  panic (8.1), which also needs the frame chain pushes and pops of 8.1
+  around the suspend points.
 - Use `@zell_coro_resume` as the resume function (or your own trampoline that
   calls `llvm.coro.resume`). Coroutine resumption is always performed by a worker
   thread.
@@ -1691,7 +1783,7 @@ define i32 @main(i32 %argc, ptr %argv) {
   call void @app.main()
   ; or, for `async func main()`:
   ;   %t = call ptr @app.main()           ; the ramp runs until the first await
-  ;   call ptr @zell_task_await(ptr %t)  ; main thread blocks
+  ;   call ptr @zell_task_await_main(ptr %t)  ; main thread blocks; a panic of main's task exits 2 (8.1)
   ;   call void @zell_release(ptr %t)
   call void @zell_runtime_shutdown()
   ret i32 0
