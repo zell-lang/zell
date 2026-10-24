@@ -18,11 +18,16 @@
 /* The three layouts of a receive's result (10.7). */
 enum { RES_FALLIBLE = 0, RES_TUPLE = 1, RES_C = 2 };
 
-/* The header a waiting task keeps in its result slot while queued. */
+/* The header a waiting task keeps in its slot, after the result (at
+ * ROUND8(result_size), so filling the result never overwrites it and a late
+ * cancel hook still reads a valid header). */
 typedef struct chan_wait {
     struct chan_wait *next;
-    zell_task *task;           /* the task this header lives in (borrowed) */
     struct zell_chan *ch;      /* owned while queued; NULL once dequeued (guarded by the task's lock) */
+    /* The cancel hook on the task that started the wait (no allocation per
+     * wait; it holds a reference to this task until the starter prunes it).
+     * The wait's own cancellation (task.Any losers) is the task's cancel_fn. */
+    zell__hook hook;           /* hook.w: the task this header lives in (always set) */
     int32_t kind;              /* receivers: RES_* */
     int32_t sender;
     unsigned char elem[];      /* senders: the owned element */
@@ -70,7 +75,9 @@ static zell_error closed_error = {
 static inline void elem_retain(zell_chan *c, void *v) { if (c->elem_ops && c->elem_ops->retain) c->elem_ops->retain(v); }
 static inline void elem_release(zell_chan *c, void *v) { if (c->elem_ops && c->elem_ops->release) c->elem_ops->release(v); }
 static inline unsigned char *buf_at(zell_chan *c, int64_t i) { return c->buf + (i % c->capacity) * c->elem_size; }
-static inline chan_wait *wait_of(zell_task *t) { return zell__task_slot(t); }
+static inline chan_wait *wait_of(zell_task *t) {
+    return (chan_wait *)((unsigned char *)zell__task_slot(t) + ZELL_ROUND8(zell__task_result_size(t)));
+}
 
 static void wq_push(chan_wait **head, chan_wait **tail, chan_wait *w) {
     w->next = NULL;
@@ -114,8 +121,12 @@ static zell_chan *chan_new(int64_t elem_size, const zell_value_ops *ops, int64_t
     return c;
 }
 
-/* A receive task of layout `kind`, pending, with the wait header set up. */
-static zell_task *recv_task_new(zell_chan *c, int kind) {
+static void chan_wait_cancelled(zell_task *t);
+
+/* A receive task of layout `kind`: with `wait`, pending with the wait
+ * header set up; else only room for the result (a receive that completes
+ * at once never waits, never has a header and is not cancellable). */
+static zell_task *recv_task_new(zell_chan *c, int kind, bool wait) {
     int64_t rs, off = 0;
     const zell_value_ops *ops;
     switch (kind) {
@@ -123,15 +134,16 @@ static zell_task *recv_task_new(zell_chan *c, int kind) {
     case RES_TUPLE: rs = c->tup_size; ops = c->tup_ops; break;
     default: rs = 8 + c->elem_size; ops = c->elem_ops; off = 8; break;
     }
-    int64_t slot = rs > (int64_t)sizeof(chan_wait) ? rs : (int64_t)sizeof(chan_wait);
-    zell_task *t = zell__task_new_slot(rs, ops, off, slot);
+    if (!wait) return zell__task_new_slot(rs, ops, off, rs);
+    zell_task *t = zell__task_new_slot(rs, ops, off, ZELL_ROUND8(rs) + (int64_t)sizeof(chan_wait));
     chan_wait *w = wait_of(t);
-    w->task = t;
+    w->hook.w = t;
     w->kind = kind;
+    zell__task_set_cancel_fn(t, chan_wait_cancelled);
     return t;
 }
 
-/* Writes a receive's result into t's slot (over the wait header): the
+/* Writes a receive's result into t's slot (before the wait header): the
  * value, which is MOVED in (`value` is an owned copy whose ownership passes
  * to the task; NULL for the zero value), and the status: `err` for the
  * fallible layout, ok for the others. The task is not completed here. */
@@ -166,8 +178,9 @@ static void wait_unlink(zell_task *t) {
 }
 
 /* A queued wait whose task was cancelled (10.11): a receiver completes
- * with task.ErrCancelled, a sender returns without sending. Idempotent (a
- * wait has two hooks: on its own task and on the task that started it). */
+ * with task.ErrCancelled, a sender returns without sending. Idempotent (it
+ * runs from the hook on the task that started the wait and from the wait's
+ * own cancel_fn; only the caller that dequeues the wait completes it). */
 static void chan_wait_cancelled(zell_task *t) {
     chan_wait *w = wait_of(t);
     zell__task_lock(t);
@@ -196,8 +209,8 @@ static void chan_wait_cancelled(zell_task *t) {
     zell_release(c);
 }
 
-/* Queues the wait t on c (c->mu held) and registers its cancellation
- * hooks after the lock is dropped. */
+/* Queues the wait t on c (c->mu held); wait_hook follows after the lock is
+ * dropped (the wait may have completed by then: harmless). */
 static void wait_enqueue(zell_chan *c, zell_task *t, bool sender) {
     chan_wait *w = wait_of(t);
     w->sender = sender;
@@ -208,14 +221,12 @@ static void wait_enqueue(zell_chan *c, zell_task *t, bool sender) {
     else wq_push(&c->recvq, &c->recvq_tail, w);
 }
 
-static void wait_hooks(zell_task *t) {
-    zell__cancel_hook(chan_wait_cancelled, t);        /* the task that waits (Recv in a cancelled scope) */
-    zell__cancel_hook_self(t, chan_wait_cancelled);   /* the wait itself (task.Any cancels losers) */
-}
+/* The hook on the task that waits (a Recv in a cancelled scope fails). */
+static void wait_hook(zell_task *t) { zell__hook_link(&wait_of(t)->hook, zell__task_cur(), chan_wait_cancelled, t); }
 
 /* Completes a dequeued receiver with an owned value (moved) or a status. */
 static void recv_finish(zell_chan *c, chan_wait *rw, const void *value, zell_error *err) {
-    zell_task *t = rw->task;
+    zell_task *t = rw->hook.w;
     int kind = rw->kind;
     recv_fill(c, t, kind, value, err);
     zell_task_complete(t, NULL);
@@ -225,7 +236,7 @@ static void recv_finish(zell_chan *c, chan_wait *rw, const void *value, zell_err
 
 /* Completes a dequeued sender whose value was taken. */
 static void send_finish(zell_chan *c, chan_wait *sw) {
-    zell_task *t = sw->task;
+    zell_task *t = sw->hook.w;
     zell_task_complete(t, NULL);
     zell_release(t);
     zell_release(c);
@@ -240,7 +251,7 @@ static zell_task *chan_send(zell_chan *c, const void *elem) {
     chan_wait *rw = wq_pop(&c->recvq, &c->recvq_tail);
     if (rw) {
         /* hand the value to a waiting receiver (a retained copy moves in) */
-        wait_unlink(rw->task);
+        wait_unlink(rw->hook.w);
         chan_lock_release(&c->mu);
         unsigned char tmp[256];
         unsigned char *v = (size_t)c->elem_size <= sizeof tmp ? tmp : zell_alloc(c->elem_size);
@@ -264,17 +275,21 @@ static zell_task *chan_send(zell_chan *c, const void *elem) {
     }
     zell_task *t = zell__task_new_slot(0, NULL, 0, (int64_t)sizeof(chan_wait) + c->elem_size);
     chan_wait *w = wait_of(t);
-    w->task = t;
+    w->hook.w = t;
+    zell__task_set_cancel_fn(t, chan_wait_cancelled);
     memcpy(w->elem, elem, (size_t)c->elem_size);
     elem_retain(c, w->elem);
     wait_enqueue(c, t, true);
     chan_lock_release(&c->mu);
-    wait_hooks(t);
+    wait_hook(t);
     return t;
 }
 
+/* The task that waits is made only once a receive has to wait (under the
+ * lock: dropping it and rechecking costs more on a contended channel than
+ * the allocation); a receive that completes at once gets a task with room
+ * for the result only. */
 static zell_task *chan_recv(zell_chan *c, int kind) {
-    zell_task *t = recv_task_new(c, kind);
     chan_lock_acquire(&c->mu);
     if (c->count > 0) {
         unsigned char tmp[256];
@@ -286,9 +301,10 @@ static zell_task *chan_recv(zell_chan *c, int kind) {
         if (sw) {   /* refill the buffer from the oldest blocked sender */
             memcpy(buf_at(c, c->head + c->count), sw->elem, (size_t)c->elem_size);
             c->count++;
-            wait_unlink(sw->task);
+            wait_unlink(sw->hook.w);
         }
         chan_lock_release(&c->mu);
+        zell_task *t = recv_task_new(c, kind, false);
         recv_fill(c, t, kind, v, NULL);
         zell__task_mark_done(t);
         if (v != tmp) zell_free(v);
@@ -297,29 +313,27 @@ static zell_task *chan_recv(zell_chan *c, int kind) {
     }
     chan_wait *sw = wq_pop(&c->sendq, &c->sendq_tail);
     if (sw) {   /* unbuffered: take the value from the oldest waiting sender */
-        wait_unlink(sw->task);
+        wait_unlink(sw->hook.w);
         chan_lock_release(&c->mu);
+        zell_task *t = recv_task_new(c, kind, false);
         recv_fill(c, t, kind, sw->elem, NULL);
         zell__task_mark_done(t);
         send_finish(c, sw);
         return t;
     }
-    if (c->closed) {
+    zell_error *err = c->closed ? &closed_error : zell_task_cur_cancelled() ? zell_task_err_cancelled() : NULL;
+    if (err) {
         chan_lock_release(&c->mu);
-        recv_fill(c, t, kind, NULL, &closed_error);
+        zell_task *t = recv_task_new(c, kind, false);
+        recv_fill(c, t, kind, NULL, err);
         zell__task_mark_done(t);
         return t;
     }
-    if (zell_task_cur_cancelled()) {
-        chan_lock_release(&c->mu);
-        recv_fill(c, t, kind, NULL, zell_task_err_cancelled());
-        zell__task_mark_done(t);
-        return t;
-    }
-    wait_enqueue(c, t, false);
+    zell_task *wt = recv_task_new(c, kind, true);
+    wait_enqueue(c, wt, false);
     chan_lock_release(&c->mu);
-    wait_hooks(t);
-    return t;
+    wait_hook(wt);
+    return wt;
 }
 
 static void chan_close(zell_chan *c) {
@@ -329,7 +343,7 @@ static void chan_close(zell_chan *c) {
     c->closed = 1;
     chan_wait *rs = c->recvq;
     c->recvq = c->recvq_tail = NULL;
-    for (chan_wait *w = rs; w; w = w->next) wait_unlink(w->task);
+    for (chan_wait *w = rs; w; w = w->next) wait_unlink(w->hook.w);
     chan_lock_release(&c->mu);
     while (rs) {
         chan_wait *n = rs->next;

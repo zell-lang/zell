@@ -602,6 +602,150 @@ TEST(channel_cancel_waits) {
     zell_release(ch);
 }
 
+/* Queued waits started inside a scope are cancelled through the hook on
+ * the scope (a Recv in a cancelled scope); a wait that completed first is
+ * left alone (its result is intact), and dropping the scope releases every
+ * hook node, so nothing leaks. */
+TEST(channel_cancel_from_scope) {
+    int64_t live = zell_live_objects();
+    zell_chan *ch = zell_chan_new(8, NULL, 0), *ch2 = zell_chan_new(8, NULL, 0);
+    zell_task *scope = zell_task_new_scope();
+    zell_task *prev = zell_task_enter_scope(scope);
+    zell_task *done = zell_chan_recv_async(ch2);   /* completes before the cancel */
+    zell_task *r = zell_chan_recv_async(ch);
+    int64_t v = 7;
+    zell_task *s = zell_chan_send_async(ch2, &v);
+    assert(zell_task_is_done(s) && zell_task_is_done(done));
+    zell_release(s);
+    /* completed waits are pruned from the scope's hook list on later links:
+     * the scope keeps at most a few of them alive, not all 100 */
+    int64_t before = zell_live_objects();
+    for (int i = 0; i < 100; i++) {
+        zell_task *q = zell_chan_recv_async(ch2);
+        zell_task *p = zell_chan_send_async(ch2, &v);
+        assert(zell_task_is_done(q) && zell_task_is_done(p));
+        zell_release(p);
+        zell_release(q);
+    }
+    assert(zell_live_objects() - before <= 9);
+    s = zell_chan_send_async(ch2, &v);           /* queued: nobody receives on ch2 */
+    zell_task_leave_scope(prev);
+    zell_release(prev);
+    assert(!zell_task_is_done(r) && !zell_task_is_done(s));
+    zell_task_cancel(scope);
+    assert(*(int64_t *)zell_task_await(r) == 0);
+    zell_task_await(s);
+    unsigned char *dr = zell_task_await(done);   /* its header survived the result */
+    assert(*(int64_t *)dr == 1 && *(int64_t *)(dr + 8) == 7);
+    zell_release(r);
+    zell_release(s);
+    zell_release(done);
+    zell_release(scope);
+    /* both queues are empty again */
+    zell_task *r2 = zell_chan_recv_async(ch2);
+    assert(!zell_task_is_done(r2));
+    zell_task *s2 = zell_chan_send_async(ch2, &v);
+    assert(zell_task_is_done(s2) && zell_task_is_done(r2));
+    zell_release(s2);
+    zell_release(r2);
+    zell_chan_close(ch);
+    zell_chan_close(ch2);
+    zell_release(ch);
+    zell_release(ch2);
+    assert(zell_live_objects() == live);
+}
+
+/* task.Any(Recv, Delay) where the Delay wins: the losing Recv is cancelled
+ * through its own task (cancel_fn); its hook on the scope goes with the
+ * scope, so nothing leaks. The Delay is done before the Any, so the loser is
+ * cancelled on this thread: with the Any completing on a worker, the
+ * worker drops the last channel reference right after this thread's
+ * relaxed owner decrement (rc.c store_b), which TSan reports as a race on
+ * the freed block. */
+TEST(channel_any_delay_wins) {
+    int64_t live = 0;
+    for (int i = 0; i < 21; i++) {
+        if (i == 1) {   /* after the first round's one-time setup, once the timer thread let go */
+            struct timespec ts = { 0, 20000000 };
+            do { live = zell_live_objects(); nanosleep(&ts, NULL); } while (zell_live_objects() != live);
+        }
+        zell_chan *ch = zell_chan_new(8, NULL, 0);
+        zell_task *scope = zell_task_new_scope();
+        zell_task *prev = zell_task_enter_scope(scope);
+        zell_task *in[2] = { zell_chan_recv_async(ch), zell_task_delay(1) };
+        zell_task_await(in[1]);
+        zell_task *any = zell_task_any(in, 2);
+        zell_task_leave_scope(prev);
+        zell_release(prev);
+        assert(*(int64_t *)zell_task_await(any) == 1);
+        assert(*(int64_t *)zell_task_await(in[0]) == 0);
+        zell_release(any);
+        zell_release(in[0]);
+        zell_release(in[1]);
+        zell_release(scope);
+        zell_chan_close(ch);
+        zell_release(ch);
+    }
+    /* the timer thread drops its reference to a Delay just after firing it */
+    int64_t t0 = now_ms();
+    while (zell_live_objects() != live) {
+        assert(now_ms() - t0 < 5000);
+        sched_yield();
+    }
+}
+
+/* A cancel (of the scope or of the wait itself) racing the completion of a
+ * queued receive and of a queued send, 1000 rounds each (run under tsan). */
+typedef struct { zell_chan *ch; int64_t got; int recv; } race_arg;
+
+static void *race_peer(void *p) {
+    race_arg *a = p;
+    int64_t v = 7;
+    if (a->recv) {
+        int64_t out = 0;
+        a->got = zell_chan_recv(a->ch, &out) ? out : -1;
+    } else {
+        zell_chan_send(a->ch, &v);
+    }
+    return NULL;
+}
+
+TEST(channel_cancel_races_completion) {
+    int64_t live = zell_live_objects();
+    for (int round = 0; round < 2000; round++) {
+        int sender = round & 1, self = (round >> 1) & 1;
+        /* a queued Recv vs. a peer Send (buffered: the send never blocks), or
+         * a queued Send vs. a peer Recv (unbuffered: Close ends the peer) */
+        race_arg a = { zell_chan_new(8, NULL, sender ? 0 : 1), 0, sender };
+        zell_task *scope = zell_task_new_scope();
+        zell_task *prev = zell_task_enter_scope(scope);
+        int64_t v = 7;
+        zell_task *w = sender ? zell_chan_send_async(a.ch, &v) : zell_chan_recv_async(a.ch);
+        zell_task_leave_scope(prev);
+        zell_release(prev);
+        pthread_t th;
+        pthread_create(&th, NULL, race_peer, &a);
+        zell_task_cancel(self ? w : scope);
+        unsigned char *res = zell_task_await(w);
+        if (!sender) assert(*(int64_t *)res == 0 || *(int64_t *)(res + 8) == 7);
+        if (sender) zell_chan_close(a.ch);   /* a cancelled send leaves the peer waiting */
+        pthread_join(th, NULL);
+        if (sender) assert(a.got == 7 || a.got == -1);
+        else zell_chan_close(a.ch);
+        zell_release(w);
+        zell_release(scope);
+        zell_release(a.ch);
+    }
+    /* the peer's last releases of objects this thread owns are merged here
+     * (rc.c biased counts) */
+    int64_t t0 = now_ms();
+    while (zell_live_objects() != live) {
+        assert(now_ms() - t0 < 5000);
+        zell__rc_poll();
+        sched_yield();
+    }
+}
+
 /* ---- mutex: 1k tasks contending, TryLock, lock of a free mutex is the
  * immortal done task, unlock without lock panics ---- */
 
@@ -874,6 +1018,9 @@ int main(int argc, char **argv) {
     RUN(channel_fan_in_10k);
     RUN(await_wakes_one_thread);
     RUN(channel_cancel_waits);
+    RUN(channel_cancel_from_scope);
+    RUN(channel_any_delay_wins);
+    RUN(channel_cancel_races_completion);
     RUN(mutex_contention_1k);
     RUN(mutex_fast_path_respects_guard);
     RUN(drop_in_job_teardown_starts_task);

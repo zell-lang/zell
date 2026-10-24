@@ -1639,11 +1639,19 @@ slot: the value (moved in) at 0 and the status at the given offset.
 | `int64_t zell_task_chan_len(h)` / `zell_task_chan_cap(h)` | buffered elements / the capacity |
 | `bool zell_task_chan_is_closed(h)` | whether `Close` was called |
 
-A queued wait registers two cancel hooks (10.11): on the task that started
-it (a `Recv` inside a cancelled scope fails with `task.ErrCancelled`) and on
-its own task (`task.Any` cancels its losers), both idempotent; the wait holds
-a reference to the channel while queued, so a channel with waiters is never
-freed.
+A queued wait reacts to two cancellations (10.11), both idempotent: of the
+task that started it (a `Recv` inside a cancelled scope fails with
+`task.ErrCancelled`), through a cancel hook node embedded in the wait's task
+slot (no allocation; the node holds a reference to the wait until that task
+prunes it once the wait is done, is dropped, or is cancelled; completing the
+wait never touches the starting task), and of its own task (`task.Any`
+cancels its losers), through the task's `cancel_fn`, which
+`zell_task_cancel(t)` runs when `t` itself is the target. The wait header
+lies past the result in the slot, so a late cancel never reads a result. A
+receive that completes at once gets a task with room for the result only; a
+task is still returned (the compiled `Recv` is a first-class `Task<T!>`). The
+wait holds a reference to the channel while queued, so a channel with
+waiters is never freed.
 
 **C API** (tests and C code; receives have the `{ int64_t ok @0; T value @8 }`
 layout, `result_size = 8 + elem_size`; `ok = 1` means a value was received and
@@ -1839,7 +1847,10 @@ carried by jobs and continuations exactly like the context of 10.8.
 | `zell_task *zell_task_enter_scope(zell_task *scope)` / `void zell_task_leave_scope(zell_task *prev)` | make `scope` current (NULL keeps the current task) and return the previous one (+1); restore it (`task.RunWith`) |
 | `zell_error *zell_task_err_cancelled(void)` | `task.ErrCancelled`, an immortal sentinel (`errors.Is`) with message `task cancelled` |
 
-**Cancel hooks** wake the waits of a cancelled task: `zell_task_delay`
+**Cancel hooks** wake the waits of a cancelled task (allocated nodes
+holding a reference to the wait, or for channel waits a node embedded in the
+wait, 10.7; done waits are pruned when the list reaches 8 and at the task's
+drop): `zell_task_delay`
 (completes at once), `zell_task_rt_signal` (fired, so `Channel.Send/Recv`
 re-check and give up), `zell_io_wait_*` (complete with **3**, so `net`
 operations fail with `task.ErrCancelled`). A wait started by an already

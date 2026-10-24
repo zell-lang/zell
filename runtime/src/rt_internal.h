@@ -40,9 +40,31 @@ ZELL_HIDDEN extern void (*zell__dbg_error_fn)(const zell_error *err);
 ZELL_HIDDEN void zell__cancel_hook(void (*fn)(zell_task *), zell_task *w);
 /* The same with a word of data passed to fn (task_io.c: the fd of the wait). */
 ZELL_HIDDEN void zell__cancel_hook_data(void (*fn)(zell_task *, uintptr_t), zell_task *w, uintptr_t data);
-/* Runs fn(w) when w itself is cancelled (task.Any cancelling a pending
- * Recv); the hook holds no reference to w. */
-ZELL_HIDDEN void zell__cancel_hook_self(zell_task *w, void (*fn)(zell_task *));
+/* A cancel hook node (task.c, ABI.md 10.11). zell__cancel_hook* allocate
+ * one; a channel wait embeds one in its task slot (task_sync.c) and links
+ * it with zell__hook_link, so a wait allocates nothing. A linked node holds
+ * a reference to w (for an embedded node: to the task it lives in), so it
+ * stays valid until the owner prunes it (w done, on a later link), the
+ * owner is dropped, or zell_task_cancel takes it; completing w never
+ * touches the owner. The list is guarded by the owner's lock. */
+typedef struct zell__hook {
+    union {
+        void (*fn)(zell_task *w);
+        void (*fn_data)(zell_task *w, uintptr_t data);  /* when has_data */
+    };
+    zell_task *w;              /* owned while linked */
+    struct zell__hook *next;
+    uintptr_t data;
+    int32_t embedded;          /* lives inside w: released, never freed */
+    int32_t has_data;
+} zell__hook;
+/* Links the embedded hook h: fn(w) runs when `owner` is cancelled (at once,
+ * on this thread, if it already is). Retains w; owner NULL links nothing. */
+ZELL_HIDDEN void zell__hook_link(zell__hook *h, zell_task *owner, void (*fn)(zell_task *), zell_task *w);
+/* Sets fn to run when t itself is the target of zell_task_cancel (task.Any
+ * cancelling a pending Recv). For tasks with no parent (waits); set before
+ * t is published. */
+ZELL_HIDDEN void zell__task_set_cancel_fn(zell_task *t, void (*fn)(zell_task *));
 /* Task internals for task_sync.c (channels, mutexes; ABI.md 10.6, 10.7):
  * a plain task whose slot has slot_bytes (>= result_size, so a pending
  * wait keeps its queue links there) with ops applied at slot + ops_off;
@@ -50,6 +72,7 @@ ZELL_HIDDEN void zell__cancel_hook_self(zell_task *w, void (*fn)(zell_task *));
  * nobody else has seen, whose result is already in the slot. */
 ZELL_HIDDEN zell_task *zell__task_new_slot(int64_t result_size, const zell_value_ops *ops, int64_t ops_off, int64_t slot_bytes);
 ZELL_HIDDEN void *zell__task_slot(zell_task *t);
+ZELL_HIDDEN int64_t zell__task_result_size(const zell_task *t);
 ZELL_HIDDEN void zell__task_lock(zell_task *t);
 ZELL_HIDDEN void zell__task_unlock(zell_task *t);
 ZELL_HIDDEN void zell__task_mark_done(zell_task *t);

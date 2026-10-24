@@ -770,19 +770,16 @@ typedef struct cont {
     struct cont *next;
 } cont;
 
-/* A wait to wake when its task is cancelled (10.11). */
-typedef struct hook {
-    void (*fn)(zell_task *w);
-    zell_task *w;              /* owned, unless weak */
-    struct hook *next;
-    void (*fn_data)(zell_task *w, uintptr_t data);  /* instead of fn when set */
-    uintptr_t data;
-    int weak;                  /* w is the hook's own task: not retained */
-} hook;
+/* A wait to wake when its task is cancelled (10.11): rt_internal.h. */
+typedef zell__hook hook;
 
+/* Drops a hook that is in no list: its reference to w and, unless the
+ * node is embedded in w, the node (an embedded node may die with w here,
+ * so nothing reads it afterwards). */
 static inline void hook_free(hook *h) {
-    if (!h->weak) zell_release(h->w);
-    free(h);
+    int32_t embedded = h->embedded;
+    zell_release(h->w);
+    if (!embedded) free(h);
 }
 
 struct zell_task {
@@ -806,6 +803,10 @@ struct zell_task {
     hook *hooks;
     int32_t cancelled;          /* atomic */
     int32_t nhooks;
+    /* Runs when the task itself is the target of zell_task_cancel (a
+     * pending channel wait: task.Any cancelling a loser). Set before the
+     * task is published, then read-only. */
+    void (*cancel_fn)(zell_task *t);
     /* The caller's context when a coroutine started (zell_task_new; owned,
      * valid while ctx_saved): put back when the coroutine first suspends or
      * completes, so context changes made inside it (task context values,
@@ -984,6 +985,7 @@ zell_task *zell__task_new_slot(int64_t result_size, const zell_value_ops *ops, i
 }
 
 void *zell__task_slot(zell_task *t) { return t->slot; }
+int64_t zell__task_result_size(const zell_task *t) { return t->result_size; }
 void zell__task_lock(zell_task *t) { task_lock(t); }
 void zell__task_unlock(zell_task *t) { task_unlock(t); }
 
@@ -1765,7 +1767,18 @@ zell_task *zell_task_yield(void) { return &yield_task; }
  * ====================================================================== */
 
 /* Collects (moves) the hooks of t and its descendants and flags them; locks
- * are taken parent before child. */
+ * are taken parent before child.
+ *
+ * Races with embedded hooks (channel waits, task_sync.c): a node is only
+ * read or moved under its owner's lock, and each linked node owns a
+ * reference to its wait, so a wait that completes (on any thread, without
+ * the owner's lock) leaves a valid node behind; once moved to `out` the
+ * reference moves with it, and fn(w) runs with no lock held and finds a
+ * completed wait dequeued (chan_wait_cancelled is idempotent and its header
+ * lies past the result, which completion overwrites). Lock order: task
+ * locks parent before child; a task lock is never held while a channel
+ * lock is taken (hooks run unlocked, and pruned nodes are released after
+ * the owner's lock is dropped, since releasing a wait can drop its result). */
 static void cancel_collect(zell_task *t, hook **out) {
     task_lock(t);
     if (__atomic_exchange_n(&t->cancelled, 1, __ATOMIC_ACQ_REL) == 0 || t->hooks) {
@@ -1785,12 +1798,15 @@ void zell_task_cancel(zell_task *t) {
     cancel_collect(t, &hs);
     while (hs) {
         hook *n = hs->next;
-        if (hs->fn_data) hs->fn_data(hs->w, hs->data);
+        if (hs->has_data) hs->fn_data(hs->w, hs->data);
         else hs->fn(hs->w);
         hook_free(hs);
         hs = n;
     }
+    if (t->cancel_fn) t->cancel_fn(t);
 }
+
+void zell__task_set_cancel_fn(zell_task *t, void (*fn)(zell_task *)) { t->cancel_fn = fn; }
 
 bool zell_task_is_cancelled(const zell_task *t) {
     return t && __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE) != 0;
@@ -1798,48 +1814,68 @@ bool zell_task_is_cancelled(const zell_task *t) {
 
 bool zell_task_cur_cancelled(void) { return zell_task_is_cancelled(t_cur); }
 
-/* Registers fn(w) to run when task t is cancelled (at once if it already
- * is). Hooks of waits that completed meanwhile are pruned. A weak hook
- * (w == t, a wait that watches its own cancellation) holds no reference. */
-static void cancel_hook_on(zell_task *t, void (*fn)(zell_task *), void (*fn_data)(zell_task *, uintptr_t), uintptr_t data, zell_task *w, int weak) {
-    if (!t) return;
+/* Adds the filled hook h (owning a reference to h->w) to t's list, or runs
+ * it at once if t is already cancelled. Hooks of waits that completed
+ * meanwhile are pruned once the list has 8 (released after the lock). */
+static void hook_add(zell_task *t, hook *h) {
     task_lock(t);
     if (__atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE)) {
         task_unlock(t);
-        if (fn_data) fn_data(w, data);
-        else fn(w);
+        if (h->has_data) h->fn_data(h->w, h->data);
+        else h->fn(h->w);
+        hook_free(h);
         return;
     }
+    hook *dead = NULL;
     if (t->nhooks >= 8) {
         hook **pp = &t->hooks;
         while (*pp) {
-            hook *h = *pp;
-            if (zell_task_is_done(h->w)) {
-                *pp = h->next;
-                hook_free(h);
+            hook *x = *pp;
+            if (zell_task_is_done(x->w)) {
+                *pp = x->next;
+                x->next = dead;
+                dead = x;
                 t->nhooks--;
             } else {
-                pp = &h->next;
+                pp = &x->next;
             }
         }
     }
-    hook *h = malloc(sizeof *h);
-    if (!h) zell_panic("out of memory (cancel hook)");
-    if (!weak) zell_retain(w);
-    h->fn = fn;
-    h->fn_data = fn_data;
-    h->data = data;
-    h->w = w;
-    h->weak = weak;
     h->next = t->hooks;
     t->hooks = h;
     t->nhooks++;
     task_unlock(t);
+    while (dead) { hook *n = dead->next; hook_free(dead); dead = n; }
+}
+
+/* Registers fn(w) to run when task t is cancelled, in an allocated node. */
+static void cancel_hook_on(zell_task *t, void (*fn)(zell_task *), void (*fn_data)(zell_task *, uintptr_t), uintptr_t data, zell_task *w) {
+    if (!t) return;
+    hook *h = malloc(sizeof *h);
+    if (!h) zell_panic("out of memory (cancel hook)");
+    zell_retain(w);
+    if (fn_data) h->fn_data = fn_data; else h->fn = fn;
+    h->has_data = fn_data != NULL;
+    h->data = data;
+    h->w = w;
+    h->embedded = 0;
+    hook_add(t, h);
+}
+
+void zell__hook_link(hook *h, zell_task *owner, void (*fn)(zell_task *), zell_task *w) {
+    if (!owner) return;
+    zell_retain(w);
+    h->fn = fn;
+    h->has_data = 0;
+    h->data = 0;
+    h->w = w;
+    h->embedded = 1;
+    hook_add(owner, h);
 }
 
 /* The same on the current task. */
 static void cancel_hook_ex(void (*fn)(zell_task *), void (*fn_data)(zell_task *, uintptr_t), uintptr_t data, zell_task *w) {
-    cancel_hook_on(t_cur, fn, fn_data, data, w, 0);
+    cancel_hook_on(t_cur, fn, fn_data, data, w);
 }
 
 static void cancel_hook(void (*fn)(zell_task *), zell_task *w) { cancel_hook_ex(fn, NULL, 0, w); }
@@ -1849,8 +1885,6 @@ void zell__cancel_hook(void (*fn)(zell_task *), zell_task *w) { cancel_hook(fn, 
 void zell__cancel_hook_data(void (*fn)(zell_task *, uintptr_t), zell_task *w, uintptr_t data) {
     cancel_hook_ex(NULL, fn, data, w);
 }
-
-void zell__cancel_hook_self(zell_task *w, void (*fn)(zell_task *)) { cancel_hook_on(w, fn, NULL, 0, w, 1); }
 
 static void signal_cancelled(zell_task *w) { zell_task_rt_fire(w); }
 
