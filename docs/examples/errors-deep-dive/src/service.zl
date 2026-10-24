@@ -1,0 +1,74 @@
+// The service layer: business rules. It adds its own typed errors for
+// what a caller did wrong, and wraps storage errors with context that
+// says what the service was doing when they happened.
+namespace shop.service
+
+import shop.storage
+
+// ValidationError: the request itself is wrong. Nothing to retry.
+struct ValidationError {
+    Field  string
+    Reason string
+
+    func Message() string {
+        return this.Field + " " + this.Reason
+    }
+}
+
+// OutOfStock: a valid request that cannot be served right now.
+struct OutOfStock {
+    Sku  string
+    Want int
+    Have int
+
+    func Message() string {
+        return fmt.Format("{0}: want {1}, have {2}", this.Sku, this.Want, this.Have)
+    }
+}
+
+struct Service {
+    store *Store
+
+    static func New(store *Store) *Service {
+        return new Service{store: store}
+    }
+
+    func Place(sku string, qty int) Order! {
+        if qty <= 0 {
+            return ValidationError{Field: "qty", Reason: "must be positive"}
+        }
+        // ?("...") returns the error wrapped with this context; the
+        // sentinel inside (ErrNotFound) stays visible to errors.Is.
+        var have = this.store.Stock(sku)?("place order")
+        if have < qty {
+            return OutOfStock{Sku: sku, Want: qty, Have: have}
+        }
+        return this.store.Insert(sku, qty)
+    }
+
+    func Get(id int) Order! {
+        return this.store.Load(id)?(fmt.Format("get order {0}", id))
+    }
+
+    // Audit checks an order in a task of its own. A panic there ends
+    // only that task, and because Audit returns Task<string!>, awaiting
+    // it gives an error with task.ErrPanic in its chain instead of
+    // ending the program.
+    async func Audit(id int) string! {
+        var o = this.Get(id)?
+        return await check(o)?("audit")
+    }
+}
+
+// check is a separate async function, so it is a separate task once it
+// suspends. The panic below happens after the first suspension: before
+// it, the function still runs in its caller's task, and the panic would
+// belong to the caller (DESIGN.md, "Паника").
+async func check(o Order) string! {
+    await task.Yield()
+    var parts = strings.Split(o.Sku, "-")
+    // A bug, not an expected failure: old skus have no batch part, and
+    // parts[1] is out of range. Bugs panic; they are not errors.
+    var batch = parts[1]
+    return o.Sku + " batch " + batch + " ok"
+}

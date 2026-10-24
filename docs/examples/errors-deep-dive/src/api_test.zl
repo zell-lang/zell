@@ -1,0 +1,58 @@
+// Tests for the error mapping, the part every caller depends on. The
+// table builds each error the way the layers would: wrapped, typed, or
+// both, and checks the exit code the boundary picks for it.
+namespace shop.tests
+
+import shop.api
+import shop.service
+import shop.storage
+
+struct Case {
+    Name string
+    Err  error
+    Code int
+}
+
+// diskError is a real DiskError, made by the store (its cause field is
+// private to shop.storage, so a test cannot build one by hand).
+func diskError() error {
+    try Store.New().Load(2) catch err {
+        return err
+    }
+    return error("order 2 should be on the broken sector")
+}
+
+@test func TestExitCodes(t *testing.T) {
+    var cases = [
+        Case{Name: "validation", Err: ValidationError{Field: "qty", Reason: "x"}, Code: ExitUsage},
+        Case{Name: "out of stock", Err: OutOfStock{Sku: "a", Want: 2, Have: 1}, Code: ExitOutOfStock},
+        Case{Name: "sentinel", Err: ErrNotFound, Code: ExitNotFound},
+        Case{Name: "wrapped sentinel", Err: errors.Wrap(ErrNotFound, "order 1"), Code: ExitNotFound},
+        Case{Name: "typed, two layers deep", Err: errors.Wrap(errors.Wrap(OutOfStock{Sku: "a"}, "one"), "two"), Code: ExitOutOfStock},
+        Case{Name: "cause via Unwrap", Err: diskError(), Code: ExitTempFail},
+        Case{Name: "panic", Err: errors.Wrap(task.ErrPanic, "audit"), Code: ExitSoftware},
+        Case{Name: "anything else", Err: error("boom"), Code: ExitFailure},
+    ]
+    for c in cases {
+        t.Run(c.Name, func(t *testing.T) {
+            testing.Equal(t, ExitCode(c.Err), c.Code)
+        })
+    }
+}
+
+@test async func TestServiceErrorsReachTheBoundary(t *testing.T) {
+    var svc = Service.New(Store.New())
+    try svc.Place("widget-a1", 100) catch err {
+        var s OutOfStock
+        testing.True(t, errors.As(err, &s), "OutOfStock expected")
+        testing.Equal(t, s.Have, 9)
+    }
+    try svc.Get(2) catch err {
+        testing.Equal(t, ExitCode(err), ExitTempFail)
+        testing.Contains(t, err.Message(), "get order 2")
+    }
+    try await svc.Audit(9) catch err {
+        testing.True(t, errors.Is(err, task.ErrPanic), "the audit task panicked")
+        testing.Contains(t, task.PanicMessage(err), "index out of range")
+    }
+}

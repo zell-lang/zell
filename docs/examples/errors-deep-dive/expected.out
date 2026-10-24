@@ -1,0 +1,43 @@
+$ shop place widget-a1 2
+  placed order 3
+  exit 0
+$ shop place widget-a1 0
+  error: qty must be positive
+  exit 64
+$ shop place gadget-b2 50
+  error: gadget-b2: want 50, have 2
+  exit 69
+$ shop place gizmo-c3 1
+  error: place order: sku "gizmo-c3": not found
+  exit 65
+$ shop place widget-a1 two
+  error: qty must be a number, not "two"
+  exit 64
+$ shop get 1
+  order 1 widget-a1 x 1
+  exit 0
+$ shop get 42
+  error: get order 42: order 42: not found
+  exit 65
+$ shop get 2
+  error: get order 2: read order/2: disk error
+  failed operation: read order/2
+    at storage.zl:71 Store.Load
+    at service.zl:50 Service.Get ?("get order 2")
+    at api.zl:107 exec
+    at api.zl:93 Run
+  exit 75
+$ shop audit 1
+  widget-a1 batch a1 ok
+  exit 0
+$ shop audit 9
+  error: audit: panic: runtime error: index out of range [1] with length 1
+  panic: runtime error: index out of range [1] with length 1
+    at service.zl:59 Service.Audit ?("audit")
+    at api.zl:110 exec
+    at api.zl:93 Run
+  exit 70
+$ shop refund 1
+  error: command "refund" is unknown
+  exit 64
+highest exit code: 75

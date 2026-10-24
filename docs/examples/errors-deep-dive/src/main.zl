@@ -1,0 +1,35 @@
+// errors-deep-dive: one small shop, three layers, and every way a
+// request can fail on its way up from storage to the user.
+namespace shop
+
+import io
+import shop.api
+import shop.service
+import shop.storage
+
+async func main() {
+    var svc = Service.New(Store.New())
+    var commands = [
+        ["place", "widget-a1", "2"],
+        ["place", "widget-a1", "0"],
+        ["place", "gadget-b2", "50"],
+        ["place", "gizmo-c3", "1"],
+        ["place", "widget-a1", "two"],
+        ["get", "1"],
+        ["get", "42"],
+        ["get", "2"],
+        ["audit", "1"],
+        ["audit", "9"],
+        ["refund", "1"],
+    ]
+    var worst = 0
+    for c in commands {
+        var code = await Run(svc, c)
+        if code > worst {
+            worst = code
+        }
+    }
+    // A real CLI would end with os.Exit(code) for its one command; this
+    // demo runs eleven and exits 0, so `zell run` succeeds.
+    println("highest exit code:", worst)
+}

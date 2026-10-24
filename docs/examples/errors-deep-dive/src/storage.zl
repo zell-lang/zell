@@ -1,0 +1,79 @@
+// The storage layer: orders and stock in memory, with one "disk" that
+// fails on purpose. It defines the low-level errors: two sentinels and
+// a typed error that carries its cause.
+namespace shop.storage
+
+// Sentinel errors are constants. Callers test for them with errors.Is,
+// which searches the whole chain, so wrapping never hides them.
+const ErrNotFound = error("not found")
+const ErrUnavailable = error("storage unavailable")
+
+// DiskError is a typed error: it carries data (the operation and key),
+// and its Unwrap method links it to its cause, so errors.Is(err,
+// ErrUnavailable) is true for it too.
+struct DiskError {
+    Op    string
+    Key   string
+    cause error
+
+    func Message() string {
+        return this.Op + " " + this.Key + ": disk error"
+    }
+
+    func Unwrap() error {
+        return this.cause
+    }
+}
+
+struct Order {
+    Id  int
+    Sku string
+    Qty int
+}
+
+struct Store {
+    orders map[int]Order
+    stock  map[string]int
+    bad    map[int]bool // orders on a broken sector
+    nextId int
+
+    static func New() *Store {
+        var s = new Store{orders: map[int]Order{}, stock: map[string]int{}, bad: map[int]bool{}, nextId: 1}
+        s.stock["widget-a1"] = 10
+        s.stock["gadget-b2"] = 3
+        _ = s.Insert("widget-a1", 1)
+        _ = s.Insert("gadget-b2", 1)
+        s.bad[2] = true
+        // An order written by an old version: its sku has no batch part.
+        s.orders[9] = Order{Id: 9, Sku: "legacy", Qty: 1}
+        return s
+    }
+
+    func Stock(sku string) int! {
+        var (n, ok) = this.stock[sku]
+        if !ok {
+            // Wrap adds context and keeps the sentinel in the chain.
+            return errors.Wrap(ErrNotFound, "sku " + strconv.Quote(sku))
+        }
+        return n
+    }
+
+    func Insert(sku string, qty int) Order {
+        var o = Order{Id: this.nextId, Sku: sku, Qty: qty}
+        this.orders[o.Id] = o
+        this.stock[sku] -= qty
+        this.nextId += 1
+        return o
+    }
+
+    func Load(id int) Order! {
+        if this.bad[id] {
+            return DiskError{Op: "read", Key: fmt.Format("order/{0}", id), cause: ErrUnavailable}
+        }
+        var (o, ok) = this.orders[id]
+        if !ok {
+            return errors.Wrap(ErrNotFound, fmt.Format("order {0}", id))
+        }
+        return o
+    }
+}

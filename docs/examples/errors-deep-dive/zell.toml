@@ -1,0 +1,5 @@
+[package]
+name = "errors-deep-dive"
+version = "0.1.0"
+namespace = "shop"
+entry = "src/main.zl"

@@ -1,0 +1,114 @@
+// The api layer: the boundary. Errors from below stop here: each one
+// becomes an exit code and a message for the user, and the unexpected
+// ones are printed with their trace for the developer.
+namespace shop.api
+
+import io
+import shop.service
+import shop.storage
+
+// Exit codes, after the BSD sysexits.h conventions.
+const ExitOk = 0
+const ExitFailure = 1
+const ExitUsage = 64
+const ExitNotFound = 65
+const ExitOutOfStock = 69
+const ExitSoftware = 70
+const ExitTempFail = 75
+
+// ExitCode classifies an error. errors.As and errors.Is search the whole
+// chain (wrappers from ?("...") and errors.Wrap, and Unwrap methods), so
+// the layers in between can add context freely. A type switch would
+// only see the outermost error, which after ?("...") is the wrapper.
+func ExitCode(err error) int {
+    var v ValidationError
+    if errors.As(err, &v) {
+        return ExitUsage
+    }
+    var s OutOfStock
+    if errors.As(err, &s) {
+        return ExitOutOfStock
+    }
+    if errors.Is(err, ErrNotFound) {
+        return ExitNotFound
+    }
+    if errors.Is(err, ErrUnavailable) {
+        return ExitTempFail
+    }
+    if errors.Is(err, task.ErrPanic) {
+        return ExitSoftware
+    }
+    return ExitFailure
+}
+
+// Expected errors are the user's business: a message is enough. The
+// rest are bugs or outages: the developer needs to know where they
+// came from.
+func expected(code int) bool {
+    return code == ExitUsage || code == ExitNotFound || code == ExitOutOfStock
+}
+
+// Report prints what the user sees and returns the exit code.
+func Report(err error) int {
+    var code = ExitCode(err)
+    println("  error:", err)
+    if expected(code) {
+        return code
+    }
+    if errors.Is(err, task.ErrPanic) {
+        // The panic's own message, without the chain around it.
+        println("  panic:", task.PanicMessage(err))
+    }
+    var d DiskError
+    if errors.As(err, &d) {
+        println("  failed operation:", d.Op, d.Key)
+    }
+    // The return trace: where the error was created and every ? it went
+    // through, with the context each one added.
+    for f in errors.Frames(err) {
+        var ctx = ""
+        if f.Context != "" {
+            ctx = " ?(\"" + f.Context + "\")"
+        }
+        println(fmt.Format("    at {0}:{1} {2}{3}", fs.Base(f.File), f.Line, f.Func, ctx))
+    }
+    return code
+}
+
+// number converts an argument. strconv's own error ("strconv.Atoi:
+// parsing ...") is an implementation detail; at the boundary a bad
+// argument is the user's mistake, so it becomes a ValidationError.
+func number(field string, s string) int! {
+    var n = try strconv.Atoi(s) catch err {
+        return ValidationError{Field: field, Reason: "must be a number, not " + strconv.Quote(s)}
+    }
+    return n
+}
+
+// Run executes one command line, reports its error if it fails, and
+// returns its exit code.
+async func Run(svc *Service, args []string) int {
+    println("$ shop", strings.Join(args, " "))
+    var code = ExitOk
+    try await exec(svc, args) catch err {
+        code = Report(err)
+    }
+    println("  exit", code)
+    return code
+}
+
+// exec is the command itself. Every ? in it returns the error to Run.
+async func exec(svc *Service, args []string) void! {
+    switch args[0] {
+        case "place":
+            var o = svc.Place(args[1], number("qty", args[2])?)?
+            println("  placed order", o.Id)
+        case "get":
+            var o = svc.Get(number("id", args[1])?)?
+            println("  order", o.Id, o.Sku, "x", o.Qty)
+        case "audit":
+            println("  " + await svc.Audit(number("id", args[1])?)?)
+        default:
+            return ValidationError{Field: "command", Reason: strconv.Quote(args[0]) + " is unknown"}
+    }
+}
