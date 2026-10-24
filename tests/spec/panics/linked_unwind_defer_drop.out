@@ -1,0 +1,12 @@
+defer leaf
+drop leaf
+defer level 1
+drop level 1
+defer level 2
+drop level 2
+defer level 3
+drop level 3
+defer top
+drop top
+caught: panic: panic in awaited task: boom drops = 5
+is panic: true

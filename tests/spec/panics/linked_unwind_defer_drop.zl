@@ -1,0 +1,55 @@
+// test: a panic in a frame linked 4 levels deep unwinds every level: each Task<int> level re-panics, runs its pending defers and drops its live values, innermost first; the T! frame on top turns it into task.ErrPanic for main; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.linked_unwind_defer_drop
+
+import io
+
+var drops = 0
+
+struct Guard {
+    name string
+
+    func Drop() {
+        drops += 1
+        println("drop", this.name)
+    }
+}
+
+func explode(n int) int {
+    if n >= 0 {
+        panic("boom")
+    }
+    return n
+}
+
+async func leaf() int {
+    var g = Guard{name: "leaf"}
+    defer println("defer leaf")
+    await task.Yield()
+    return explode(len(g.name))
+}
+
+async func level(d int) int {
+    var g = Guard{name: fmt.Format("level {0}", d)}
+    defer println("defer level", d)
+    if d == 1 {
+        return await leaf() + len(g.name)
+    }
+    return await level(d - 1) + len(g.name)
+}
+
+async func top() int! {
+    var g = Guard{name: "top"}
+    defer println("defer top")
+    return await level(3) + len(g.name)
+}
+
+async func main() {
+    var r = try await top() catch err {
+        println("caught:", err.Message(), "drops =", drops)
+        println("is panic:", errors.Is(err, task.ErrPanic))
+        return
+    }
+    println("unreachable", r)
+}

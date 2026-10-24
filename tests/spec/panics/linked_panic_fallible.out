@@ -1,0 +1,13 @@
+1 levels: panic: boom
+  is panic: true
+  message: boom
+  has trace: true
+2 levels: panic: boom
+  is panic: true
+  message: boom
+  has trace: true
+1000 levels: panic: boom
+  is panic: true
+  message: boom
+  has trace: true
+main goes on

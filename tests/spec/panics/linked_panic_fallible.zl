@@ -1,0 +1,44 @@
+// test: a Task<int!> frame-linked 1, 2 and 1000 levels deep (each level awaits the next directly, no level has a task of its own) panics after suspending: the awaiter of the panicking frame gets an error wrapping task.ErrPanic, which the levels above return like any error; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.linked_panic_fallible
+
+import io
+
+func explode(n int) int {
+    if n >= 0 {
+        panic("boom")
+    }
+    return n
+}
+
+async func leaf(d int) int! {
+    await task.Yield()
+    return explode(d)
+}
+
+async func level(d int, n int) int! {
+    if d == 1 {
+        return await leaf(n)? + 1
+    }
+    var v = await level(d - 1, n)?
+    return v + 1
+}
+
+async func probe(d int) {
+    var r = try await level(d, d) catch err {
+        println(d, "levels:", err.Message())
+        println("  is panic:", errors.Is(err, task.ErrPanic))
+        println("  message:", task.PanicMessage(err))
+        println("  has trace:", len(task.PanicTrace(err)) > 0)
+        return
+    }
+    println("unreachable", r)
+}
+
+async func main() {
+    await probe(1)
+    await probe(2)
+    await probe(1000)
+    println("main goes on")
+}

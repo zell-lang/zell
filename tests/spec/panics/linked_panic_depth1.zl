@@ -1,0 +1,36 @@
+// test: a Task<int> frame-linked 1 level(s) deep (main awaits the panicking frame directly, so no level has a task of its own) panics after suspending: the panic re-panics in every awaiter up to main, with one prefix, exit code 2 and the backtrace of the panicking frame
+// status: passing
+// exit: 2
+// env: ZELL_NO_BACKTRACE=
+// stderr: panic: panic in awaited task: boom
+// stderr: backtrace (most recent call first):
+// stderr:   tests/spec/panics/linked_panic_depth1.zl:15 explode
+// stderr:   tests/spec/panics/linked_panic_depth1.zl:22 leaf
+namespace spec.panics.linked_panic_depth1
+
+import io
+
+func explode(n int) int {
+    if n >= 0 {
+        panic("boom")
+    }
+    return n
+}
+
+async func leaf() int {
+    await task.Yield()
+    return explode(0) + 1
+}
+
+async func level(d int) int {
+    if d == 1 {
+        return await leaf() + 1
+    }
+    return await level(d - 1) + 1
+}
+
+async func main() {
+    println("start")
+    var v = await leaf()
+    println("unreachable", v)
+}

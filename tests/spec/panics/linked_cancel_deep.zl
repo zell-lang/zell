@@ -1,0 +1,47 @@
+// test: a chain of 1000 frames linked to a root task (each level awaits the next directly, no level has a task of its own) waits on a channel; task.Any cancels the root as the loser, the wait (hooked on the root task) wakes with task.ErrCancelled and the error unwinds the whole chain; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.linked_cancel_deep
+
+import io
+
+async func waitLeaf(ch task.Channel<int>) int! {
+    var v = await ch.Recv()?
+    return v
+}
+
+async func waitChain(d int, ch task.Channel<int>) int! {
+    if d == 0 {
+        return await waitLeaf(ch)?
+    }
+    var v = await waitChain(d - 1, ch)?
+    return v + 1
+}
+
+// Suspends once first, so it has a task of its own (the root) before the
+// chain below links to it.
+async func root(ch task.Channel<int>) int! {
+    await task.Yield()
+    return await waitChain(1000, ch)?
+}
+
+async func quick() int! {
+    await task.Delay(5)
+    return 7
+}
+
+async func main() {
+    var ch = task.Channel<int>(0)
+    var slow = root(ch)
+    var first = try await task.Any(slow, quick()) catch err {
+        println("any failed:", err.Message())
+        return
+    }
+    println("winner:", first)
+    var r = try await slow catch err {
+        println("loser:", err.Message())
+        println("cancelled:", errors.Is(err, task.ErrCancelled))
+        return
+    }
+    println("unreachable", r)
+}
