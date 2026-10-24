@@ -1,8 +1,10 @@
 # Framework benchmarks: Zell vs Go
 
-Benchmarks of the framework layer (`web`, `data`, `log`, `net.ws`) and of
+Benchmarks of the framework layer (`data`, `log`, `net.ws`) and of
 process startup, each against the usual Go libraries. They complement the
-language-level benchmarks in [README.md](README.md).
+language-level benchmarks in [README.md](README.md). The `web_api`
+benchmark (`web` vs Gin vs net/http) left with the `web` framework on
+2026-10-24; it is kept by the git tag `web-in-tree`.
 
 **Status: the programs are written and verified; no results yet.** The
 4 vCPU machine was shared by five agents when these were added, so no
@@ -24,7 +26,6 @@ gorm.io/driver/postgres 1.5.11, mattn/go-sqlite3 1.14.52, pgx 5.7.2, zap
 
 ```sh
 make -C runtime && cargo build --release -p zell
-benchmarks/web_api/run.sh          # 3 servers x RUNS rounds with the Go load generator
 benchmarks/orm_sqlite/run.sh       # SQLite memory + file, PostgreSQL if installed (PG=0 skips)
 benchmarks/logging/run.sh          # needs ~1.2 GB free in $LOGDIR (default /tmp)
 benchmarks/websocket_echo/run.sh   # needs ulimit -n >= 2100
@@ -41,44 +42,6 @@ process). Each `run.sh` exits with `MISMATCH` if an implementation's
 output differs from Zell's.
 
 ## The benchmarks
-
-### `web_api`: REST API on `web` vs Gin vs net/http
-
-| file | what |
-|---|---|
-| `web_api/server.zl` | `web`: `@route` controller with `@get`/`@post` attribute routes, two DI singletons (`Catalog` built by its static `New`, `Orders` with a `sync.AtomicInt`) injected into controller fields, `@body` JSON binding, `@validate` (range, required, email) with 400 Problem Details, `Result<T>` statuses, `UseLogging` (one rendered event per request into a discarding `log` sink) and an API-key middleware (`X-Api-Key`, else 401) |
-| `web_api/go/gin` | Gin in release mode: the same routes, `ShouldBindJSON` + `binding:` tags (go-playground/validator), `gin.LoggerWithWriter(io.Discard)`, the same middleware |
-| `web_api/go/nethttp` | Go 1.22 `ServeMux` patterns, `encoding/json`, hand-written validation, `slog` text line per request into `io.Discard` |
-| `web_api/go/load` | the load generator: 64 keep-alive HTTP/1.1 connections, 200k requests in all, one in flight per connection, round-robin over the 4 endpoints; req/s, p50 and p99 latency |
-
-Endpoints: `GET /api/items/{id}` (path parameter), `GET
-/api/items?category=&limit=` (query), `GET /api/items/{id}/quote?qty=`
-(path parameter and query), `POST /api/orders` (validated JSON body, 201).
-A catalogue of 1000 items is identical on all servers.
-
-Verification: `load -check` sends a fixed sequence of 24 requests (incl.
-401, 400 for a bad path parameter and three validation failures, 404) to
-each fresh server and prints the statuses plus an FNV checksum of the
-200/201 bodies; the three outputs must be equal. Every load run prints an
-order-independent checksum (sum of FNV-1a of "status body"; the order id
-is taken out of POST bodies, because which request gets which id depends
-on scheduling), and it must be equal too. Error bodies are not compared
-(Problem Details vs Gin's validator messages).
-
-Results (best of 5 rounds by req/s, the p50/p99 of that round; ratio =
-X / Gin, Gin = 1.00; for req/s **> 1 is better**, for latency and RSS < 1
-is better; peak RSS of the server process after all rounds):
-
-| server | req/s | p50 ms | p99 ms | req/s vs Gin | p99 vs Gin | peak RSS | RSS vs Gin |
-|---|---|---|---|---|---|---|---|
-| Zell `web` | 41 778 | 1.430 | 3.974 | 0.71 | 0.66 | 6.9 MB | 0.31 |
-| Go Gin | 58 960 | 0.746 | 5.982 | 1.00 | 1.00 | 22.5 MB | 1.00 |
-| Go net/http | 59 891 | 0.793 | 5.165 | 1.02 | 0.86 | 15.3 MB | 0.68 |
-
-Rounds ranged 39.8-41.8k (Zell), 49.7-59.0k (Gin), 53.9-59.9k (net/http)
-req/s. Zell's `web` serves 0.71x Gin's requests with twice its median
-latency, but a 34% lower p99 and a third of its memory; every request
-pays the `log` pipeline of `UseLogging` (open item 4).
 
 ### `orm_sqlite`: `data` vs GORM vs database/sql
 
@@ -219,12 +182,11 @@ shows (3.6x Go) plus framing in Zell.
 
 `startup/harness` (a small `perf stat -r`) starts each program 300 times,
 the programs alternating, and measures from just before fork+exec to the
-first byte on stdout, or on stderr for servers (which are then killed):
+first byte on stdout:
 
 | program | Zell | Go |
 |---|---|---|
 | hello | `startup/hello/main.zl` | `startup/hello/main.go` |
-| web_api server reaching "listening" | `web_api/server.zl` (prints the port after `app.Listen`: routes built, socket bound) | `web_api/go/gin`, `web_api/go/nethttp` (port printed after `net.Listen`) |
 | CLI with a 1 MB config | `startup/cli/main.zl`: `io.ReadFile` + `json.Parse<Config>` (7329 routes, 1 048 646 bytes, written by `harness -genconfig`) | `startup/cli/main.go`: `os.ReadFile` + `json.Unmarshal` |
 
 Verification: hello output is compared byte for byte; the CLI summaries
@@ -235,8 +197,6 @@ Results (TODO, quiet run; ms, ratio = Zell / Go on the median, Go = 1.0):
 | program | Zell min / median / p90 | Go min / median / p90 | Zell / Go |
 |---|---|---|---|
 | hello | TODO | TODO | TODO |
-| web_api listening (vs Gin) | TODO | TODO | TODO |
-| web_api listening (vs net/http) | TODO | TODO | TODO |
 | cli 1 MB config | TODO | TODO | TODO |
 
 Binary sizes (stripped: Zell `--release`, Go `-ldflags="-s -w"`; these
@@ -246,11 +206,9 @@ are deterministic; `startup/run.sh` prints them):
 |---|---|---|---|
 | hello | 33 040 | 1 437 880 | 0.023 |
 | cli (encoding.json) | 103 792 | 1 929 400 | 0.054 |
-| web_api server vs Gin | 1 911 656 | 8 495 396 | 0.225 |
-| web_api server vs net/http | 1 911 656 | 5 992 740 | 0.319 |
 
 `scripts/bench-size.sh` builds only `examples/hello.zl` (plus C/C++/Go
-hellos); the web_api server sizes above come from `startup/run.sh`.
+hellos).
 
 ## Open items found while writing the benchmarks
 
@@ -296,8 +254,6 @@ stdlib fixes belong with their owners. Each item says where the code is.
    - `emit` (line 579) allocates an `Event`, a `map[string]any` and a
      `keys` slice, and renders the message, before any sink runs. A JSON
      sink could render from `parts`/`values` directly.
-   - `UseLogging` in `web` uses the same pipeline, so these costs are part
-     of every `web_api` request too.
 5. **`log`: no buffered file sink.** `FileSink.Emit` makes one `write(2)`
    per record under a spin lock (`rtLock`). The Go loggers do the same with
    a plain `*os.File`, so the benchmark is fair, but zap offers
@@ -308,14 +264,13 @@ stdlib fixes belong with their owners. Each item says where the code is.
    disabled scenario made 0 allocations (zap makes 1 per call for its
    field slice). When the quiet run measures this, check that the loop was
    not folded away entirely.
-7. **Partly fixed: `web` / `encoding.json`: an empty list result is
+7. **Partly fixed: `encoding.json`: an empty list result is
    written as `null`.** `json.Parse` now decodes `[]` into an empty non-nil
    slice (`[z][0..0]`: a backing array with no elements) and `json.Format`
    writes such a slice as `[]`; only a nil slice is `null` (examples/README.md
    decision 22). A handler that builds its result with `var out []T = []`
    and never appends still returns the nil slice, i.e. `null`; it can
-   return `items[0..0]` or a decoded value, or `web`'s result writer could
-   write slices as arrays regardless.
+   return `items[0..0]` or a decoded value.
 8. **Fixed: `encoding.json` made three passes and built error paths
    eagerly.** The text is parsed once in C into an arena document
    (`runtime/src/std_json.c`); `Parse<T>` walks its nodes directly and the
@@ -335,8 +290,8 @@ stdlib fixes belong with their owners. Each item says where the code is.
    machine. A portable default (x86-64-v2 or v3, with an opt-in `native`)
    looks safer.
 10. **Compiler diagnostic: an ambiguous name is reported, then sema goes on
-    with one of the candidates.** With `import log` and `import web`,
-    `c *Context` gives "ambiguous name Context", then four follow-on errors
+    with one of the candidates.** With `import log` and another import that
+    also exports `Context` (it was the former `web`), `c *Context` gives "ambiguous name Context", then four follow-on errors
     that assume `log.Context` ("struct Context has no method Header", ...).
     After an ambiguity error, a poisoned type would avoid the cascade.
 11. **Language ergonomics seen while porting.** A method cannot return
@@ -355,7 +310,5 @@ stdlib fixes belong with their owners. Each item says where the code is.
     them. The servers outlive the script and keep their ports. The scripts
     added here had the same bug; they now start servers in the main shell
     and kill them by PID. `http_hello/run.sh` was left unchanged.
-14. **Not covered:** HTTP/2 or TLS for `web_api` (`http_hello` covers the
-    transport); `web` features beyond the four endpoints (JWT `UseAuth`,
-    OpenAPI, gzip); `data` relations (`Include`) and grouping; WebSocket
+14. **Not covered:** `data` relations (`Include`) and grouping; WebSocket
     compression (`net.ws` has none).

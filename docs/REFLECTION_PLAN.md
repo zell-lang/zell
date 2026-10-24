@@ -39,11 +39,12 @@ descriptors (each with `Fields`, attributes, and typed constructors /
 method pointers as DESIGN.md "Рефлексия" already specifies: `Call<F>`
 through a typed function pointer, no boxing).
 
-Why: today `web` builds its route table and DI container inside the
+Why: the in-tree `web` built its route table and DI container inside the
 compiler (`compiler/src/sema/web.rs`) by scanning every type for
-`@controller`/`@route` attributes; with `TypesWith<A>()` the same table is
-built by ordinary package code, the hooks in `sema/web.rs` go away, and
-`web` can move to `zell-lang/web` (FRAMEWORK.md plan, steps 1-3). It also
+`@controller`/`@route` attributes; it was removed from the tree on
+2026-10-24 (sources: git tag `web-in-tree`). With `TypesWith<A>()` the
+same table is built by ordinary package code, so `web` returns as
+`zell-lang/web` (FRAMEWORK.md plan) without compiler hooks. It also
 makes the table a constant: no start-up scan.
 
 Design points to settle in DESIGN.md before implementing:
@@ -60,8 +61,8 @@ Design points to settle in DESIGN.md before implementing:
   generated code.
 
 Acceptance: spec paragraph + EBNF untouched (library function), spec tests
-in `tests/spec/reflection`, `examples/web_app` rewritten on it with
-identical output, `sema/web.rs` deleted.
+in `tests/spec/reflection`, the `web_app` example of tag `web-in-tree`
+rewritten on it in `zell-lang/web` with identical output.
 
 ## 3. Run-time reflection: spec is written, implementation partial
 
@@ -91,7 +92,7 @@ node set and evaluation rules (`Compile()` back to a closure).
 ## 5. Order and sizing
 
 1. `TypesWith<A>()` — spec 1 h, compiler 1 agent run (45-60 min),
-   `web` rewrite 1 run, remove `sema/web.rs`.
+   `zell-lang/web` rewrite 1 run (`sema/web.rs` is already gone).
 2. Expression trees — spec first (needs a decision on the node set), then
    2 runs (compiler, `data` rewrite).
 3. Attributes as values / run-time `reflect` — after the two above; sized

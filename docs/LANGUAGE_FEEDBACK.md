@@ -22,8 +22,8 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
    int!"); workaround: `func X() Task<T!>` delegating to a private async method.
 6. **`defer this.mu.Unlock()` on a value `task.Mutex` field is rejected**
    ("interior pointer"); the field has to be `*task.Mutex`.
-7. **Suspicious trace locations** in release builds (`web.Scope.Get` pointing
-   at a test file line).
+7. **Suspicious trace locations** in release builds (a framework DI lookup pointing
+   at a test file line; the framework has since moved out, see item 17).
 
 ## Standard library
 8. **No `os.Environ()`** — zconf reads `/proc/self/environ` (Linux-only, misses
@@ -49,6 +49,12 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
 16. `zell init --help` is an "unknown option".
 
 ## Framework (`web`)
+
+**web moved out (2026-10-24):** the `web` framework is no longer in the
+tree (sources: git tag `web-in-tree`); it returns as the package
+`zell-lang/web` after `reflect.TypesWith<A>()`. Item 17 and the note below
+describe the in-tree version.
+
 17. **Fixed (2026-10-24):** `app.MapError<E>(status)` maps a domain error
     type (also through wrappers) to a status once per application, and
     `app.OnError(func(*Context, error) *ProblemDetails)` sees every error
@@ -128,9 +134,10 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     coroutine frames (defers run, locals and `Drop`s released) and
     completes the task as panicked; `Task<T!>` awaiters get an error
     wrapping `task.ErrPanic`, `Task<T>` awaiters panic again, unobserved
-    tasks print the panic; `main` exits 2 as before; `web.UseRecover`
-    answers 500 "internal error" and keeps serving
-    (`tests/spec/panics/*`, `tests/spec/web/recover_panic`). Follow-ups:
+    tasks print the panic; `main` exits 2 as before; the framework's
+    recover middleware answered 500 "internal error" and kept serving
+    (`tests/spec/panics/*`; the web part moved out with the framework,
+    tag `web-in-tree`). Follow-ups:
     (a) synchronous frames are not unwound (their defers do not run, what
     they own leaks: e.g. a handler that panics in a plain function leaks
     its request objects), which needs unwind tables or per-call landing

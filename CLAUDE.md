@@ -11,13 +11,13 @@ and every change must match it or update it.
 | Path | What | Owner docs |
 |---|---|---|
 | `DESIGN.md` | language spec (syntax, semantics, memory, errors, async, reflection, stdlib) | — |
-| `docs/TOOLING.md`, `PACKAGES.md`, `FRAMEWORK.md`, `PLATFORMS.md` | tooling/LSP, package manager, web/ORM/log/diag framework, platforms | — |
+| `docs/TOOLING.md`, `PACKAGES.md`, `FRAMEWORK.md`, `PLATFORMS.md` | tooling/LSP, package manager, ORM/log/diag framework, platforms | — |
 | `compiler/` | Rust crate `zell`: `lexer` → `parser` (`ast.rs`) → `sema/` (resolve, check, lower to `hir.rs`) → `codegen/` (inkwell/LLVM) → `build.rs` (object + link); `package/` (manifest, graph, lock); `session.rs` + `sema/index.rs` (LSP queries); `main.rs` CLI | `codegen/mod.rs` header = compiler-side ABI |
 | `runtime/` | C11 runtime: refcounted objects, strings, slices, maps, errors, panic, I/O, task scheduler (`task.c`), stdlib `std_*.c` | `runtime/ABI.md` = C-side ABI, exact |
 | `lsp/` | `zell-lsp` binary (lsp-server) | `docs/TOOLING.md` |
 | `editors/vscode/` | TextMate grammar + LSP client | — |
 | `grammar/zell.bnf` | canonical Grammar-Kit grammar (IDEA plugin); keep in sync with parser and `DESIGN.md` EBNF | — |
-| `docs/guide/` | user guides in English (tour, errors, async, memory, packages, testing, debugging, web, faq); every ```zell block is compiled and run by `compiler/tests/guide.rs` | — |
+| `docs/guide/` | user guides in English (tour, errors, async, memory, packages, testing, debugging, faq); every ```zell block is compiled and run by `compiler/tests/guide.rs` | — |
 | `examples/` | runnable `.zl` + byte-exact `.out`; `errors_compile/` must fail; `README.md` lists output rules and assumptions | — |
 | `tests/spec/` | spec corpus, `// status: passing|pending` per file (TDD: pending tests must fail; flip when implemented) | `tests/spec/README.md` |
 | `benchmarks/` | Zell vs Go programs; `scripts/bench-perf.sh`, `scripts/bench-size.sh` | `benchmarks/README.md` |
@@ -121,7 +121,9 @@ Next, in this order:
 5. **Language and framework** (`DESIGN.md` stages, `docs/REFLECTION_PLAN.md`,
    `docs/FRAMEWORK.md`): ownership elision, cycle-collector gaps (maps in
    threaded processes, tasks, errors), generics completion (block `try` is done),
-   `reflect.TypesWith<A>()` then `web` → `zell-lang/web`, expression trees
+   `reflect.TypesWith<A>()` then a new `zell-lang/web` package (the
+   in-tree `web` was removed 2026-10-24, sources at the git tag
+   `web-in-tree`), expression trees
    then `data` → `zell-lang/data`, run-time reflection, stdlib
    (`collections`, `net`, `encoding.json` write API — `Value.Set`),
    platforms (`docs/PLATFORMS.md`, Apple signing).

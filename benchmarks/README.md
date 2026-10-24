@@ -52,7 +52,7 @@ Startup of `hello` (`--release`, 300 runs): 1.45 ms -> 1.08 ms (min), 1.81 ms
 -> 1.30 ms (median). Sizes (`--release`, stripped): `hello` 35 584 -> 14 840
 bytes (10 320 with `ZELL_LINKER=lld`), `http_server` 1 203 680 -> 1 232 968
 (the stdlib grew in between), `web_app` 1 756 672 (the old compiler cannot
-build today's `web_app`).
+build today's `web_app`; the example left with `web`, tag `web-in-tree`).
 
 Compile time (`zell build`, best of 3, wall / CPU):
 
@@ -838,7 +838,7 @@ from a 16-core desktop, not the 4 vCPU VM of the earlier table).
 
 Latency, cores scaling and language-mechanism benchmarks: see [RESULTS-latency.md](RESULTS-latency.md).
 Stdlib benchmarks (`json_codec`, `encodings`, `crypto`, `file_io`, `sort_collect`): see [RESULTS-stdlib.md](RESULTS-stdlib.md).
-Framework benchmarks (web_api, orm_sqlite, logging, websocket_echo, startup): [RESULTS-framework.md](RESULTS-framework.md).
+Framework benchmarks (orm_sqlite, logging, websocket_echo, startup): [RESULTS-framework.md](RESULTS-framework.md).
 
 ## Performance wave 2 (2026-10-23, 16-core x86-64 Fedora 42, AMD Ryzen 7 8845HS, clang/LLVM 18, go 1.24.7, `--release`)
 
@@ -897,20 +897,10 @@ compare in `rtGet`, is the next step), `fanout_fanin`'s pool phase and
 
 ## Soak and fuzz
 
-Long-running stability checks (not part of `cargo test`):
+Long-running stability checks (not part of `cargo test`). The HTTP soak
+`scripts/soak-http.sh` drove the `web_api` server and left with `web`
+(tag `web-in-tree`); a `net.http` replacement is not written yet.
 
-- `scripts/soak-http.sh` builds `benchmarks/web_api/server.zl` (the `web`
-  framework, JSON bodies) with `--release`, starts it in the main shell
-  (killed by PID on exit), and loops the Go load generator `web_api/go/load`
-  (`CONNS` connections, `BATCH` requests per run) for `DURATION` seconds
-  (default 3600), sampling the server's VmRSS every `SAMPLE` seconds
-  (default 10) into a CSV (`CSV`, default `soak-http.csv`: timestamp,
-  rss_kb, requests, errors). The server exposes no `diag` metrics, so only
-  RSS is tracked. Exit 1 when the server died, any request failed (a status
-  or body the load tool does not accept, or a failed load run), or the
-  maximum RSS of the last quarter of the samples exceeds the maximum of the
-  first quarter by more than `MAX_GROWTH_PCT` (default 20). Smoke test:
-  `DURATION=30 SAMPLE=2 scripts/soak-http.sh`.
 - `make -C runtime fuzz-json` builds the runtime and the libFuzzer target
   `runtime/tests/fuzz/fuzz_json.c` (JSON parse, node walk, writer round
   trip) with `-fsanitize=fuzzer,address,undefined` in `runtime/build/fuzz`,

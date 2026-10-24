@@ -18,8 +18,8 @@ what Go makes you write by hand:
   pauses and resources close deterministically;
 - a large standard library written mostly in Zell (HTTP/1.1 and 2, TLS
   1.3, SQL with PostgreSQL and SQLite drivers, JSON/YAML/TOML/XML, regex,
-  crypto, compression, structured logging, metrics and tracing, a web
-  framework), compiled through LLVM 18 to native code.
+  crypto, compression, structured logging, metrics and tracing, an ORM),
+  compiled through LLVM 18 to native code.
 
 ```zell
 namespace hello
@@ -272,7 +272,6 @@ zell build --release                 # an optimized, stripped binary
 | [Packages](docs/guide/packages.md) | projects, dependencies, workspaces |
 | [Testing](docs/guide/testing.md) | `zell test`, benchmarks, runnable examples |
 | [Debugging](docs/guide/debugging.md) | traces, logging, leak checks, the debugger, profiles |
-| [Web services](docs/guide/web.md) | `web` quickstart |
 | [Getting started](docs/guide/getting-started.md) | install, first project, tests, cross-builds, editors |
 | [FAQ](docs/guide/faq.md) | differences from Go and C# |
 | API reference | `zell doc strings.Split`, or `zell doc std --html out/` for a searchable site |
@@ -315,7 +314,7 @@ stable; binary releases are at the release-candidate stage.
 | Standard library | most of Go's standard library has a counterpart; see [docs/STDLIB.md](docs/STDLIB.md) for each package |
 | Networking: TCP/UDP, HTTP/1.1 + HTTP/2 client and server, WebSocket, TLS 1.2/1.3 | works |
 | Data: SQL (PostgreSQL, SQLite), Redis, Kafka, S3 clients | works |
-| `web` framework (routing, binding, validation, DI, auth, OpenAPI) | works |
+| Attribute-routed web framework (routing, binding, DI, OpenAPI) | moved out until `reflect.TypesWith`; returns as the package `zell-lang/web` (in-tree sources: git tag `web-in-tree`) |
 | Tools: `fmt`, `test` (with examples), `doc`, LSP + VS Code, debugger (in-process agent, DAP, lldb/gdb) | works |
 | Packages: manifests, workspaces, git modules with MVS, lock file, module proxy | works |
 | Platforms: Linux x86-64/arm64 | works; macOS and Windows (mingw-w64 cross builds) in progress |

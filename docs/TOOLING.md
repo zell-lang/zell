@@ -269,7 +269,7 @@ sema — режим единиц `sema::units`).
   единиц. Проверки по всей программе делаются при сборке `Analysis`:
   объявления пространств имён (определяет первый файл), неиспользуемые
   импорты (только в программе без других ошибок), сигнатура `main` точки
-  входа, сервисы и дубликаты маршрутов `web`. Тест
+  входа. Тест
   `compiler/tests/incremental.rs` сравнивает инкрементальный анализ с
   полным (`Session::analyze_full`) после каждой правки случайной
   последовательности над `examples/` и `tests/spec/` (`INCR_EDITS`,
@@ -619,4 +619,4 @@ TestX(t *testing.T)` (и `@test func X()`; обе формы могут быть
 6. DWARF в кодогенерации, DAP-адаптер.
 7. IDEA-плагин: Grammar-Kit PSI + LSP-клиент.
 
-Fuzzing и soak-тесты рантайма: `make -C runtime fuzz-json` (libFuzzer + ASan/UBSan для `encoding.json`) и `scripts/soak-http.sh` (RSS и ошибки HTTP-сервера под нагрузкой); см. раздел "Soak and fuzz" в `benchmarks/README.md`.
+Fuzzing рантайма: `make -C runtime fuzz-json` (libFuzzer + ASan/UBSan для `encoding.json`); soak-тест HTTP-сервера `scripts/soak-http.sh` ушёл вместе с `web` (тег `web-in-tree`); см. раздел "Soak and fuzz" в `benchmarks/README.md`.

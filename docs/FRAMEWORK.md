@@ -1,4 +1,4 @@
-# Zell Framework: веб, данные, логирование, диагностика
+# Zell Framework: HTTP, данные, логирование, диагностика
 
 Цель: из коробки давать уровень ASP.NET Core + EF Core + Serilog + pprof,
 но проще, быстрее и без магии рантайма. Всё строится на четырёх свойствах
@@ -8,9 +8,9 @@
 компиляции; там, где Go использует строковые теги и `interface{}`, Zell
 использует атрибуты и generics.
 
-Разделение: стандартная библиотека (корни `io`, `net`, `web`, …) содержит базовые протоколы и
-форматы; фреймворк `zell.web`, `zell.data`, `zell.log`, `zell.diag` —
-отдельные пакеты в реестре с той же командой разработки.
+Разделение: стандартная библиотека (корни `io`, `net`, `encoding`, …) содержит базовые протоколы и
+форматы; фреймворк `zell.data`, `zell.log`, `zell.diag` и будущий
+`zell-lang/web` — отдельные пакеты в реестре с той же командой разработки.
 
 ## 1. Форматы: `encoding.{json,xml,yaml,toml}`
 
@@ -52,7 +52,8 @@ switch any {
 - **Валидация при разборе**: `@validate(required: true, min: 1, max: 100,
   pattern: "...")` проверяется в том же проходе, ошибки собираются списком.
 - **Схемы**: `json.Schema<T>()` генерирует JSON Schema из типа и атрибутов
-  (нужно для OpenAPI ниже).
+  `@json` (✓ в `encoding.json`; ключевые слова валидации и OpenAPI вернутся
+  вместе с `zell-lang/web`).
 - **Enum**: сериализуется по имени варианта; `@json(value: 1)` для чисел;
   enum с полями — как tagged union (`{"kind": "Ok", "value": 1}`,
   настраивается `@json(tag: "type", content: "data")`).
@@ -61,9 +62,10 @@ switch any {
 - TOML и YAML дополнительно: сохранение комментариев при round-trip
   (`toml.Document`), якоря YAML, многодокументные YAML-потоки.
 
-## 2. HTTP-сервер: `net.http` и `zell.web`
+## 2. HTTP-сервер: `net.http`
 
-Два уровня, как `Kestrel` + ASP.NET Core.
+`net.http` — уровень `Kestrel`; уровень ASP.NET Core (атрибутная
+маршрутизация, DI, OpenAPI) вынесен из дерева, см. ниже.
 
 ### `net.http` (низкий уровень)
 
@@ -138,7 +140,7 @@ switch any {
 - **Интеграция**: шифрование в буферы, ввод-вывод — наши async-сокеты, без
   потока на соединение; `http.Get("https://...")`, `http.Server{TLS: ...}`,
   `h2` через ALPN; системные корни через `runtime/src/platform/`;
-  `web.AutoTLS("example.com")` через ACME в `zell.web`.
+  ACME (`AutoTLS`) — в будущем пакете `zell-lang/web`.
 - **Результат**: TLS добавляет ~300–400 KB к бинарнику, одна сборка под
   все платформы, wasm и мобильные без C-зависимостей.
 
@@ -173,211 +175,25 @@ switch any {
   fuzz-smoke парсеров X.509, record layer и рукопожатий (без паник и утечек).
   libFuzzer-цели и interop с `curl` — пока нет.
 - Нет: OCSP stapling, горячая перезагрузка сертификатов, `h2` (нет HTTP/2),
-  ACME/`web.AutoTLS`, P-384, wasm-сборка не проверялась. Внешнего аудита не
+  ACME (`AutoTLS`), P-384, wasm-сборка не проверялась. Внешнего аудита не
   было (`docs/SECURITY.md`).
 
-### `zell.web` (фреймворк)
+### Фреймворк поверх `net.http`: вынесен из дерева
 
-```zell
-namespace shop
+Атрибутный фреймворк `web` (контроллеры `@route`/`@get…`, биндинг и
+`@validate`, DI, middleware, JWT, `web.config`, OpenAPI, `TestServer`)
+жил в stdlib, а таблицу маршрутов и DI-контейнер строил компилятор
+(`sema/web.rs`) при каждой сборке. Решение (2026-10-24): до появления
+`reflect.TypesWith<A>()` (`docs/REFLECTION_PLAN.md`) его нет в дереве;
+он вернётся отдельным пакетом `zell-lang/web` (план в конце документа).
+Полные исходники, спек-тесты (`tests/spec/web`), пример
+`examples/web_app`, бенчмарк `benchmarks/web_api` и это описание
+сохранены тегом git **`web-in-tree`**; последний тулчейн со встроенным
+`web` — `v0.1.0-rc.3`. Корень `web` больше не зарезервирован за stdlib:
+пакет может объявить пространство имён `web`.
 
-import zell.web
-import zell.log
-import shop.services
-
-@route("/api/users")
-struct UsersController {
-    users *services.UserService     // внедряется через DI
-    log   log.Logger
-
-    @get("{id}")
-    async func Get(id int) web.Result<User>! {
-        var u = await this.users.Find(id)?
-        if u == nil { return web.NotFound() }
-        return web.Ok(u)
-    }
-
-    @post("")
-    @authorize(roles: ["admin"])
-    async func Create(@body req CreateUser) web.Result<User>! {
-        this.log.Info("creating user {Email}", req.Email)
-        return web.Created(await this.users.Create(req)?)
-    }
-}
-
-async func main() {
-    var app = web.NewApp()
-    app.Services.AddSingleton<services.UserService>()
-    app.Services.AddScoped<db.Context>()
-    app.UseLogging().UseCors().UseAuth(jwt.Options{...})
-    app.MapControllers()          // находит @route через рефлексию при компиляции
-    app.MapGet("/health", () => web.Ok("ok"))
-    await app.Run(":8080")?
-}
-```
-
-- **Маршрутизация**: атрибуты `@get/@post/@put/@delete/@patch("{param}")`,
-  параметры из пути, query, заголовков, тела (`@body`, `@query`, `@header`),
-  привязка типов и валидация через `@validate`. Таблица маршрутов строится
-  **при компиляции** (атрибуты + compile-time рефлексия), а не сканированием
-  сборок при старте, поэтому старт мгновенный и неверный маршрут — ошибка
-  компиляции.
-- **Minimal API**: `app.MapGet("/x/{id}", (id int, svc *Svc) => ...)` с
-  выводом параметров из сигнатуры лямбды.
-- **Middleware**: `app.Use(async (ctx, next) => { ...; await next(ctx)? })`,
-  встроенные: логирование, CORS, сжатие, статические файлы, rate limiting,
-  аутентификация (JWT, cookie, OAuth2/OIDC), авторизация по ролям и
-  политикам, health checks, request id, трассировка.
-- **DI-контейнер**: `AddSingleton/AddScoped/AddTransient<T>()`,
-  конструктор или поля с типами резолвятся по типу. Граф зависимостей
-  проверяется при компиляции там, где это возможно (неразрешимая
-  зависимость в контроллере — ошибка компиляции, а не при старте).
-- **Конфигурация**: `config.Bind<AppSettings>()` из `appsettings.{json,yaml,
-  toml}`, переменных окружения и аргументов, с приоритетами и
-  `@validate`; `IOptions<T>`-аналог: `config.Options<T>` с
-  горячей перезагрузкой.
-- **OpenAPI**: генерируется при компиляции из маршрутов и `json.Schema<T>`,
-  `/swagger` из коробки.
-- **Результаты**: `web.Result<T>` — статус, заголовки, тело; `web.Ok`,
-  `Created`, `NoContent`, `BadRequest`, `NotFound`, `Problem` (RFC 7807).
-  Ошибка `T!` из обработчика автоматически превращается в Problem Details
-  с трассой ошибки в режиме разработки.
-- **Фильтры и модель-биндинг**: `@filter(Auth)`, кастомные биндеры.
-- **Тестирование**: `web.TestServer(app)` — запросы в памяти без сокетов.
-- **gRPC** (`zell.grpc`) и **GraphQL** — отдельными пакетами на той же базе.
-
-**Статус (реализовано как `web`, пока нет реестра пакетов; исходники —
-`compiler/src/sema/stdlib_src/web_*.zl`, генерация при компиляции —
-`compiler/src/sema/web.rs`; пример — `examples/web_app/`, тесты —
-`tests/spec/web/`):**
-
-- ✓ **Контроллеры и маршруты при компиляции.** `app.MapController<C>()` /
-  `app.MapControllers<A, B>()` — не вызов рефлексии, а инструкция
-  компилятору: он читает `@route("/api/users")` структуры и
-  `@get/@post/@put/@delete/@patch("{id}")` её методов (несколько глаголов
-  на одном методе можно; путь с `/` — абсолютный), классифицирует
-  параметры и порождает исходник шаблона stdlib в `web`, параметры
-  типа которого связаны с конкретными типами (типы не пишутся текстом),
-  с одним endpoint на действие: привязка, проверка, создание контроллера,
-  вызов, запись результата и метаданные OpenAPI. Ошибки компиляции:
-  неверный шаблон пути, дубликат маршрута (во всей программе, в том числе
-  между minimal API), `{param}` без параметра, параметр пути не скалярного
-  типа, тело у GET/DELETE, непривязываемый тип, неизвестные аргументы
-  атрибутов, контроллер без `@route` или без действий.
-- ✓ **Источники параметров**: имя из `{name}` → путь; `@query("q")`,
-  `@header("X-Id")`, `@form("f")` (urlencoded), `@body` (JSON),
-  `@fromServices`; без атрибута `*web.Context` — контекст, указатели и
-  интерфейсы — сервисы, структуры/срезы/map — тело (POST/PUT/PATCH),
-  скаляры — query. Преобразование: строки, целые с проверкой диапазона,
-  float, bool (`true/1/on/yes`), простые enum по имени без учёта регистра,
-  `*T` (nil, если нет), срезы (повтор ключа или через запятую).
-- ✓ **`@validate(required, min, max, range: [a, b], minLength, maxLength,
-  pattern, email, message)`** на полях тела (вложенные структуры, срезы,
-  указатели; `required` для JSON — ключ есть и не null) и на параметрах;
-  все ошибки привязки и проверки — одним ответом 400
-  `application/problem+json` с `"errors": {"field": ["..."]}` (пути
-  `Lines[1].Qty`); `web.Validate<T>(v)` — то же для любого значения.
-- ✓ **Minimal API**: `app.MapGet/MapPost/MapPut/MapDelete/MapPatch(path,
-  handler)` с лямбдой или именованной функцией; параметры выводятся из
-  сигнатуры по тем же правилам (имена — из лямбды), async-обработчики,
-  результат `T`, `T!`, `Result<T>`, `void`; возвращается `*web.Endpoint`
-  (`RequireAuthorization(roles)`, `AllowAnonymous`, `WithSummary/WithTag/
-  WithName`). `app.Map(method, path, func(*Context) Task<void!>)` — без
-  привязки.
-- ✓ **DI**: `app.Services.AddSingleton<T>() / AddScoped<T>() /
-  AddTransient<T>()` регистрируют `*T`, `<I, T>` — интерфейс `I` с
-  реализацией `*T`; фабрику генерирует компилятор: `T.New(deps...)`
-  (параметры — сервисы) или нулевое `T` с полями `@inject`;
-  `AddInstance(x)` (статический тип `x`), `AddSingletonFactory<T>(func(*web.Scope) T!)`
-  и т. п. Контроллер создаётся на запрос, внедряются все его поля-указатели
-  и интерфейсы (`@inject(skip: true)` — нет). Singleton создаются в
-  `App.Build` (в порядке регистрации), scoped — один раз на запрос
-  (scope запроса освобождается с ним — работает `Drop`), transient —
-  при каждом разрешении; scoped из singleton — ошибка. `web.Resolve<T>()`
-  (scope текущего запроса из контекста задачи, ключ -103),
-  `ctx.Resolve<T>()`, `scope.Get<T>()`; без регистрации доступны
-  `log.Logger` (глобальный), `*web.Context`, `*web.App`, `*web.Scope`,
-  `*web.Principal`. **Проверка графа**: зависимость контроллера, обработчика
-  или сервиса, тип которой ни один `Add*` в программе не регистрирует, —
-  ошибка компиляции (`UsersController needs service *UserStore, which is
-  never registered`); `App.Build` (его зовут `Run`, `TestServer` и первый
-  запрос) проверяет то же во время выполнения со списком всех недостающих
-  регистраций (условные регистрации, типы stdlib).
-- ✓ **Middleware**: `app.Use(async func(c *web.Context, next *web.Next)
-  void! { ...; await next.Run(c)? })` в порядке добавления (внешний
-  первым), `UseHttp(mw)` — middleware `net.http` вокруг всего
-  приложения. Встроенные: `UseLogging` (одно событие `log` на запрос:
-  `HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed}
-  ms` + `Route`), `UseRecover` (ошибка обработчика → Problem Details;
-  остаток конвейера идёт в отдельной задаче, поэтому паника обработчика
-  даёт 500 с `detail` `internal error`, сообщение в лог уровня Error с
-  трассой в свойстве `PanicTrace`, и сервер обслуживает следующий запрос;
-  без `UseRecover` паника завершает только задачу запроса, DESIGN.md
-  «Паника»), `UseCors(http.CORSOptions)`, `UseGzip`,
-  `UseStaticFiles(prefix, dir)`, `UseRateLimit` (token bucket на IP, 429 +
-  `Retry-After`), `UseRequestId` (заголовок, `ctx.RequestId`, свойство лога
-  `RequestId`), `UseTracing` (span `diag` вида Server `HTTP GET
-  /api/users/{id}`), `UseAuth(AuthOptions{Key, Issuer, Audience, Leeway,
-  Clock})`, `UseBodyLimit(n)` (413), `UseTimeout(ms)`
-  (`http.TimeoutHandler`); `AddHealthCheck(name, f)` + `MapHealthChecks
-  ("/health")`.
-- ✓ **JWT** (`web.auth.jwt`): ключи `HS256(secret)`, `RS256(der)`,
-  `RS256Public(n, e)`, `ES256(priv)`, `ES256Public(pub)`; `Sign(claims,
-  key)`, `Verify(token, key, VerifyOptions{Issuer, Audience, Leeway,
-  Clock})` (алгоритм из заголовка должен совпасть с ключом, `none` не
-  принимается, exp/nbf), `Decode`, `Claims{Subject, Issuer, Audience,
-  ExpiresAt, NotBefore, IssuedAt, Id, Name, Email, Roles, Extra}`.
-  `@authorize` / `@authorize(roles: [...])` на контроллере или действии,
-  `@allowAnonymous`: 401 без пользователя, 403 без роли.
-- ✓ **Конфигурация** (`web.config`): `config.Load(LoadOptions{Dir,
-  Name, Environment, EnvPrefix, Args, NoArgs, NoFiles, Defaults})`:
-  встроенные `Defaults` (JSON) < `appsettings.{json,yaml,yml,toml}` <
-  `appsettings.<env>.*` < `APP__Section__Key` < `--Section:Key=value`;
-  ключи без учёта регистра; `cfg.Bind<T>(section)` / `config.Bind<T>()`
-  через compile-time рефлексию (вложенные структуры, срезы, map, указатели)
-  с `@validate`; `config.NewOptions<T>(cfg, section)`: `Value`,
-  `Version`, `Reload`, `CheckForChanges` (размер и mtime файлов), `Watch(ms)`
-  (фоновая задача, `Stop`), `OnChange`.
-- ✓ **Результаты**: `web.Result<T>` (`Ok`, `Created`, `CreatedAt`,
-  `Accepted`, `NoContent`, `StatusCode`, `NotFound`, `BadRequest`,
-  `Unauthorized`, `Forbidden`, `Conflict`, `Problem`, `ValidationProblem`,
-  `.WithHeader`); `T` результата без аргументов выводится из объявленного
-  типа (`return web.NotFound()` в `web.Result<User>!`). Значения пишутся
-  JSON по умолчанию, XML (`Accept: application/xml`) или YAML, строки —
-  `text/plain`. Ошибка `T!` из обработчика → Problem Details (RFC 9457)
-  со статусом и сообщением в `detail` из `web.Error(404, "...")`
-  (`HttpError`); у любой другой ошибки (500) `detail` — общее
-  `"internal error"`, а настоящее сообщение уходит только в лог (утечка
-  SQL, путей, хостов клиенту); при `ZELL_ENV=development` — настоящее
-  сообщение и `trace` = `errors.Trace(err)`; 404/405 — тоже Problem
-  Details. Доменные ошибки отображаются один раз на приложение:
-  `app.MapError<NotFound>(404)` — ошибка типа `E` (и через обёртки
-  `?("ctx")`/`errors.Wrap`, `errors.As`) даёт Problem с этим статусом и
-  `Message()` в `detail`; `app.OnError(func(c *Context, err error)
-  *ProblemDetails)` видит каждую ошибку обработчика или middleware первым
-  и возвращает свой Problem либо `nil` для обычного отображения.
-- ✓ **OpenAPI 3.1**: `app.MapOpenApi("/openapi.json")` — документ из
-  метаданных, которые генерирует компилятор вместе с таблицей маршрутов
-  (параметры, тела и ответы со схемами `json.Schema<T>()`, теги по
-  контроллеру, `@summary`, bearer-security для `@authorize`, 400/401/403);
-  `app.MapSwagger("/swagger", "/openapi.json")` — страница swagger-ui с
-  CDN (unpkg), без бандлинга. `encoding.json.Schema<T>()` — JSON Schema
-  2020-12 через compile-time рефлексию с ключевыми словами `@validate`.
-- ✓ **Тестирование**: `web.TestServer(app)` → `*web.TestClient` без сокетов
-  (`Get`, `Post`, `Put`, `Patch`, `Delete`, `Send`, `WithHeader`,
-  `WithBearer`, `GetJSON<T>`, `PostJSON<T, R>`); приложение — обычный
-  `http.Handler`, `app.Run(":8080")` / `Listen` + `Port` для реального
-  сервера.
-- Отличия от эскиза выше: пространство имён `web` (`import web` или
-  полный путь `web.X`); пользователь запроса — `web.Principal`
-  (`ctx.User`), чтобы не конфликтовать с моделями `User`; middleware
-  получает `*web.Next`; RFC 9457 вместо 7807.
-- Нет: cookie/OAuth2/OIDC-аутентификации и политик сверх ролей,
-  `@filter` и своих биндеров, `$ref`-компонентов в OpenAPI (схемы
-  встраиваются), тел XML/YAML в запросах, `web.AutoTLS`, команды
-  `zell web openapi`, групп маршрутов, ограничений в шаблонах
-  (`{id:int}`), привязки multipart-форм; переменные окружения ищутся по
-  именам полей (`APP__Db__Host`), списка окружения нет.
+Без фреймворка HTTP-сервисы пишутся на `net.http` (роутер по методу и
+пути, middleware `CORS`/`Gzip`, HTTP/2, WebSocket) и `net.http.test`.
 
 ## 3. Данные: `database.sql` и `zell.data` (ORM уровня EF Core)
 
@@ -518,7 +334,7 @@ await ctx.SaveChanges()?        // change tracking: UPDATE только изме
 `compiler/src/sema/orm.rs` (вызовы), `orm_model.rs` (модель),
 `orm_sql.rs` (перевод лямбд), CLI — `compiler/src/datacli.rs`; тесты —
 `tests/spec/data/` и `compiler/tests/data.rs` (настоящий PostgreSQL 16 и
-CLI миграций), пример — `examples/web_app` (API пользователей).
+CLI миграций).
 
 - ✓ **Модель при компиляции.** Атрибуты `@table("users")`, `@key`
   (`@key(generated: false)`), `@autoincrement`, `@column("email", type:
@@ -618,7 +434,7 @@ CLI миграций), пример — `examples/web_app` (API пользова
 ```zell
 var logger = log.New()
     .MinimumLevel(log.Debug)
-    .MinimumLevelOverride("zell.web", log.Warning)
+    .MinimumLevelOverride("zell.data", log.Warning)
     .Enrich.WithProperty("App", "shop")
     .Enrich.WithMachineName()
     .Enrich.WithRequestId()
@@ -657,8 +473,8 @@ using (log.Context.Push("RequestId", reqId)) { ... }   // или через asyn
 - **Destructuring**: `{@Obj}` через compile-time рефлексию с учётом
   `@log(skip: true)` для секретов, политики для типов
   (`Destructure.ByTransforming<User>((u) => {Id: u.Id})`).
-- Интеграция: `zell.web` пишет запросы одной строкой на запрос
-  (как Serilog RequestLogging), `zell.data` логирует SQL с параметрами.
+- Интеграция: `zell.data` логирует SQL с параметрами; журнал запросов
+  одной строкой (как Serilog RequestLogging) вернётся с `zell-lang/web`.
 
 ### Статус реализации (`log`)
 
@@ -735,8 +551,8 @@ using (log.Context.Push("RequestId", reqId)) { ... }   // или через asyn
   `TraceId`/`SpanId` текущего span'а `diag`.
 - Нет: Seq, Elasticsearch/Loki/Splunk/Syslog/OTLP-logs/Email/webhook
   приёмников, батчинга (кроме `Async`), `Destructure.ByTransforming`,
-  `Enrich.WithRequestId`/потока/окружения, logfmt, интеграции со
-  `zell.web`/`zell.data`, `{@X}` для enum с полями (печатается имя типа).
+  `Enrich.WithRequestId`/потока/окружения, logfmt, интеграции с
+  `zell.data`, `{@X}` для enum с полями (печатается имя типа).
 
 ## 5. Диагностика: `zell.diag` (аналог pprof и dotnet-counters)
 
@@ -863,12 +679,12 @@ using (log.Context.Push("RequestId", reqId)) { ... }   // или через asyn
 - `zell.mediator` — CQRS, пайплайны обработчиков.
 - `zell.test` — `@test`, `@fact`/`@theory` с данными, моки через
   интерфейсы (`mock.Of<UserRepo>()` генерируется при компиляции),
-  snapshot-тесты, `web.TestServer`.
+  snapshot-тесты, тестовый HTTP-сервер.
 - `zell.cli` — парсер команд и аргументов с генерацией help из атрибутов.
 - `zell.auth` — JWT, OIDC, API keys, политики.
 - `zell.realtime` — SignalR-подобные хабы поверх WebSocket.
 - `zell.messaging` — Kafka, RabbitMQ, NATS клиенты и абстракция шины.
-- Шаблоны проектов: `zell new web-api`, `zell new worker`, `zell new lib`.
+- Шаблоны проектов: `zell new service`, `zell new worker`, `zell new lib`.
 
 ## Что для этого нужно от языка (требования к компилятору)
 
@@ -876,7 +692,7 @@ using (log.Context.Push("RequestId", reqId)) { ... }   // или через asyn
 |---|---|
 | Generics с мономорфизацией и ограничениями через интерфейсы | collections, `data.Set<T>`, `json.Parse<T>`, DI |
 | Compile-time рефлексия `reflect.Fields<T>()`, `Methods<T>()`, атрибуты как значения | json/xml/yaml/toml, маршруты, ORM, логгер, mapper, mock |
-| Compile-time вычисление константных строк (разбор шаблона лога, маршрута, SQL) | log, web, data |
+| Compile-time вычисление константных строк (разбор шаблона лога, маршрута, SQL) | log, data |
 | Лямбда как дерево выражений при параметре типа `data.Expr<func(T) bool>` | ORM-запросы |
 | Async-контекст (аналог AsyncLocal) в рантайме | log.Context, трассировка, DI scope |
 | Статические таблицы типов и урезание неиспользуемых | рефлексия в рантайме для `json.ParseValue`, OpenAPI |
@@ -888,7 +704,8 @@ using (log.Context.Push("RequestId", reqId)) { ... }   // или через asyn
 1. Generics, compile-time рефлексия, атрибуты как значения (компилятор).
 2. `encoding.json` (+ Value, Reader/Writer), `net` async-сокеты,
    `net.http` 1.1, `zell.log` с Console/File/JSON.
-3. `zell.web`: маршруты, биндинг, middleware, DI, конфигурация, OpenAPI.
+3. `zell.web`: маршруты, биндинг, middleware, DI, конфигурация, OpenAPI
+   (было в stdlib, вынесено до `TypesWith`, тег `web-in-tree`).
 4. `database.sql` + PostgreSQL/SQLite, `zell.data` базовый (✓ как `data`)
    (запросы, трекинг, миграции).
 5. `zell.diag`: CPU/heap/tasks профили в формате pprof, метрики,
@@ -909,7 +726,7 @@ TLS, WebSocket, роутер по пути и методу без атрибут
 
 | Пакет | Что | Что мешает вынести сейчас |
 |---|---|---|
-| `zell-lang/web` | атрибутная маршрутизация, DI, middleware, binding, OpenAPI, auth/JWT | таблица маршрутов и DI строятся в компиляторе (`sema/web.rs`) по атрибутам всех типов программы |
+| `zell-lang/web` | атрибутная маршрутизация, DI, middleware, binding, OpenAPI, auth/JWT | нужен `reflect.TypesWith<A>()`; до него вынесен из дерева (2026-10-24, тег `web-in-tree`; было: таблица маршрутов и DI в компиляторе, `sema/web.rs`) |
 | `zell-lang/data` | ORM: модель, change tracking, миграции, лямбда → SQL | трансляция лямбд в SQL в компиляторе (`sema/orm.rs`, `orm_model.rs`) |
 | `zell-lang/log`, `zell-lang/diag` | Serilog-подобный логгер; Prometheus, OpenTelemetry, pprof | ничего: обычный код |
 | `zell-lang/redis`, `kafka`, `s3` | клиенты | ничего: обычный код |
@@ -929,13 +746,15 @@ TLS, WebSocket, роутер по пути и методу без атрибут
 
 1. Две возможности выше: спека (`DESIGN.md`, грамматика), компилятор,
    спек-тесты, примеры.
-2. Перепись `web` и `data` на них внутри основного репозитория;
-   `examples/web_app` и тесты работают как раньше; `sema/web.rs`,
-   `sema/orm*.rs` удаляются.
-3. Перенос в `zell-lang/web` и `zell-lang/data` (манифест, тег `v0.1.0`,
-   CI); примеры и документация переходят на `import github.com/zell-lang/web`;
-   корни `web` и `data` снимаются с зарезервированных корней stdlib
-   (`compiler/src/sema/stdlib.rs`, `STD_ROOTS`).
+2. `web`: уже удалён из дерева (исходники — тег `web-in-tree`, корень
+   `web` снят со `STD_ROOTS`); пишется заново на `TypesWith` сразу в
+   `zell-lang/web` (манифест, тег `v0.1.0`, CI), пример
+   `example-web-service` переходит на `import github.com/zell-lang/web`.
+   `data` переписывается на деревья выражений внутри основного
+   репозитория; `sema/orm*.rs` удаляются.
+3. Перенос `data` в `zell-lang/data`; корень `data` снимается с
+   зарезервированных корней stdlib (`compiler/src/sema/stdlib.rs`,
+   `STD_ROOTS`).
 4. `log`/`diag`, `redis`/`kafka`/`s3` переносятся следом тем же путём.
 
 Открытые вопросы: держать ли `data` в одном репозитории с `web`; объединять

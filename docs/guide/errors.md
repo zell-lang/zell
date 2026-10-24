@@ -422,8 +422,8 @@ Whoever waits for a task that panicked hears about it:
 - a task nobody awaits (`task.Go`) prints the panic to stderr and the
   program goes on.
 
-`web` apps get a 500 for a panicking handler with `UseRecover`, and the
-server keeps serving. Still, return an error for anything a request can
+A server whose request handlers run in their own tasks keeps serving after
+a handler panics. Still, return an error for anything a request can
 cause: a panic in a plain (non-async) function does not run that
 function's `defer`s, and what it held leaks. See
 [async.md](async.md#when-a-task-panics) and
