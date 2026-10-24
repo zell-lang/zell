@@ -1,7 +1,7 @@
 //! Combining the fragments of all units into one [`Analysis`]: symbols get
 //! their ids, stable keys are resolved, namespace declarations are recorded
 //! over the whole file list, and the checks over the whole program (unused
-//! imports, the entry point, `web` services and routes) are made.
+//! imports, the entry point) are made.
 
 use super::fragment::{FImport, FKey, Fragment, SKey, SymRef};
 use super::stdblock::StdBlock;
@@ -281,29 +281,6 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
         for d in foreign {
             if keys.insert(diag_key(&d)) {
                 sema.push(d);
-            }
-        }
-    }
-    let registered: HashSet<&str> = units.iter().flat_map(|u| u.frag.web_registered.iter().map(|s| s.as_str())).collect();
-    let mut reported: HashSet<(&str, &str)> = HashSet::new();
-    let mut routes: HashMap<&str, &str> = HashMap::new();
-    for u in units {
-        for w in &u.frag.web_required {
-            if registered.contains(w.key.as_str()) || !reported.insert((w.key.as_str(), w.owner.as_str())) {
-                continue;
-            }
-            let Some(&file) = u.files.get(w.diag.file) else { continue };
-            sema.push(Diagnostic { file, ..w.diag.clone() });
-        }
-    }
-    for u in units {
-        for r in &u.frag.web_routes {
-            let Some(&file) = u.files.get(r.file) else { continue };
-            match routes.get(r.key.as_str()) {
-                Some(prev) => sema.push(Diagnostic::error(format!("{}: duplicate route {} {} (already mapped as {} {prev})", r.who, r.verb, r.pattern, r.verb), r.span).in_file(file)),
-                None => {
-                    routes.insert(&r.key, &r.pattern);
-                }
             }
         }
     }

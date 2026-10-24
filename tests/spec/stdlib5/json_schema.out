@@ -1,0 +1,3 @@
+{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"Title":{"type":"string"},"Price":{"type":"number","format":"double"},"Small":{"type":"integer","format":"int32"},"Tags":{"type":"array","items":{"type":"string"}},"Pair":{"type":"array","items":{"type":"boolean"}},"Attrs":{"type":"object","additionalProperties":{"type":"number","format":"double"}},"Role":{"type":"string","enum":["Admin","User"]},"At":{"type":"string","format":"date-time"}}}
+{"type":"object","properties":{"Name":{"type":"string"},"Next":{"type":"object"}}}
+{"type":"array","items":{"type":"integer","format":"int64"}}

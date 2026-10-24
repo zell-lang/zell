@@ -452,8 +452,7 @@ impl<'a> Sema<'a> {
         for (i, e) in self.file_scopes[self.cur_file].imports.iter().enumerate() {
             match e {
                 ImportEntry::Glob(ns) => {
-                    // A stdlib attribute named like a builtin (`@delete` of
-                    // web) does not hide the builtin outside attributes.
+                    // A stdlib attribute named like a builtin (`@delete`) does not hide the builtin outside attributes.
                     if self.nss[*ns].is_std && !self.refl.in_attr && matches!(n, "delete" | "len" | "append" | "panic" | "typeof" | "error") {
                         continue;
                     }

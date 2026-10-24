@@ -88,7 +88,7 @@ pub(crate) struct Template<'a> {
     /// Created by the instantiation of a generic struct (checked as part of
     /// the struct's abstract check).
     pub nested: bool,
-    /// Generated from user code (`web`, `data` expansions), not a
+    /// Generated from user code (`data` expansions), not a
     /// library source.
     pub generated: bool,
     /// A stdlib template whose module is not parsed yet: (module, index of
@@ -153,7 +153,7 @@ pub(crate) struct GenState<'a> {
     /// non-comparable `T`; calls are rejected instead).
     pub skip_body: HashSet<u32>,
     /// Expected type of the generic call being checked (`return
-    /// web.NotFound()` infers `T` from the function's result type); set by
+    /// f()` with `func f<T>() T` infers `T` from the function's result type); set by
     /// `call_res`, taken by `generic_call`.
     pub ret_hint: Option<TypeId>,
 }

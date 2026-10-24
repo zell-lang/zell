@@ -429,7 +429,7 @@ fn musl_unavailable() -> Option<String> {
 /// Examples that need a target library this machine does not have for
 /// linux-arm64 / musl: database.sqlite links libsqlite3 (arm64: not in
 /// the cross sysroot; musl: no static libsqlite3, the runtime has no sqlite).
-const NEEDS_SQLITE: &[&str] = &["sql", "web_app"];
+const NEEDS_SQLITE: &[&str] = &["sql"];
 
 /// Builds every example for `target` and runs it through `zell run
 /// --target` (QEMU for arm64, natively for musl); returns the failures.
