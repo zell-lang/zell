@@ -594,6 +594,61 @@ func main() {
 // [to be or not] 4
 ```
 
+## Reflection and attributes
+
+Attributes are typed values, and `reflect` reads them from static tables
+the compiler emits only when a program uses them.
+`reflect.TypesWith<A>()` lists every type of the whole program (your
+package and all its dependencies) declared with attribute `A` — so a
+library can find the application's handlers or jobs without any
+registration code. `m.Call<F>()` turns a method into an ordinary typed
+function, and `reflect.Error(msg)` is a compile-time error a library can
+raise from a generic function (a `static_assert`).
+
+```zell
+namespace tour.reflection
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct job {
+    name string
+}
+
+@job(name: "backup")
+struct Backup {
+    static func Run() string {
+        return "done"
+    }
+}
+
+@job(name: "mail")
+struct Mail {
+    static func Run() string {
+        return "sent"
+    }
+}
+
+func Describe<T>() string {
+    if reflect.TypeOf<T>().Kind != reflect.Kind.Struct {
+        reflect.Error("Describe needs a struct, not " + reflect.TypeOf<T>().Name)
+    }
+    return reflect.TypeOf<T>().Name + " has " + fmt.Format("{0}", len(reflect.TypeOf<T>().Fields)) + " fields"
+}
+
+func main() {
+    for t in reflect.TypesWith<job>() {
+        var run = t.Method("Run").Call<func() string>()
+        println(t.Attribute<job>().name, run())
+    }
+    println(Describe<Backup>())
+}
+// Output:
+// backup done
+// mail sent
+// Backup has 0 fields
+```
+
 ## Packages
 
 A project is a directory with a manifest (`zell.toml`) and sources in
