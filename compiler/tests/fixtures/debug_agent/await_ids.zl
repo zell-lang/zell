@@ -1,0 +1,22 @@
+namespace app
+
+import io
+
+// Debugger fixture: one task's id across several awaits that suspend.
+
+async func Step(n int) int {
+    await task.Delay(1)
+    return n
+}
+
+async func Loop() int {
+    var total = await Step(1) // BREAK first
+    total += await Step(2) // BREAK second
+    total += await Step(3) // BREAK third
+    return total // BREAK fourth
+}
+
+async func main() {
+    var r = await Loop()
+    println("loop", r)
+}

@@ -412,6 +412,12 @@ ZELL_PLAT_HIDDEN int zell__plat_hostname(char *buf, size_t cap);
 ZELL_PLAT_HIDDEN char *zell__plat_temp_dir(void);
 /* Path separator of the platform ('/' or '\\'). */
 ZELL_PLAT_HIDDEN char zell__plat_path_sep(void);
+/* Whether file names compare case-insensitively and with '\\' and '/'
+ * equal (Windows: 1; POSIX: 0). */
+ZELL_PLAT_HIDDEN int zell__plat_path_fold(void);
+/* malloc'd canonical absolute form of an existing path (symlinks resolved;
+ * Windows: no `\\?\` prefix), or NULL if it cannot be resolved. */
+ZELL_PLAT_HIDDEN char *zell__plat_path_canon(const char *path);
 
 /* ---- files and directories (fs_posix.c / fs_win32.c) --------------------
  * Descriptors are int64_t (POSIX fds; C runtime fds over Win32 handles on

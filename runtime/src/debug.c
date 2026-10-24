@@ -112,6 +112,8 @@ typedef struct rec {
     int exempt;                   /* runs while the others stay frozen */
     int deciding;                 /* inside the agent's hook (not yet blocked) */
     int step;
+    int stopped;                  /* reported a stop to the client at least once */
+    int carried;                  /* taken over by a coroutine at its first suspension */
     zell_dbg_frame *step_frame, *step_parent;
     int32_t step_depth, step_line, step_stmt;
     zell__plat_cond cv;
@@ -123,6 +125,11 @@ static zell__plat_mutex g_mu = ZELL_PLAT_MUTEX_INIT;
 #define NCHUNKS 4096
 static rec **g_chunks[NCHUNKS];
 static int64_t g_nrecs;           /* ids 1..g_nrecs are taken; 1 = main */
+/* The record of code running with no current task (the main thread):
+ * 1 until a coroutine stepped in from there takes it over at its first
+ * suspension (see zell_dbg_suspend); 0 then, until such code is observed
+ * again. Written under g_mu. */
+static int64_t g_main_id = 1;
 static rec *g_steps;              /* records with step != STEP_NONE */
 
 /* The agent's own locks (debug.rtLock(n)): 0 = agent state, 1 = output. */
@@ -160,18 +167,30 @@ static rec *rec_new(void) {
     return r;
 }
 
+/* The record of the code running on this thread, if it has one. */
+static rec *peek_rec(void) {
+    zell_task *t = zell__task_cur();
+    return rec_at(t ? zell__task_dbg_id(t) : __atomic_load_n(&g_main_id, __ATOMIC_ACQUIRE));
+}
+
 /* The record of the code running on this thread (registering its task). */
 static rec *cur_rec(int32_t func) {
     zell_task *t = zell__task_cur();
     if (!t) {
-        rec *m = rec_at(1);
+        rec *m = rec_at(__atomic_load_n(&g_main_id, __ATOMIC_ACQUIRE));
         if (m) return m;
         zell__plat_mutex_lock(&g_mu);
         if (g_nrecs == 0) {
-            m = rec_new();
+            m = rec_new();  /* id 1 */
             if (m) m->func = func;
+        } else if (!g_main_id) {
+            m = rec_new();
+            if (m) {
+                m->func = func;
+                __atomic_store_n(&g_main_id, m->id, __ATOMIC_RELEASE);
+            }
         } else {
-            m = rec_at(1);
+            m = rec_at(g_main_id);
         }
         zell__plat_mutex_unlock(&g_mu);
         return m;
@@ -299,14 +318,15 @@ static int step_done(rec *cur, zell_dbg_frame *f, int32_t id) {
                 done = 1;
             } else if (s->step == STEP_IN && on_chain) {
                 done = 1;  /* a callee, also a coroutine with its own task */
-            } else if (same && !on_chain && depth_of(f) < s->step_depth) {
-                done = 1;  /* returned */
+            } else if (same && !on_chain && depth_of(f) < s->step_depth && !(s->step_frame && s->step_frame->active == 2)) {
+                done = 1;  /* returned (also through an await: the record passed to the awaiter) */
             }
             break;
         case STEP_OUT:
             if (s->step_parent && f == s->step_parent && !(s->step_frame && s->step_frame->active == 2)) {
                 done = 1;
-            } else if (same && f != s->step_frame && !on_chain && depth_of(f) < s->step_depth) {
+            } else if (same && f != s->step_frame && !on_chain && depth_of(f) < s->step_depth &&
+                       !(s->step_frame && s->step_frame->active == 2)) {
                 done = 1;
             }
             break;
@@ -333,6 +353,7 @@ static void dispatch(zell_dbg_frame *f, int32_t id, int32_t reason) {
     t_no_hooks = 1;
     pause_begin(r, f, id, reason);
     int64_t act = h(g_hook_env, id, (int64_t)(intptr_t)f, reason, r->id);
+    if (act & 1) __atomic_store_n(&r->stopped, 1, __ATOMIC_RELEASE);
     pause_end(r, act);
     t_no_hooks = 0;
 }
@@ -357,8 +378,10 @@ void zell_dbg_stmt(zell_dbg_frame *f, int32_t id) {
     if (__atomic_load_n(&g_freeze, __ATOMIC_ACQUIRE)) reason |= R_PAUSE;
     if (__atomic_load_n(&g_stop_next, __ATOMIC_ACQUIRE) && __atomic_exchange_n(&g_stop_next, 0, __ATOMIC_ACQ_REL)) reason |= R_ENTRY;
     if (__atomic_load_n(&g_nsteps, __ATOMIC_ACQUIRE)) {
-        rec *r = cur_rec(func_index(f));
-        if (r && step_done(r, f, id)) reason |= R_STEP;
+        /* No record is made here: code is observed (gets an id) only when
+         * it stops, so a caller that merely runs on after a coroutine took
+         * its record over does not show up as a new thread. */
+        if (step_done(peek_rec(), f, id)) reason |= R_STEP;
     }
     if (reason) dispatch(f, id, reason);
 }
@@ -404,8 +427,30 @@ void zell_dbg_leave(zell_dbg_frame *f) {
         int32_t id = t ? zell__task_dbg_id(t) : 0;
         rec *r = id ? rec_at(id) : NULL;
         if (r) {
+            /* A record a coroutine took over from the code it was stepped
+             * in goes on with the awaiter (the task whose continuation is
+             * registered on this one): the logical thread continues
+             * there. The awaiter's own record, made when it suspended,
+             * is retired unless it was ever reported stopped. */
+            zell_task *w = r->carried ? zell__task_awaiter(t) : NULL;
             zell__plat_mutex_lock(&g_mu);
-            r->finished = 1;
+            int moved = 0;
+            if (w) {
+                int32_t wid = zell__task_dbg_id(w);
+                rec *wr = wid ? rec_at(wid) : NULL;
+                if (!wr || (!wr->stopped && !wr->paused && wr->step == STEP_NONE)) {
+                    r->suspended = wr ? wr->suspended : NULL;
+                    r->func = wr ? wr->func : -1;
+                    if (wr) {
+                        wr->alive = 0;
+                        wr->suspended = NULL;
+                    }
+                    zell__task_set_dbg_id(t, 0);
+                    zell__task_set_dbg_id(w, (int32_t)r->id);
+                    moved = 1;
+                }
+            }
+            if (!moved) r->finished = 1;
             zell__plat_mutex_unlock(&g_mu);
         }
     }
@@ -416,6 +461,41 @@ void zell_dbg_suspend(zell_dbg_frame *f) {
     if (t_top == f) t_top = f->prev;
     f->active = 2;
     if (!g_tables) return;
+    zell_task *t = zell__task_cur();
+    if (t && !zell__task_dbg_id(t)) {
+        /* The coroutine's first suspension (its task was made just now,
+         * ABI.md 10.3). If a step is under way in this very frame, the
+         * code was observed under its host's record (the caller's task or
+         * the main thread): the record moves with the coroutine, so the
+         * logical thread keeps its id across the await, and the host,
+         * which merely runs on after the ramp returned, gets a new record
+         * if it is observed again. */
+        zell__plat_mutex_lock(&g_mu);
+        rec *s = g_steps;
+        while (s && s->step_frame != f) s = s->next_step;
+        int took = 0;
+        if (s && s->alive) {
+            if (s->id == g_main_id) {
+                __atomic_store_n(&g_main_id, 0, __ATOMIC_RELEASE);
+                took = 1;
+            } else {
+                for (zell_task *p = zell__task_parent(t); p && !took; p = zell__task_parent(p)) {
+                    if (zell__task_dbg_id(p) == s->id) {
+                        zell__task_set_dbg_id(p, 0);
+                        took = 1;
+                    }
+                }
+            }
+        }
+        if (took) {
+            zell__task_set_dbg_id(t, (int32_t)s->id);
+            s->carried = 1;
+            s->func = func_index(f);
+            s->suspended = f;
+        }
+        zell__plat_mutex_unlock(&g_mu);
+        if (took) return;
+    }
     rec *r = cur_rec(func_index(f));
     if (r) {
         zell__plat_mutex_lock(&g_mu);
@@ -453,7 +533,7 @@ void zell_dbg_resume(zell_dbg_frame *f) {
     f->active = 1;
     t_top = f;
     if (!g_tables) return;
-    rec *r = cur_rec(func_index(f));
+    rec *r = peek_rec();
     if (r) {
         zell__plat_mutex_lock(&g_mu);
         if (r->suspended == f) r->suspended = NULL;
@@ -717,6 +797,68 @@ ZELL_NORETURN void zell_debug_rt_exit(int64_t code) {
     _Exit((int)code);
 }
 
+/* ---- breakpoint paths ------------------------------------------------------ */
+
+/* malloc'd comparison form of a path: a `\\?\` prefix dropped and, with
+ * `fold` (Windows rules), '\\' turned into '/' and ASCII letters lowered. */
+static char *path_norm(const char *p, int fold) {
+    if (!p) p = "";
+    if (fold && strncmp(p, "\\\\?\\", 4) == 0) p += 4;
+    size_t n = strlen(p);
+    char *s = malloc(n + 1);
+    if (!s) return NULL;
+    for (size_t i = 0; i <= n; i++) {
+        char c = p[i];
+        if (fold && c == '\\') c = '/';
+        if (fold && c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        s[i] = c;
+    }
+    return s;
+}
+
+static const char *path_base(const char *p) {
+    const char *b = strrchr(p, '/');
+    return b ? b + 1 : p;
+}
+
+/* How well breakpoint path `path` names the table file `file`: 3 the same
+ * file, 2 `path` is a relative tail of `file` (on a '/' boundary), 1 the
+ * same base name, 0 no match. `fold`: Windows rules (case and separators). */
+int zell__dbg_path_match(const char *file, const char *path, int fold) {
+    char *f = path_norm(file, fold), *p = path_norm(path, fold);
+    int m = 0;
+    if (f && p && *p) {
+        size_t fl = strlen(f), pl = strlen(p);
+        if (strcmp(f, p) == 0) {
+            m = 3;
+        } else if (pl < fl && strcmp(f + fl - pl, p) == 0 && f[fl - pl - 1] == '/') {
+            m = 2;
+        } else if (strcmp(path_base(f), path_base(p)) == 0) {
+            m = 1;
+        }
+    }
+    free(f);
+    free(p);
+    return m;
+}
+
+/* The canonical spelling of a breakpoint path (symlinks resolved), or the
+ * path itself when it does not name an existing file. */
+zell_string *zell_debug_rt_path_canon(zell_string *path) {
+    char *c = zell__plat_path_canon(zell_string_cstr(path));
+    if (!c) {
+        zell_retain(path);
+        return path;
+    }
+    zell_string *s = zell_string_from_cstr(c);
+    free(c);
+    return s;
+}
+
+int64_t zell_debug_rt_path_match(zell_string *file, zell_string *path) {
+    return zell__dbg_path_match(zell_string_cstr(file), zell_string_cstr(path), zell__plat_path_fold());
+}
+
 /* Milliseconds since an arbitrary point (monotonic). */
 int64_t zell_debug_rt_now_ms(void) { return zell__plat_mono_ns() / 1000000; }
 
@@ -750,6 +892,28 @@ void zell_debug_rt_map_entries(int64_t m, int64_t start, int64_t n, zell_slice *
         zell_slice_append(out, 8, NULL, &va);
         if (i - start >= n) break;
     }
+}
+
+/* setVariable (ABI.md 22.4): a float of `size` bytes (4 or 8) at addr. */
+void zell_debug_rt_write_float(int64_t addr, int64_t size, double v) {
+    if (!addr) return;
+    if (size == 4) {
+        float f = (float)v;
+        memcpy((void *)(intptr_t)addr, &f, sizeof f);
+    } else {
+        memcpy((void *)(intptr_t)addr, &v, sizeof v);
+    }
+}
+
+/* setVariable: the `string` slot at addr takes `s` (borrowed: retained
+ * for the slot) and releases its old value. */
+void zell_debug_rt_set_string(int64_t addr, zell_string *s) {
+    if (!addr) return;
+    zell_string **slot = (zell_string **)(intptr_t)addr;
+    zell_retain(s);
+    zell_string *old = *slot;
+    *slot = s;
+    zell_release(old);
 }
 
 /* Type name of a typed error ("" for a plain error or NULL). */

@@ -188,6 +188,13 @@ impl Client {
     }
 
     /// The children of variables reference `r`.
+    /// DAP `setVariable`: `name` (a child of reference `r`) takes the value
+    /// written as `value`; returns the value as the agent now shows it.
+    pub fn set_variable(&mut self, r: i64, name: &str, value: &str) -> Result<String, String> {
+        let v = self.request("setVariable", json!({"variablesReference": r, "name": name, "value": value}))?;
+        Ok(v["value"].as_str().unwrap_or("").to_string())
+    }
+
     pub fn children(&mut self, r: i64) -> Result<Vec<Value>, String> {
         let v = self.request("variables", json!({"variablesReference": r}))?;
         Ok(v["variables"].as_array().cloned().unwrap_or_default())
@@ -246,6 +253,7 @@ const HELP: &str = "commands:
   n / s / o               next, step in, step out (of the current task)
   p expr                  print a variable path (a.b[2], m[\"k\"]) or a comparison
   locals                  the current frame's variables
+  set x.f[1] = value      change a local, field or element of scalar type
   bt                      stack of the current task
   tasks                   list tasks; `task N` selects one
   up / down               select a caller / callee frame
@@ -417,6 +425,51 @@ impl Repl {
         }
     }
 
+    /// `set path = value`: walks `a.b[2]` through the frame's variables
+    /// (children by name) and sends setVariable for the last part.
+    fn set_value(&mut self, rest: &str) {
+        let Some((path, value)) = rest.split_once('=') else {
+            println!("usage: set name = value");
+            return;
+        };
+        let Some(f) = self.frame_id() else {
+            println!("no frame selected (the task is not stopped)");
+            return;
+        };
+        let scopes = self.c.request("scopes", json!({"frameId": f})).unwrap_or_default();
+        let mut r = scopes["scopes"][0]["variablesReference"].as_i64().unwrap_or(0);
+        let mut parts: Vec<String> = Vec::new();
+        for seg in path.trim().split('.') {
+            let (head, idx) = seg.split_once('[').map(|(h, i)| (h, Some(i))).unwrap_or((seg, None));
+            if !head.is_empty() {
+                parts.push(head.to_string());
+            }
+            if let Some(i) = idx {
+                for e in format!("[{i}").split_inclusive(']') {
+                    parts.push(e.to_string());
+                }
+            }
+        }
+        let Some((last, walk)) = parts.split_last() else {
+            println!("usage: set name = value");
+            return;
+        };
+        for name in walk {
+            let kids = self.c.children(r).unwrap_or_default();
+            match kids.iter().find(|v| v["name"] == name.as_str()) {
+                Some(v) => r = v["variablesReference"].as_i64().unwrap_or(0),
+                None => {
+                    println!("error: no variable {name}");
+                    return;
+                }
+            }
+        }
+        match self.c.set_variable(r, last, value.trim()) {
+            Ok(v) => println!("{} = {v}", path.trim()),
+            Err(e) => println!("error: {e}"),
+        }
+    }
+
     fn command(&mut self, line: &str) -> bool {
         let line = line.trim();
         let (cmd, rest) = line.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((line, ""));
@@ -442,6 +495,7 @@ impl Repl {
             "s" | "step" => self.run("stepIn"),
             "o" | "out" | "finish" => self.run("stepOut"),
             "p" | "print" => self.print_value(rest),
+            "set" => self.set_value(rest),
             "locals" => match self.frame_id() {
                 Some(f) => {
                     for v in self.c.locals(f).unwrap_or_default() {

@@ -238,6 +238,12 @@ char *zell__plat_temp_dir(void) {
 
 char zell__plat_path_sep(void) { return '/'; }
 
+int zell__plat_path_fold(void) { return 0; }
+
+char *zell__plat_path_canon(const char *path) {
+    return path && *path ? realpath(path, NULL) : NULL;
+}
+
 bool zell__plat_random_bytes(void *buf, size_t n) {
     unsigned char *p = buf;
     size_t got = 0;

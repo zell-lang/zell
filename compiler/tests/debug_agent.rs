@@ -261,9 +261,11 @@ fn next_over_await_stays_in_task() {
     assert!(names.iter().any(|n| n.contains("Half")) && !names.iter().any(|n| n.contains("Work")), "{threads}");
     s.c.request("next", json!({"threadId": t})).unwrap();
     // The await suspends: Work gets its task there and the step ends in it.
+    // The task takes the record Work was observed under, so the logical
+    // thread keeps its id (docs/DEBUGGER.md, "task ids").
     let ev = s.stopped();
     assert_eq!(ev["reason"].as_str(), Some("step"));
-    let t = ev["threadId"].as_i64().unwrap();
+    assert_eq!(ev["threadId"].as_i64(), Some(t), "the task changed its id across the await: {ev}");
     let threads = s.c.request("threads", json!({})).unwrap();
     assert!(threads["threads"].as_array().unwrap().iter().any(|x| x["id"] == t && x["name"].as_str().unwrap().contains("Work")), "{threads}");
     let (_, func, line) = s.top(t);
@@ -271,8 +273,146 @@ fn next_over_await_stays_in_task() {
     let vs = s.vars(t);
     assert_eq!(find(&vs, "sq").2, "16");
     assert_eq!(find(&vs, "before").2, "5");
+    // When Work completes, main, which awaits it, resumes under the same id.
+    let path = s.src.to_string_lossy().to_string();
+    let line = line_of(&s.src, "tasks");
+    s.c.request("setBreakpoints", json!({"source": {"path": path}, "breakpoints": [{"line": line}]})).unwrap();
+    s.c.request("continue", json!({"threadId": t})).unwrap();
+    let ev = s.stopped();
+    assert_eq!(ev["threadId"].as_i64(), Some(t), "main came back under another id: {ev}");
+    let (_, func, _) = s.top(t);
+    assert_eq!(func, "app.main");
+    let threads = s.c.request("threads", json!({})).unwrap();
+    assert!(threads["threads"].as_array().unwrap().iter().any(|x| x["id"] == t && x["name"] == "main"), "{threads}");
     let out = s.finish();
     assert_eq!(out, "work 21\n21 -1\n");
+}
+
+/// An async function that already has a task of its own keeps its id
+/// across every later await (finding 1a), and a step over an await whose
+/// callee suspends ends in the same thread.
+#[test]
+fn task_id_stable_across_awaits() {
+    let mut s = Session::start("debug_agent/await_ids.zl", &[]);
+    s.begin(&[("first", "", "")]);
+    let t = s.stopped()["threadId"].as_i64().unwrap();
+    for marker in ["second", "third", "fourth"] {
+        s.c.request("next", json!({"threadId": t})).unwrap();
+        let ev = s.stopped();
+        assert_eq!(ev["threadId"].as_i64(), Some(t), "{marker}: {ev}");
+        let (_, func, line) = s.top(t);
+        assert_eq!((func.as_str(), line), ("app.Loop", line_of(&s.src, marker)), "{marker}");
+    }
+    assert_eq!(s.finish(), "loop 6\n");
+}
+
+fn set_var(s: &mut Session, r: i64, name: &str, value: &str) -> Result<Value, String> {
+    s.c.request("setVariable", json!({"variablesReference": r, "name": name, "value": value}))
+}
+
+#[test]
+fn set_variable_on_scalars() {
+    let mut s = Session::start("debug_agent/setvar.zl", &[]);
+    let caps = s.begin(&[("set", "", "")]);
+    assert_eq!(caps["supportsSetVariable"], true);
+    let t = s.stopped()["threadId"].as_i64().unwrap();
+    let (f, _, _) = s.top(t);
+    let scopes = s.c.request("scopes", json!({"frameId": f})).unwrap();
+    let locals = scopes["scopes"][0]["variablesReference"].as_i64().unwrap();
+    let quoted = r#""new \"one\"""#;
+    for (name, value) in [("n", "42"), ("small", "-7"), ("ratio", "1.25"), ("ok", "true"), ("name", quoted), ("ch", "'z'")] {
+        let r = set_var(&mut s, locals, name, value).unwrap_or_else(|e| panic!("setVariable {name}: {e}"));
+        assert_eq!(r["value"].as_str(), Some(value), "{name}");
+    }
+    // Out of range and wrong types are refused.
+    assert!(set_var(&mut s, locals, "small", "300").is_err());
+    assert!(set_var(&mut s, locals, "ok", "maybe").is_err());
+    assert!(set_var(&mut s, locals, "nums", "[1]").is_err());
+    assert!(set_var(&mut s, locals, "missing", "1").is_err());
+    // Fields and elements through their parent's reference.
+    let vs = s.vars(t);
+    let p = find(&vs, "p").3;
+    set_var(&mut s, p, "X", "9").unwrap();
+    set_var(&mut s, p, "Y", "-0.5").unwrap();
+    let nums = find(&vs, "nums").3;
+    set_var(&mut s, nums, "[1]", "20").unwrap();
+    // `variables` shows the new values.
+    let vs = s.vars(t);
+    for (name, want) in [("n", "42"), ("small", "-7"), ("ratio", "1.25"), ("ok", "true"), ("name", quoted), ("ch", "'z'"), ("p", "Point{X: 9, Y: -0.5}")] {
+        assert_eq!(find(&vs, name).2, want, "{name}");
+    }
+    // The program goes on with them (the old string was released).
+    assert_eq!(s.finish(), "start\n42 -7 1.25 true new \"one\" z 9 -0.5 [1 20 3]\n");
+}
+
+/// Sets a breakpoint with `cond` as hitCondition on `square` (hit n has
+/// i = n - 1) and returns the setBreakpoints response.
+fn hit_session(cond: &str) -> (Session, Value) {
+    let mut s = Session::start("debug_agent/loop.zl", &[]);
+    let path = s.src.to_string_lossy().to_string();
+    let line = line_of(&s.src, "square");
+    let mut resp = Value::Null;
+    s.c.handshake(|c| {
+        resp = c.request("setBreakpoints", json!({"source": {"path": path}, "breakpoints": [{"line": line, "hitCondition": cond}]}))?;
+        Ok(())
+    })
+    .unwrap();
+    (s, resp)
+}
+
+/// hitCondition: `== N`, `>= N`, `> N`, `< N`, `<= N`, `% N` and a bare `N`.
+#[test]
+fn hit_conditions() {
+    for (cond, want) in [("3", vec![2]), ("== 2", vec![1]), (">= 9", vec![8, 9]), ("> 7", vec![7, 8, 9]), ("< 3", vec![0, 1]), ("<= 2", vec![0, 1]), ("% 4", vec![3, 7]), ("%3", vec![2, 5, 8])] {
+        let (mut s, r) = hit_session(cond);
+        assert_eq!(r["breakpoints"][0]["verified"], true);
+        assert!(r["breakpoints"][0].get("message").is_none(), "{cond}: {r}");
+        let mut got = vec![];
+        for _ in 0..want.len() {
+            let t = s.stopped()["threadId"].as_i64().unwrap();
+            got.push(find(&s.vars(t), "i").2.parse::<i64>().unwrap());
+            s.c.request("continue", json!({"threadId": t})).unwrap();
+        }
+        assert_eq!(got, want, "hitCondition {cond}");
+        s.c.wait_event("terminated", T).unwrap_or_else(|e| panic!("hitCondition {cond}: an extra stop ({e}): {:?}", s.c.events));
+        let _ = s.child.wait();
+    }
+    // A malformed condition is reported and ignored (every hit stops).
+    let (mut s, r) = hit_session("every 3");
+    assert!(r["breakpoints"][0]["message"].as_str().unwrap_or("").contains("hit condition"), "{r}");
+    let t = s.stopped()["threadId"].as_i64().unwrap();
+    assert_eq!(find(&s.vars(t), "i").2, "0");
+    let _ = s.c.request("disconnect", json!({}));
+    let _ = s.child.wait();
+}
+
+/// Breakpoint paths: a symlinked spelling and a relative tail bind to the
+/// file in the agent's table (canonicalised by the agent, not the client).
+#[cfg(unix)]
+#[test]
+fn breakpoint_path_spellings() {
+    let mut s = Session::start("debug_agent/loop.zl", &[]);
+    let dir = tmpdir("bp-paths");
+    let link = dir.join("linked");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(s.src.parent().unwrap(), &link).unwrap();
+    let via_link = link.join("loop.zl").to_string_lossy().to_string();
+    let line = line_of(&s.src, "square");
+    let want = s.src.canonicalize().unwrap().to_string_lossy().to_string();
+    let vl = via_link.clone();
+    s.c.handshake(|c| {
+        for p in ["debug_agent/loop.zl", vl.as_str()] {
+            let r = c.request("setBreakpoints", json!({"source": {"path": p}, "breakpoints": [{"line": line}]}))?;
+            assert_eq!(r["breakpoints"][0]["verified"], true, "{p}: {r}");
+            assert_eq!(r["breakpoints"][0]["source"]["path"].as_str(), Some(want.as_str()), "{p}: {r}");
+        }
+        Ok(())
+    })
+    .unwrap();
+    let t = s.stopped()["threadId"].as_i64().unwrap();
+    assert_eq!(find(&s.vars(t), "i").2, "0");
+    s.c.request("setBreakpoints", json!({"source": {"path": via_link}, "breakpoints": []})).unwrap();
+    assert_eq!(s.finish(), "total 285\n");
 }
 
 #[test]
