@@ -322,7 +322,8 @@ async func main() void! {
     assert!(String::from_utf8_lossy(&linux.stdout).contains("wrote 2000000 exit 0\nchild got 2000000 bytes\nchild stderr\n"));
     let r = wine().env_remove("ZELL_NO_BACKTRACE").arg(&exe).arg("panic").output().unwrap();
     let err = String::from_utf8_lossy(&r.stderr);
-    assert!(err.contains("(zell_t__winplat__inner+0x"), "backtrace without symbols:\n{err}");
+    // Zell frames: file:line from the line table (ABI.md 8.2), as on Linux
+    assert!(err.contains("winplat.zl:") && err.contains(" inner\n"), "backtrace without file:line:\n{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

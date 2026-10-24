@@ -21,5 +21,9 @@ schemars = { version = "0.8", features = ["preserve_order", "indexmap2"] }
 indexmap = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 glob = "0.3"
+# Line tables of panic backtraces (src/lines.rs): object files (ELF, Mach-O,
+# COFF) and their DWARF line programs.
+object = { version = "=0.36.7", default-features = false, features = ["read", "std"] }
+gimli = { version = "=0.31.1", default-features = false, features = ["read", "std"] }
 
 [dev-dependencies]

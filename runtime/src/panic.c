@@ -82,7 +82,6 @@ static ZELL_NORETURN __attribute__((noinline)) void die_traced(const char *msg, 
         }
         longjmp(cap->jb, 1);
     }
-#if ZELL_PLAT_HAS_PANIC_CAPTURE
     if (t_unwinding) {
         /* A panic in a deferred call run while unwinding another panic
          * ends the process: both messages, exit code 2. */
@@ -123,9 +122,8 @@ static ZELL_NORETURN __attribute__((noinline)) void die_traced(const char *msg, 
         zell_release(t_pmsg);
         zell_release(t_ptrace);
         t_pmsg = t_ptrace = NULL;
-        __builtin_longjmp(uw->jb, 1);
+        zell__plat_longjmp(uw->jb);
     }
-#endif
     die_final(msg, len, trace, tlen, quiet);
 }
 

@@ -437,22 +437,19 @@ static void run_job(const jobrec *j) {
     zell_task *saved_cur = t_cur;
     t_ctx = j->ctx;   /* the job's references move to the thread */
     t_cur = j->cur;
-#if ZELL_PLAT_HAS_PANIC_CAPTURE
     /* The unwind point of a task panic (ABI.md 8.1): the panic destroys
-     * the job's coroutine frames and jumps back here. */
+     * the job's coroutine frames and jumps back here (registers only, no
+     * SEH or DWARF unwinding: platform.h zell__plat_setjmp). */
     zell__job_unwind uw;
     uw.chain0 = zell_coro_chain;
     uw.prev = zell__job_unwind_tls;
     zell__job_unwind_tls = &uw;
-    if (__builtin_setjmp(uw.jb) == 0) {
+    if (zell__plat_setjmp(uw.jb) == 0) {
         j->fn(j->arg);
     } else {
         zell_coro_chain = uw.chain0;
     }
     zell__job_unwind_tls = uw.prev;
-#else
-    j->fn(j->arg);
-#endif
     PROF_START();
     /* Restore the thread-locals before dropping the job's references:
      * the release may free the task (or context) and run destructors

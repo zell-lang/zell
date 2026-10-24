@@ -29,6 +29,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <setjmp.h>
 #include <time.h>
 
 #if defined(_WIN32)
@@ -152,6 +153,29 @@ static inline void zell__plat_tls_set(zell__plat_tls_key k, void *v) { pthread_s
 #define ZELL_PLAT_HAS_PANIC_CAPTURE 1
 #endif
 
+/* The non-local jump of a task panic (ABI.md 8.1, task.c run_job): it only
+ * restores registers, with no SEH or DWARF unwinding of the frames in
+ * between, and leaves the signal mask alone. x86-64 POSIX:
+ * __builtin_setjmp / __builtin_longjmp (three words, no library call).
+ * Windows x64: _setjmp with a NULL frame, for which longjmp restores the
+ * saved registers without an SEH unwind; __builtin_setjmp is unusable there
+ * (LLVM saves the frame address, not the frame pointer, which Win64 frames
+ * offset from it, so code after the landing addresses the wrong slots).
+ * Elsewhere (arm64: no __builtin_longjmp): POSIX _setjmp / _longjmp. */
+#if defined(_WIN32)
+typedef jmp_buf zell__plat_jmpbuf;
+#define zell__plat_setjmp(b) _setjmp((b), NULL)
+#define zell__plat_longjmp(b) longjmp((b), 1)
+#elif defined(__x86_64__)
+typedef void *zell__plat_jmpbuf[5];
+#define zell__plat_setjmp(b) __builtin_setjmp(b)
+#define zell__plat_longjmp(b) __builtin_longjmp((b), 1)
+#else
+typedef jmp_buf zell__plat_jmpbuf;
+#define zell__plat_setjmp(b) _setjmp(b)
+#define zell__plat_longjmp(b) _longjmp((b), 1)
+#endif
+
 /* Whether functions using 256-bit AVX registers may be built (crypto's
  * VAES path). GCC targeting Windows: no, it does not align the stack for
  * 32-byte AVX spills there (GCC bug 54412); clang/mingw is fine. */
@@ -237,14 +261,14 @@ ZELL_PLAT_HIDDEN bool zell__plat_random_bytes(void *buf, size_t n);
 /* Writes a best-effort backtrace of the calling thread to fd, skipping the
  * innermost `skip` frames. */
 ZELL_PLAT_HIDDEN void zell__plat_backtrace(int fd, int skip);
-/* The same frames as text into buf (NUL-terminated, truncated to cap);
- * only where ZELL_PLAT_HAS_PANIC_CAPTURE (a contained task panic keeps its
- * trace, ABI.md 8). */
+/* The same frames as text into buf (NUL-terminated, truncated to cap): a
+ * contained task panic keeps its trace (ABI.md 8.1). */
 ZELL_PLAT_HIDDEN void zell__plat_backtrace_buf(char *buf, size_t cap, int skip);
-/* The `.zell_lines` table (ABI.md 8.2; lines.c): source file, line and
- * Zell function (NULL if unknown) of link-time address `vaddr` of table
- * `t`; false if the address has no line. */
-ZELL_PLAT_HIDDEN bool zell__lines_lookup(const unsigned char *t, size_t len, uint64_t vaddr, const char **file, uint32_t *line, const char **func);
+/* The line table (ABI.md 8.2; lines.c): source file, line and Zell
+ * function (NULL if unknown) of code address `pc` (a return address minus
+ * one); false if the address has no line, the program registered no table
+ * or ZELL_NO_LINES is set. */
+ZELL_PLAT_HIDDEN bool zell__lines_find(uintptr_t pc, const char **file, uint32_t *line, const char **func);
 /* `file` as printed: relative to the working directory when under it. */
 ZELL_PLAT_HIDDEN const char *zell__lines_shown(const char *file);
 

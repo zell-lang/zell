@@ -1,22 +1,66 @@
-/* lines.c - lookups in the `.zell_lines` table of panic backtraces
- * (ABI.md 8.2): code address -> source file, line and Zell function.
- * The platform layer finds the table (posix.c: the executable's ELF
- * section) and calls zell__lines_lookup. */
+/* lines.c - the line table of panic backtraces (ABI.md 8.2): code address
+ * -> source file, line and Zell function.
+ *
+ * The compiler links one extra object into every program; its constructor
+ * hands the table to zell_lines_register. Code addresses in the table are
+ * 32-bit offsets relative to the table itself, resolved by the static
+ * linker on ELF, Mach-O and COFF alike, so they are already run-time
+ * addresses: no load bias, no file reading, nothing platform-specific. */
 #include "rt_internal.h"
 #include "platform/platform.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-#define ZELL__LINES_HDR 32
+#define ZELL__LINES_HDR 24
 #define ZELL__LINES_NOFILE 0xfffu
 
 static uint32_t rd32(const unsigned char *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-/* The last entry of `n` 8-byte {off, value} entries at `e` with off <= x,
- * or -1. */
+/* The registered table (one per program). */
+static const unsigned char *g_tab;
+static size_t g_len;
+
+void zell_lines_register(const void *table, int64_t len) {
+    if (!table || len < ZELL__LINES_HDR || memcmp(table, "ZLN2", 4) != 0) return;
+    g_tab = table;
+    g_len = (size_t)len;
+}
+
+/* The code ranges sorted by run-time address, built on first use. */
+typedef struct code_range {
+    uintptr_t lo;
+    uint32_t size, k;
+} code_range;
+static code_range *g_code;
+static uint32_t g_ncode;
+static int g_state;  /* 0 not built, 1 building, 2 built */
+
+static int code_cmp(const void *a, const void *b) {
+    uintptr_t x = ((const code_range *)a)->lo, y = ((const code_range *)b)->lo;
+    return x < y ? -1 : x > y;
+}
+
+static void build_index(void) {
+    const unsigned char *t = g_tab;
+    uint32_t ncode = rd32(t + 20);
+    if ((size_t)ZELL__LINES_HDR + (size_t)ncode * 12 > g_len) return;
+    code_range *c = malloc(sizeof *c * (ncode ? ncode : 1));
+    if (!c) return;
+    for (uint32_t k = 0; k < ncode; k++) {
+        const unsigned char *e = t + ZELL__LINES_HDR + (size_t)k * 12;
+        c[k].lo = (uintptr_t)e + (uintptr_t)(intptr_t)(int32_t)rd32(e);
+        c[k].size = rd32(e + 4);
+        c[k].k = k;
+    }
+    qsort(c, ncode, sizeof *c, code_cmp);
+    g_code = c;
+    g_ncode = ncode;
+}
+
+/* The last of `n` 8-byte {off, value} entries at `e` with off <= x, or -1. */
 static long find(const unsigned char *e, uint32_t n, uint32_t x) {
     if (n == 0 || rd32(e) > x) return -1;
     uint32_t lo = 0, hi = n;
@@ -28,17 +72,39 @@ static long find(const unsigned char *e, uint32_t n, uint32_t x) {
     return (long)lo;
 }
 
-bool zell__lines_lookup(const unsigned char *t, size_t len, uint64_t vaddr, const char **file, uint32_t *line, const char **func) {
-    if (!t || len < ZELL__LINES_HDR || memcmp(t, "ZLN1", 4) != 0) return false;
-    uint32_t nfiles = rd32(t + 4), nlines = rd32(t + 8), nfuncs = rd32(t + 12), strsize = rd32(t + 16);
-    uint64_t base = (uint64_t)rd32(t + 24) | (uint64_t)rd32(t + 28) << 32;
-    size_t files = ZELL__LINES_HDR, lines = files + (size_t)nfiles * 4, funcs = lines + (size_t)nlines * 8, str = funcs + (size_t)nfuncs * 12;
-    if (str + strsize > len || strsize == 0 || t[str + strsize - 1] != 0) return false;
-    if (vaddr < base || vaddr - base > UINT32_MAX) return false;
-    uint32_t x = (uint32_t)(vaddr - base);
-    long i = find(t + lines, nlines, x);
+bool zell__lines_find(uintptr_t pc, const char **file, uint32_t *line, const char **func) {
+    if (!g_tab || getenv("ZELL_NO_LINES")) return false;
+    int st = __atomic_load_n(&g_state, __ATOMIC_ACQUIRE);
+    if (st == 0) {
+        int expect = 0;
+        if (__atomic_compare_exchange_n(&g_state, &expect, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            build_index();
+            __atomic_store_n(&g_state, 2, __ATOMIC_RELEASE);
+            st = 2;
+        }
+    }
+    if (st != 2 || !g_code) return false;  /* another thread is building it: symbol+offset */
+    const unsigned char *t = g_tab;
+    uint32_t nfiles = rd32(t + 4), nlines = rd32(t + 8), nfuncs = rd32(t + 12), strsize = rd32(t + 16), ncode = rd32(t + 20);
+    size_t files = ZELL__LINES_HDR + (size_t)ncode * 12, lines = files + (size_t)nfiles * 4, funcs = lines + (size_t)nlines * 8,
+           str = funcs + (size_t)nfuncs * 12;
+    if (str + strsize > g_len || strsize == 0 || t[str + strsize - 1] != 0) return false;
+    /* the code range holding pc */
+    uint32_t lo = 0, hi = g_ncode;
+    if (hi == 0 || pc < g_code[0].lo) return false;
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (g_code[mid].lo <= pc) lo = mid;
+        else hi = mid;
+    }
+    const code_range *c = &g_code[lo];
+    if (pc - c->lo >= c->size) return false;
+    const unsigned char *ce = t + ZELL__LINES_HDR + (size_t)c->k * 12;
+    uint32_t first = rd32(ce + 8), end = c->k + 1 < ncode ? rd32(ce + 12 + 8) : nlines;
+    if (first > end || end > nlines) return false;
+    long i = find(t + lines + (size_t)first * 8, end - first, (uint32_t)(pc - c->lo));
     if (i < 0) return false;
-    uint32_t fl = rd32(t + lines + (size_t)i * 8 + 4), f = fl >> 20;
+    uint32_t fl = rd32(t + lines + ((size_t)first + (size_t)i) * 8 + 4), f = fl >> 20;
     if (f == ZELL__LINES_NOFILE || f >= nfiles) return false;
     uint32_t fo = rd32(t + files + (size_t)f * 4);
     if (fo >= strsize) return false;

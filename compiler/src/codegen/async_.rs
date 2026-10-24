@@ -133,9 +133,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let awaiting = self.entry_alloca(self.ptr_ty().into(), "coro.awaiting", true);
         // The frame chain (ABI.md 8.1): the node records the frame handle,
         // or NULL when no frame was allocated (no destroy function to call).
-        let chain = if self.module.get_triple().as_str().to_string_lossy().contains("windows") {
-            None
-        } else {
+        let chain = {
             let g = match self.module.get_global("zell_coro_chain") {
                 Some(g) => g,
                 None => {
