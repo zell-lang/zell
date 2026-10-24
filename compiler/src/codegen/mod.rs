@@ -141,7 +141,9 @@
 //! into `res.task` NULL or, for a direct `await` inside a coroutine, its
 //! own frame handle. With NULL the coroutine makes its `Task<T>`
 //! (`zell_task_lazy`) only at its first suspension and stores it into
-//! `res.task`, while a body that returns without suspending leaves NULL
+//! `res.task` (the cancel hooks of the waits the body started before, linked
+//! on the caller's task after the mark `zell_coro_enter` saved at the
+//! ramp's start, move to the new task), while a body that returns without suspending leaves NULL
 //! there and moves its result into `res.value` (the synchronous fast
 //! path: no task, and no frame when the body has no suspend point,
 //! through `llvm.coro.alloc`). With a frame handle `f` never makes a task
@@ -422,6 +424,9 @@ pub(crate) struct Coro<'ctx> {
     pub task_slot: PointerValue<'ctx>,
     /// Frame slot holding the caller's context (+1) to restore.
     pub ctx_slot: PointerValue<'ctx>,
+    /// Frame slot holding the current task's cancel-hook mark at the
+    /// ramp's start (`zell_coro_enter`), passed to `zell_task_lazy`.
+    pub mark_slot: PointerValue<'ctx>,
     /// The caller's result slot `{ ptr word; T value }` (last parameter).
     pub res: PointerValue<'ctx>,
     pub cleanup: BasicBlock<'ctx>,

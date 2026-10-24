@@ -89,6 +89,7 @@ typedef struct zell__hook {
     zell_task *w;              /* owned while linked */
     struct zell__hook *next;
     uintptr_t data;
+    int64_t seq;               /* the owner's link number (zell_coro_enter marks) */
     int32_t embedded;          /* lives inside w: released, never freed */
     int32_t has_data;
 } zell__hook;

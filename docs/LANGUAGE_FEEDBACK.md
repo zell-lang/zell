@@ -209,7 +209,7 @@ documentation's Examples section, tested by
 Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
 `workspace`, `testing-guide`):
 
-42. **No `select`, and `task.Any` over a `Recv` loses values.** The
+42. **Fixed (2026-10-25)** (the runtime bug; `select` stays a spec gap): cause: a coroutine runs as part of its caller's task until its first suspension, so the `Recv` it started hooked its cancellation on the caller (or nowhere, before `main` first suspended), and cancelling the losing coroutine's task never reached the queued wait; `zell_task_lazy` now moves the hooks linked since the ramp's `zell_coro_enter` mark onto the new task, and `task.Any` cancels its losers before it completes. **No `select`, and `task.Any` over a `Recv` loses values.** The
     stand-in for `select { case v := <-ch: ... case <-time.After(d): ... }`
     is `await task.Any(ch.Recv(), task.Delay(d))` in a loop, but the losing
     `Recv` is cancelled while staying registered as a receiver: the next
@@ -219,7 +219,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     a spec gap (`select` over channel operations and timers). Workaround in
     `jobrunner/src/service.zl`: one task owns the only `Recv` and cancels a
     scope; the timer wait runs in that scope.
-43. **In a cancelled context, `Send` returns at once without an error**
+43. **As specified, not changed (2026-10-25):** DESIGN.md «Асинхронность» says `Delay` and `Send` wake at once in a cancelled context but cannot return an error (check `task.CheckCancelled()?`), while `Recv` returns `task.ErrCancelled`; making `Send` `Task<void!>` would be a language change. **In a cancelled context, `Send` returns at once without an error**
     (it is `Task<void>`), so a producer cannot tell whether the value was
     delivered, and every receive with no value ready fails: a result
     collector running in the cancelled context stops at once and the

@@ -7,7 +7,8 @@
 //! `entry` (allocas) -> `init` (`coro.id`, `coro.alloc`) -> `coro.alloc`
 //! (frame from `zell_coro_frame_alloc`, skipped when LLVM proves the
 //! coroutine never suspends) -> `coro.begin` (`coro.begin`, the caller's
-//! context saved by `zell_task_get_ctx`, then zeroing of locals) -> body.
+//! context and the cancel-hook mark saved by `zell_coro_enter`, then
+//! zeroing of locals) -> body.
 //! The coroutine makes **no task until its first real suspension**: the
 //! body runs as part of the caller's current task, and an `await t` that
 //! has to suspend first calls `zell_task_lazy` (which makes the task,
@@ -174,7 +175,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let task_slot = self.entry_alloca(self.ptr_ty().into(), "coro.task", false);
         self.b.build_store(task_slot, null).unwrap();
         let ctx_slot = self.entry_alloca(self.ptr_ty().into(), "coro.ctx", false);
-        let ctx0 = self.call_rt_v("zell_task_get_ctx", &[]);
+        let mark_slot = self.entry_alloca(self.i64_ty().into(), "coro.mark", false);
+        let ctx0 = self.call_rt_v("zell_coro_enter", &[mark_slot.into()]);
         self.b.build_store(ctx_slot, ctx0).unwrap();
         let res = func.get_last_param().unwrap().into_pointer_value();
         let begin_end = self.b.get_insert_block().unwrap();
@@ -217,7 +219,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             self.b.build_store(hp, h).unwrap();
             Some((node, g.as_pointer_value()))
         };
-        self.fs_mut().coro = Some(Coro { hdl, ret: f.ret, ret_size, ret_ops, task_slot, ctx_slot, res, cleanup, done, unwind, chain, awaiting });
+        self.fs_mut().coro = Some(Coro { hdl, ret: f.ret, ret_size, ret_ops, task_slot, ctx_slot, mark_slot, res, cleanup, done, unwind, chain, awaiting });
         self.b.position_at_end(begin_end);
         self.coro_chain_push();
         self.b.position_at_end(body);
@@ -396,7 +398,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_unconditional_branch(join).unwrap();
         self.b.position_at_end(fo);
         let c1 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
-        let own = self.call_rt_v("zell_task_lazy", &[null.into(), co.ret_size.into(), co.ret_ops.into(), c1.into()]).into_pointer_value();
+        let mark = self.b.build_load(self.i64_ty(), co.mark_slot, "mark").unwrap();
+        let own = self.call_rt_v("zell_task_lazy", &[null.into(), co.ret_size.into(), co.ret_ops.into(), c1.into(), mark.into()]).into_pointer_value();
         self.b.build_store(co.task_slot, own).unwrap();
         self.b.build_store(wp, own).unwrap();
         self.b.build_unconditional_branch(join).unwrap();

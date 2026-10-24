@@ -198,6 +198,7 @@ static _Thread_local zell_object *t_ctx;
  * the parent of tasks created now and the target of cancellation hooks.
  * Travels with jobs and continuations like t_ctx; see ABI.md 10.11. */
 static _Thread_local zell_task *t_cur;
+static void orphans_clear(void);   /* cancel hooks with no owner (below) */
 
 /* ---- job records ---- */
 
@@ -596,6 +597,7 @@ static void run_job(const jobrec *j) {
         zell_coro_resume(h);
     }
     zell__job_unwind_tls = uw.prev;
+    orphans_clear();   /* nothing after the job can claim them */
     PROF_START();
     /* Restore the thread-locals before dropping the job's references:
      * the release may free the task (or context) and run destructors
@@ -882,6 +884,7 @@ void zell__sched_start(void) {
 }
 
 void zell__sched_stop(void) {
+    orphans_clear();   /* the calling thread's (synchronous code) */
     if (g_sched_stop) g_sched_stop();
     else stop_io();
 }
@@ -1025,6 +1028,7 @@ struct zell_task {
     zell_task *child_head;     /* children (not owned) */
     zell_task *sib_prev, *sib_next;
     hook *hooks;
+    int64_t hook_seq;           /* links so far (atomic store under mu): hook->seq */
     int32_t cancelled;          /* atomic */
     int32_t nhooks;
     /* Runs when the task itself is the target of zell_task_cancel (a
@@ -1633,6 +1637,7 @@ static void yield_job(void *arg) {
 
 static void *task_wait(zell_task *t) {
     if (!t) zell_panic_nil();
+    if (!t_cur) orphans_clear();   /* a blocking await: no coroutine body before its first suspension runs here */
     if (is_yield(t)) {
         /* A blocking await of task.Yield: a fresh task completed by a job. */
         zell_task *y = task_new_ex(0, NULL, 0);
@@ -1995,9 +2000,11 @@ static void any_one_done(void *arg) {
     int64_t idx = nd->index;
     free(nd);
     if (__atomic_exchange_n(&st->fired, 1, __ATOMIC_ACQ_REL) == 0) {
-        zell_task_complete(st->result, &idx);
+        /* The losers first: the awaiter, resumed by the completion, may at
+         * once send on a channel a losing receive still waits on. */
         for (int64_t i = 0; i < st->n; i++)
             if (i != idx && !zell_task_is_done(st->inputs[i])) zell_task_cancel(st->inputs[i]);
+        zell_task_complete(st->result, &idx);
     }
     any_unref(st);
 }
@@ -2175,6 +2182,8 @@ static void hook_add(zell_task *t, hook *h) {
             }
         }
     }
+    h->seq = t->hook_seq + 1;
+    __atomic_store_n(&t->hook_seq, h->seq, __ATOMIC_RELAXED);
     h->next = t->hooks;
     t->hooks = h;
     t->nhooks++;
@@ -2182,9 +2191,121 @@ static void hook_add(zell_task *t, hook *h) {
     while (dead) { hook *n = dead->next; hook_free(dead); dead = n; }
 }
 
+/* Cancel hooks of waits started with no current task once a coroutine was
+ * started with none (t_orphan_on: the ramp of an async main before its
+ * first suspension, an async call from synchronous code): that coroutine
+ * moves those linked during its body onto its own task at its first
+ * suspension (zell_task_lazy), as it moves those linked on a current task.
+ * Done waits are pruned once the list has 8; the rest are dropped (and
+ * recording stops) at the end of every job, at a blocking await and at
+ * shutdown, where no such body can still claim them (they could never be
+ * cancelled anyway). */
+static _Thread_local int32_t t_orphan_on;
+static _Thread_local hook *t_orphans;
+static _Thread_local int32_t t_norphans;
+static _Thread_local int64_t t_orphan_seq;
+
+static void hooks_free_list(hook *h) {
+    while (h) { hook *n = h->next; hook_free(h); h = n; }
+}
+
+static void orphan_add(hook *h) {
+    hook *dead = NULL;
+    if (t_norphans >= 8) {
+        for (hook **pp = &t_orphans; *pp;) {
+            hook *x = *pp;
+            if (zell_task_is_done(x->w)) {
+                *pp = x->next;
+                x->next = dead;
+                dead = x;
+                t_norphans--;
+            } else {
+                pp = &x->next;
+            }
+        }
+    }
+    h->seq = ++t_orphan_seq;
+    h->next = t_orphans;
+    t_orphans = h;
+    t_norphans++;
+    hooks_free_list(dead);
+}
+
+static void orphans_clear(void) {
+    t_orphan_on = 0;
+    if (!t_orphans) return;
+    hook *h = t_orphans;
+    t_orphans = NULL;
+    t_norphans = 0;
+    hooks_free_list(h);
+}
+
+/* Unlinks the hooks of *list with seq > mark, in order; *n is the list's
+ * count. Returns them (NULL if none) and their number in *moved. */
+static hook *hooks_take(hook **list, int32_t *n, int64_t mark, int32_t *moved) {
+    hook *out = NULL, **tail = &out;
+    *moved = 0;
+    for (hook **pp = list; *pp;) {
+        hook *x = *pp;
+        if (x->seq > mark) {
+            *pp = x->next;
+            x->next = NULL;
+            *tail = x;
+            tail = &x->next;
+            (*n)--;
+            (*moved)++;
+        } else {
+            pp = &x->next;
+        }
+    }
+    return out;
+}
+
+/* Moves to `to` the hooks linked on `from` (the orphans when NULL) after
+ * link number `mark`: the waits a coroutine started before its first
+ * suspension (ABI.md 10.3), or runs them if `to` is already cancelled.
+ * `to` was attached under `from` first, so a cancellation of `from` that
+ * races with the move reaches the moved hooks through `to`. */
+static void hooks_move(zell_task *from, int64_t mark, zell_task *to) {
+    hook *moved;
+    int32_t n;
+    if (!from) {
+        moved = t_orphan_seq > mark ? hooks_take(&t_orphans, &t_norphans, mark, &n) : NULL;
+    } else {
+        if (__atomic_load_n(&from->hook_seq, __ATOMIC_RELAXED) <= mark) return;
+        task_lock(from);
+        moved = hooks_take(&from->hooks, &from->nhooks, mark, &n);
+        task_unlock(from);
+    }
+    if (!moved) return;
+    task_lock(to);
+    if (!__atomic_load_n(&to->cancelled, __ATOMIC_ACQUIRE)) {
+        int64_t seq = to->hook_seq;
+        hook *last = moved;
+        for (hook *x = moved; x; x = x->next) {
+            x->seq = ++seq;
+            last = x;
+        }
+        __atomic_store_n(&to->hook_seq, seq, __ATOMIC_RELAXED);
+        last->next = to->hooks;
+        to->hooks = moved;
+        to->nhooks += n;
+        task_unlock(to);
+        return;
+    }
+    task_unlock(to);
+    while (moved) {
+        hook *x = moved->next;
+        if (moved->has_data) moved->fn_data(moved->w, moved->data);
+        else moved->fn(moved->w);
+        hook_free(moved);
+        moved = x;
+    }
+}
+
 /* Registers fn(w) to run when task t is cancelled, in an allocated node. */
 static void cancel_hook_on(zell_task *t, void (*fn)(zell_task *), void (*fn_data)(zell_task *, uintptr_t), uintptr_t data, zell_task *w) {
-    if (!t) return;
+    if (!t && !t_orphan_on) return;
     hook *h = malloc(sizeof *h);
     if (!h) zell_panic("out of memory (cancel hook)");
     zell_retain(w);
@@ -2193,18 +2314,18 @@ static void cancel_hook_on(zell_task *t, void (*fn)(zell_task *), void (*fn_data
     h->data = data;
     h->w = w;
     h->embedded = 0;
-    hook_add(t, h);
+    if (t) hook_add(t, h); else orphan_add(h);
 }
 
 void zell__hook_link(hook *h, zell_task *owner, void (*fn)(zell_task *), zell_task *w) {
-    if (!owner) return;
+    if (!owner && !t_orphan_on) return;
     zell_retain(w);
     h->fn = fn;
     h->has_data = 0;
     h->data = 0;
     h->w = w;
     h->embedded = 1;
-    hook_add(owner, h);
+    if (owner) hook_add(owner, h); else orphan_add(h);
 }
 
 /* The same on the current task. */
@@ -2326,12 +2447,13 @@ const int64_t zell_debug_task_layout[4] = {
  * or completes. Returns the task with two references: the frame's and the
  * one the ramp returns to its caller (the current-task slot holds a third,
  * dropped by restore_parent). */
-zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *result_ops, zell_object *ctx0) {
+zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *result_ops, zell_object *ctx0, int64_t mark) {
     if (t) return t;
     PROF_START();
     t = task_new_ex(result_size, result_ops, 0);
     t->hdr.refcount += 2;   /* the frame's and the ramp's references: nobody else sees t yet, so no atomics */
     task_attach(t, t_cur);
+    hooks_move(t_cur, mark, t);   /* the waits the body started belong to t */
     t->caller_ctx = ctx0;   /* moved */
     t->ctx_saved = 1;
     zell_task *old = t_cur;
@@ -2339,6 +2461,22 @@ zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_op
     zell_release(old);  /* t->parent holds its own reference */
     PROF_T(lazy);
     return t;
+}
+
+/* A coroutine ramp starts: the current context, +1 (what zell_task_get_ctx
+ * returns), and in *mark the current task's link number, so that its
+ * zell_task_lazy moves the cancel hooks of the waits the body starts
+ * before its first suspension onto the coroutine's own task. */
+zell_object *zell_coro_enter(int64_t *mark) {
+    zell_task *c = t_cur;
+    if (c) {
+        *mark = __atomic_load_n(&c->hook_seq, __ATOMIC_RELAXED);
+    } else {
+        *mark = t_orphan_seq;
+        t_orphan_on = 1;
+    }
+    zell_retain(t_ctx);
+    return t_ctx;
 }
 
 /* A coroutine that made no task returns: the context saved when its ramp

@@ -1400,7 +1400,8 @@ built as `*_async` variants that return a `zell_task *`.
 | `bool zell_sched_is_worker(void)` | whether the current thread is a worker |
 | `void zell_coro_resume(void *frame)` | resumes an LLVM switched-resume coroutine. It is exactly what `llvm.coro.resume` lowers to: it calls the function pointer stored in the first word of the frame. Pass `@zell_coro_resume` as `resume_fn` and the coroutine handle as `frame` |
 | `zell_task *zell_task_new(int64_t result_size, const zell_value_ops *ops)` | a new **pending** task, +1, attached under the current task and made current (10.11). `result_size` is `sizeof(T)` (0 for `Task<void>`). `ops` describes ownership of the result. (C code wrapping a callback uses `zell_task_new_plain`; compiled coroutines use `zell_task_lazy`) |
-| `zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *ops, zell_object *ctx0)` | the coroutine's own task at its first suspension (10.3): returns `t` if it is not NULL; otherwise a new pending task attached under the current task and made current, like `zell_task_new`, whose saved caller context is `ctx0` (**+1, consumed**; from `zell_task_get_ctx` at the start of the ramp). A new task is returned with **two** references: the frame's and the one the ramp hands to its caller |
+| `zell_object *zell_coro_enter(int64_t *mark)` | the ramp's first call (10.3): returns the current context, **+1** (as `zell_task_get_ctx`), and stores in `*mark` the current task's cancel-hook link number (with no current task: the thread's orphan-hook number, and the thread counts a body that runs before its first suspension with no task, until its `zell_task_lazy`, `zell_coro_leave` or `zell_coro_defer`) |
+| `zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *ops, zell_object *ctx0, int64_t mark)` | the coroutine's own task at its first suspension (10.3): returns `t` if it is not NULL; otherwise a new pending task attached under the current task and made current, like `zell_task_new`, whose saved caller context is `ctx0` (**+1, consumed**; from `zell_coro_enter` at the start of the ramp). The cancel hooks linked on the current task (or, with none, on the thread's orphan list) after `mark` (from `zell_coro_enter`) move to the new task: the waits the body started before suspending are cancelled with it (a `task.Any` loser). A new task is returned with **two** references: the frame's and the one the ramp hands to its caller |
 | `void zell_coro_leave(zell_object *ctx0)` | a coroutine that never suspended (so made no task) returns: `ctx0` (+1, consumed) is the current context again, so whatever the body set does not leak into the caller (10.8) |
 | `zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *ops, const void *result)` | an already **done** plain task, +1, holding `result` (`result_size` bytes copied; the slot takes over the reference, nothing is retained). Used by callers that keep the `Task<T>` of an async call that completed synchronously |
 | `void zell_task_complete(zell_task *t, const void *result)` | stores the result (copies `result_size` bytes from `result`, which is borrowed: the task **retains** it with `ops`; `result` may be NULL for void tasks or a zero result), marks the task done, wakes blocking waiters, and posts the continuations. **Panics `task completed twice`** on a second call. After it returns, `t` may already have been freed by another thread unless the caller still owns a reference |
@@ -1453,19 +1454,20 @@ frame (`llvm.coro.alloc` folds to false).
 entry:
   task.slot = alloca ptr                           ; the coroutine's task, NULL until it suspends
   ctx.slot  = alloca ptr                           ; the caller's context (+1)
+  mark.slot = alloca i64                           ; the cancel-hook mark
   id    = llvm.coro.id(0, null, null, null)
   need  = llvm.coro.alloc(id)                      ; false when LLVM proved there is no suspend point
   mem   = need ? zell_coro_frame_alloc(llvm.coro.size.i64()) : null
   hdl   = llvm.coro.begin(id, mem)
   store null -> task.slot
-  store zell_task_get_ctx() -> ctx.slot            ; +1
+  store zell_coro_enter(mark.slot) -> ctx.slot     ; +1
   ... body ...
 
 ; each `x = await e` (e : Task<U>):
   t = <evaluate e>                                 ; +1 (owned local in the frame)
   if zell_task_is_done(t) goto ready              ; fast path, optional
   cur = load task.slot
-  own = zell_task_lazy(cur, sizeof(T), ops_T, load ctx.slot)  ; makes the task on the first call
+  own = zell_task_lazy(cur, sizeof(T), ops_T, load ctx.slot, load mark.slot)  ; makes the task on the first call
   store own -> task.slot
   if cur == null: store own -> res.task            ; first suspension: the caller gets the task (+1)
   save = llvm.coro.save(hdl)
@@ -1524,8 +1526,15 @@ Rules the compiler must respect:
   `await_suspend` returning `bool`.
 - **The task is made at the first suspension**, not at the call: until then
   the body runs as part of the caller's current task (10.11) and under the
-  caller's context, which the ramp saved (`zell_task_get_ctx`) and gives back
-  with `zell_coro_leave` or through `zell_task_lazy`'s `ctx0` (10.8).
+  caller's context, which the ramp saved (`zell_coro_enter`) and gives back
+  with `zell_coro_leave` or through `zell_task_lazy`'s `ctx0` (10.8). The
+  waits the body starts meanwhile hook their cancellation on the caller's
+  task (10.11); `zell_task_lazy` moves the hooks linked after the ramp's
+  mark onto the new task, so cancelling the coroutine's task wakes them.
+  With no current task at all (the ramp of an async `main`, an async call
+  from synchronous code) such hooks go on a per-thread orphan list while a
+  body started without a task runs before its first suspension, and move
+  the same way; the list is emptied when no such body is left.
   `zell_task_lazy` must be called before `coro.save`, and `res.task` written
   before `zell_task_add_continuation`; both happen only once per coroutine
   (`cur == null`), so resume clones never write into the caller's slot, which
@@ -1653,9 +1662,10 @@ over to its awaiter unconditionally.
   under the task of its root (the first frame up the chain that has a
   task). Waits created before the first suspension hook their
   cancellation on the task current then (the root's once the root has
-  suspended before, else the root's caller's, as for the body of any
-  coroutine before its first suspension); waits created after a resume
-  hook on the root's task. Cancelling the root (a `task.Any` loser, a
+  suspended before, else the root's caller's, from which the root's
+  `zell_task_lazy` moves them onto the root's new task, as for the body of
+  any coroutine before its first suspension); waits created after a
+  resume hook on the root's task. Cancelling the root (a `task.Any` loser, a
   deadline) therefore wakes the waits of the whole linked chain under it.
 - **Context.** The callee keeps the awaiter's context (`ctx.slot`, +1) and
   makes it current at its first linked suspension and at its return, so
@@ -1859,7 +1869,7 @@ Propagation, with no help from compiled code:
   is current when `fn` returns, so contexts never leak between jobs.
 - Calling an `async` function starts it on the caller's thread, so it inherits
   the caller's context. The ramp saves the caller's context
-  (`zell_task_get_ctx`, +1) when it starts; a body that returns without
+  (`zell_coro_enter`, +1) when it starts; a body that returns without
   suspending gives it back with `zell_coro_leave`, and a body that suspends
   hands it to its task (`zell_task_lazy`, 10.3), which makes it current
   again when the coroutine first suspends (`zell_task_add_continuation`
@@ -2046,7 +2056,9 @@ drop): `zell_task_delay`
 (completes at once), `zell_task_rt_signal` (fired, so `Channel.Send/Recv`
 re-check and give up), `zell_io_wait_*` (complete with **3**, so `net`
 operations fail with `task.ErrCancelled`). A wait started by an already
-cancelled task completes immediately. `task.Any` cancels its losing inputs.
+cancelled task completes immediately. `task.Any` cancels its losing inputs
+before it completes (so the awaiter, once resumed, finds a losing channel
+wait already out of the queue).
 
 Limits (the compiler is not involved, so an `await` cannot be interrupted by
 itself): awaiting another task's result waits until that task finishes (it

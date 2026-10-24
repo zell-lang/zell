@@ -47,7 +47,8 @@
 ; below are only called with NULL, so they never read it; the frame-linked
 ; protocol for a non-NULL handle is modelled at the end of the file.)
 
-declare ptr  @zell_task_lazy(ptr, i64, ptr, ptr)
+declare ptr  @zell_task_lazy(ptr, i64, ptr, ptr, i64)
+declare ptr  @zell_coro_enter(ptr)
 declare ptr  @zell_task_completed(i64, ptr, ptr)
 declare void @zell_coro_leave(ptr)
 declare ptr  @zell_task_get_ctx()
@@ -85,6 +86,7 @@ entry:
   %ret.slot = alloca i64, align 8
   %task.slot = alloca ptr, align 8      ; the coroutine's task: NULL until its first suspension
   %ctx.slot = alloca ptr, align 8       ; the caller's context, +1 (zell_task_get_ctx)
+  %mark.slot = alloca i64, align 8     ; zell_coro_enter's hook mark
   ; 1. frame on the zell heap, unless LLVM proves the coroutine never suspends
   %id   = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
   %need = call i1 @llvm.coro.alloc(token %id)
@@ -99,7 +101,7 @@ begin:
   %memphi = phi ptr [ null, %entry ], [ %mem, %alloc ]
   %hdl  = call ptr @llvm.coro.begin(token %id, ptr %memphi)
   store ptr null, ptr %task.slot
-  %ctx0 = call ptr @zell_task_get_ctx()
+  %ctx0 = call ptr @zell_coro_enter(ptr %mark.slot)   ; +1, and the hook mark for zell_task_lazy
   store ptr %ctx0, ptr %ctx.slot
   ; 2. body: `await task.Delay(5)` (result type void)
   %d = call ptr @zell_task_delay(i64 5)
@@ -110,7 +112,8 @@ d.try:
   ; the coroutine's own task (made now if this is its first suspension)
   %d.cur = load ptr, ptr %task.slot
   %d.ctx = load ptr, ptr %ctx.slot
-  %d.own = call ptr @zell_task_lazy(ptr %d.cur, i64 8, ptr null, ptr %d.ctx)
+  %d.mark = load i64, ptr %mark.slot
+  %d.own = call ptr @zell_task_lazy(ptr %d.cur, i64 8, ptr null, ptr %d.ctx, i64 %d.mark)
   store ptr %d.own, ptr %task.slot
   %d.first = icmp eq ptr %d.cur, null
   br i1 %d.first, label %d.publish, label %d.save
@@ -174,6 +177,7 @@ entry:
   %ret.slot = alloca i64, align 8
   %task.slot = alloca ptr, align 8
   %ctx.slot = alloca ptr, align 8
+  %mark.slot = alloca i64, align 8
   %a.res = alloca %res.i64, align 8       ; result slot of the awaited call
   %id   = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
   %need = call i1 @llvm.coro.alloc(token %id)
@@ -188,7 +192,7 @@ begin:
   %memphi = phi ptr [ null, %entry ], [ %mem, %alloc ]
   %hdl  = call ptr @llvm.coro.begin(token %id, ptr %memphi)
   store ptr null, ptr %task.slot
-  %ctx0 = call ptr @zell_task_get_ctx()
+  %ctx0 = call ptr @zell_coro_enter(ptr %mark.slot)   ; +1, and the hook mark for zell_task_lazy
   store ptr %ctx0, ptr %ctx.slot
   ; `var a = await work(x)`: a NULL task means work completed synchronously
   call void @work(i64 %x, ptr %a.res)
@@ -209,7 +213,8 @@ w.check:
 w.try:
   %w.cur = load ptr, ptr %task.slot
   %w.ctx = load ptr, ptr %ctx.slot
-  %w.own = call ptr @zell_task_lazy(ptr %w.cur, i64 8, ptr null, ptr %w.ctx)
+  %w.mark = load i64, ptr %mark.slot
+  %w.own = call ptr @zell_task_lazy(ptr %w.cur, i64 8, ptr null, ptr %w.ctx, i64 %w.mark)
   store ptr %w.own, ptr %task.slot
   %w.first = icmp eq ptr %w.cur, null
   br i1 %w.first, label %w.publish, label %w.save
@@ -336,6 +341,7 @@ entry:
   %ret.slot = alloca i64, align 8
   %task.slot = alloca ptr, align 8
   %ctx.slot = alloca ptr, align 8
+  %mark.slot = alloca i64, align 8
   %a.res = alloca %res.i64, align 8
   %b.res = alloca %res.i64, align 8
   %id   = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
@@ -351,7 +357,7 @@ begin:
   %memphi = phi ptr [ null, %entry ], [ %mem, %alloc ]
   %hdl  = call ptr @llvm.coro.begin(token %id, ptr %memphi)
   store ptr null, ptr %task.slot
-  %ctx0 = call ptr @zell_task_get_ctx()
+  %ctx0 = call ptr @zell_coro_enter(ptr %mark.slot)
   store ptr %ctx0, ptr %ctx.slot
   ; `var a = await leaf(x)`: always the fast path
   call void @leaf(i64 %x, ptr %a.res)
@@ -372,7 +378,8 @@ l.check:
 l.try:
   %l.cur = load ptr, ptr %task.slot
   %l.ctx = load ptr, ptr %ctx.slot
-  %l.own = call ptr @zell_task_lazy(ptr %l.cur, i64 8, ptr null, ptr %l.ctx)
+  %l.mark = load i64, ptr %mark.slot
+  %l.own = call ptr @zell_task_lazy(ptr %l.cur, i64 8, ptr null, ptr %l.ctx, i64 %l.mark)
   store ptr %l.own, ptr %task.slot
   %l.first = icmp eq ptr %l.cur, null
   br i1 %l.first, label %l.publish, label %l.save
@@ -419,7 +426,8 @@ w.check:
 w.try:
   %w.cur = load ptr, ptr %task.slot
   %w.ctx = load ptr, ptr %ctx.slot
-  %w.own = call ptr @zell_task_lazy(ptr %w.cur, i64 8, ptr null, ptr %w.ctx)
+  %w.mark = load i64, ptr %mark.slot
+  %w.own = call ptr @zell_task_lazy(ptr %w.cur, i64 8, ptr null, ptr %w.ctx, i64 %w.mark)
   store ptr %w.own, ptr %task.slot
   %w.first = icmp eq ptr %w.cur, null
   br i1 %w.first, label %w.publish, label %w.save
@@ -836,6 +844,7 @@ entry:
   %ret.slot = alloca i64, align 8
   %task.slot = alloca ptr, align 8
   %ctx.slot = alloca ptr, align 8
+  %mark.slot = alloca i64, align 8
   %ra = alloca %res.i64, align 8
   %rb = alloca %res.i64, align 8
   %rc = alloca %res.lk.e, align 8
@@ -852,7 +861,7 @@ begin:
   %memphi = phi ptr [ null, %entry ], [ %mem, %alloc ]
   %hdl  = call ptr @llvm.coro.begin(token %id, ptr %memphi)
   store ptr null, ptr %task.slot
-  %ctx0 = call ptr @zell_task_get_ctx()
+  %ctx0 = call ptr @zell_coro_enter(ptr %mark.slot)
   store ptr %ctx0, ptr %ctx.slot
   ; `var a = await lwork(x)`: the frame handle as the slot's word
   store ptr %hdl, ptr %ra
@@ -868,7 +877,8 @@ a.try:                                      ; this frame suspends last: it publi
 
 a.mk:                                       ; its first suspension: its task, made current
   %a.ctx = load ptr, ptr %ctx.slot
-  %a.own = call ptr @zell_task_lazy(ptr null, i64 8, ptr null, ptr %a.ctx)
+  %a.mark = load i64, ptr %mark.slot
+  %a.own = call ptr @zell_task_lazy(ptr null, i64 8, ptr null, ptr %a.ctx, i64 %a.mark)
   store ptr %a.own, ptr %task.slot
   store ptr %a.own, ptr %res                ; the caller gets the task (its word was NULL)
   br label %a.save
@@ -914,7 +924,8 @@ c.try:                                      ; this frame suspends last: it publi
 
 c.mk:                                       ; its first suspension: its task, made current
   %c.ctx = load ptr, ptr %ctx.slot
-  %c.own = call ptr @zell_task_lazy(ptr null, i64 8, ptr null, ptr %c.ctx)
+  %c.mark = load i64, ptr %mark.slot
+  %c.own = call ptr @zell_task_lazy(ptr null, i64 8, ptr null, ptr %c.ctx, i64 %c.mark)
   store ptr %c.own, ptr %task.slot
   store ptr %c.own, ptr %res                ; the caller gets the task (its word was NULL)
   br label %c.save

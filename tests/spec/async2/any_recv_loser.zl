@@ -1,0 +1,48 @@
+// test: a Recv that loses in task.Any is cancelled and leaves the channel's queue: the next Send reaches a live receiver and no value is lost (LANGUAGE_FEEDBACK 42), before and after main's first suspension
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.any_recv_loser
+
+import io
+
+async func recv(ch task.Channel<int>) int {
+    return try await ch.Recv() else -1
+}
+
+async func tick(ms int) int {
+    await task.Delay(ms)
+    return -2
+}
+
+async func send(ch task.Channel<int>, v int) {
+    await ch.Send(v)
+}
+
+// The stand-in for `select { case v := <-ch: ... case <-time.After(ms): }`.
+async func recvOrTimeout(ch task.Channel<int>, ms int) int {
+    return await task.Any(recv(ch), tick(ms))
+}
+
+async func main() {
+    var ch = task.Channel<int>(0)
+    // Before main has suspended: no value, the timer wins three times.
+    for round in 0..3 {
+        println("round", round, await recvOrTimeout(ch, 2))
+    }
+    // A fresh receiver gets the next value.
+    var p = send(ch, 42)
+    println("got", try await ch.Recv() else -1)
+    await p
+    // Alternating: a timeout (the Recv loses), then a value that arrives
+    // while the next Recv waits; nothing is lost on the way.
+    var sum = 0
+    for i in 1..4 {
+        var t = await recvOrTimeout(ch, 1)
+        var s = send(ch, i * 10)
+        var v = await recvOrTimeout(ch, 5000)
+        await s
+        println("timeout", t, "value", v)
+        sum += v
+    }
+    println("sum", sum)
+}

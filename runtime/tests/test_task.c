@@ -142,6 +142,7 @@ typedef struct lk_frame {
     lk_res *res;                  /* the caller's slot */
     void *link;                   /* the awaiter, once linked */
     zell_object *ctx0;            /* the caller's context, +1 */
+    int64_t mark;                 /* zell_coro_enter's hook mark */
     zell_task *wait;              /* leaf: the awaited task */
     zell_task *own;               /* root: its task */
     lk_res sub;                   /* the callee's slot */
@@ -218,7 +219,7 @@ static void lk_start(lk_frame *f, lk_res *res, int depth, int root) {
     memset(f, 0, sizeof *f);
     f->depth = depth;
     f->res = res;
-    f->ctx0 = zell_task_get_ctx();
+    f->ctx0 = zell_coro_enter(&f->mark);
     if (depth == 0) {
         f->resume = lk_leaf_resumed;
         zell_task *t = zell_task_new_plain(0, NULL);
@@ -243,7 +244,7 @@ static void lk_start(lk_frame *f, lk_res *res, int depth, int root) {
     }
     assert(f->sub.word == ZELL_LINK_LINKED);
     if (root) {
-        zell_task *own = zell_task_lazy(NULL, 8, NULL, f->ctx0);
+        zell_task *own = zell_task_lazy(NULL, 8, NULL, f->ctx0, f->mark);
         f->own = own;
         res->word = (uintptr_t)own;
         zell_coro_register(true);   /* publishes the chain; posts it if the task is done */
@@ -906,6 +907,72 @@ TEST(channel_any_delay_wins) {
     }
 }
 
+/* A coroutine `async func recv(ch) int { return try await ch.Recv() else -1 }`
+ * by hand (ABI.md 10.3): the receive starts before the first suspension, so
+ * its cancel hook goes on the current task (or, with none, the orphan
+ * list) and zell_task_lazy moves it onto the coroutine's task. A loser of
+ * task.Any is cancelled, so its queued receive leaves the channel and the
+ * next Send reaches a fresh receiver (LANGUAGE_FEEDBACK 42). */
+typedef struct { zell_task *own, *w; } rw_frame;
+
+static void rw_resumed(void *fr) {
+    rw_frame *f = fr;
+    int64_t *r = zell_task_result(f->w);
+    int64_t v = r[0] ? r[1] : -1;
+    zell_release(f->w);
+    zell_task *own = f->own;
+    free(f);
+    zell_task_complete(own, &v);
+    zell_release(own);   /* the frame's reference */
+}
+
+static zell_task *rw_start(zell_chan *ch) {
+    rw_frame *f = malloc(sizeof *f);
+    int64_t mark;
+    zell_object *ctx0 = zell_coro_enter(&mark);
+    f->w = zell_chan_recv_async(ch);
+    assert(!zell_task_is_done(f->w));
+    f->own = zell_task_lazy(NULL, 8, NULL, ctx0, mark);
+    zell_task *own = f->own;   /* the ramp's reference, for the caller */
+    if (!zell_task_add_continuation(f->w, rw_resumed, f)) rw_resumed(f);
+    return own;
+}
+
+static void any_loser_round(int scoped) {
+    zell_chan *ch = zell_chan_new(8, NULL, 0);
+    zell_task *scope = NULL, *prev = NULL;
+    if (scoped) {
+        scope = zell_task_new_scope();
+        prev = zell_task_enter_scope(scope);
+    }
+    zell_task *in[2] = { rw_start(ch), zell_task_delay(1) };
+    zell_task *any = zell_task_any(in, 2);
+    if (scoped) {
+        zell_task_leave_scope(prev);
+        zell_release(prev);
+    }
+    assert(*(int64_t *)zell_task_await(any) == 1);
+    assert(*(int64_t *)zell_task_await(in[0]) == -1);   /* cancelled, not left queued */
+    zell_task *w2 = zell_chan_recv_async(ch);
+    int64_t v = 42;
+    zell_task *s = zell_chan_send_async(ch, &v);
+    assert(zell_task_is_done(w2) && zell_task_is_done(s));   /* handed to the fresh receiver */
+    int64_t *r = zell_task_result(w2);
+    assert(r[0] == 1 && r[1] == 42);
+    zell_release(s);
+    zell_release(w2);
+    zell_release(any);
+    zell_release(in[0]);
+    zell_release(in[1]);
+    zell_release(scope);
+    zell_chan_close(ch);
+    zell_release(ch);
+}
+
+TEST(channel_any_recv_loser_leaves_queue) {
+    for (int i = 0; i < 1000; i++) any_loser_round(i % 2);
+}
+
 /* A cancel (of the scope or of the wait itself) racing the completion of a
  * queued receive and of a queued send, 1000 rounds each (run under tsan). */
 typedef struct { zell_chan *ch; int64_t got; int recv; } race_arg;
@@ -1234,6 +1301,7 @@ int main(int argc, char **argv) {
     RUN(channel_cancel_waits);
     RUN(channel_cancel_from_scope);
     RUN(channel_any_delay_wins);
+    RUN(channel_any_recv_loser_leaves_queue);
     RUN(channel_cancel_races_completion);
     RUN(mutex_contention_1k);
     RUN(mutex_fast_path_respects_guard);

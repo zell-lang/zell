@@ -332,14 +332,14 @@ async func RunBatch(list []Job, workers int, depth int, run task.Context) ([]Res
 
 The service submits a job on every tick until a signal arrives. Go
 would write this as a `select` over a ticker channel and a signal
-channel. Zell has no `select` statement, and the obvious replacement,
-`task.Any(sigs.Recv(), task.Delay(ms))` in a loop, has a trap in the
-current runtime: the losing `Recv` is cancelled but stays registered as
-a receiver, and the next value sent on the channel goes to it and is
-lost (see [LANGUAGE_FEEDBACK.md](../../LANGUAGE_FEEDBACK.md) item 42).
+channel. Zell has no `select` statement. The obvious replacement,
+`task.Any` over a receive and a timer in a loop, works (the losing
+receive is cancelled and leaves the channel), but it is not atomic like
+`select`: a signal that arrives in the very instant the tick wins can be
+taken by the receive that is being cancelled, and then it is gone.
 
-So the loop is built from cancellation instead, which has no such
-trap: one task, `watch`, owns the only receive on the signal channel and
+So the loop is built from cancellation instead, which cannot lose a
+signal: one task, `watch`, owns the only receive on the signal channel and
 cancels a scope when the signal comes; the loop waits for each tick
 inside that scope. A cancelled `task.Delay` returns at once, so the
 signal ends the wait immediately and the loop sees `stop.IsCancelled()`.

@@ -1,0 +1,8 @@
+round 0 -2
+round 1 -2
+round 2 -2
+got 42
+timeout -2 value 10
+timeout -2 value 20
+timeout -2 value 30
+sum 60
