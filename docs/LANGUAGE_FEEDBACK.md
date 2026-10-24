@@ -17,20 +17,20 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
    is special-cased), so `@Conf(enum: "a,b")` had to become `oneOf:`.
 4. **Lower-case attribute structs are private to their package**: user
    libraries must capitalise (`@zconf.Conf`), while std uses `@json`, `@cli.flag`.
-5. **`async func` in an interface is accepted but never satisfied**, with a
+5. **Still open (verified 2026-10-25; the diagnostic now explains the wrapper):** **`async func` in an interface is accepted but never satisfied**, with a
    contradictory message ("method Get has type func(int) int!, want func(int)
    int!"); workaround: `func X() Task<T!>` delegating to a private async method.
-6. **`defer this.mu.Unlock()` on a value `task.Mutex` field is rejected**
+6. **Fixed (verified 2026-10-25):** **`defer this.mu.Unlock()` on a value `task.Mutex` field is rejected**
    ("interior pointer"); the field has to be `*task.Mutex`.
-7. **Suspicious trace locations** in release builds (a framework DI lookup pointing
+7. **Fixed (verified 2026-10-25):** **Suspicious trace locations** in release builds (a framework DI lookup pointing
    at a test file line; the framework has since moved out, see item 17).
 
 ## Standard library
-8. **No `os.Environ()`** — zconf reads `/proc/self/environ` (Linux-only, misses
+8. **Fixed (verified 2026-10-25):** **No `os.Environ()`** — zconf reads `/proc/self/environ` (Linux-only, misses
    `os.Setenv` after start).
-9. **`errors.Is`/`As` ignore a struct's `Unwrap()` method** — only `errors.Wrap`
+9. **Fixed (verified 2026-10-25):** **`errors.Is`/`As` ignore a struct's `Unwrap()` method** — only `errors.Wrap`
    chains are followed.
-10. **The built-in attribute name `json` shadows the `encoding.json` namespace**
+10. **Fixed (verified 2026-10-25):** **The built-in attribute name `json` shadows the `encoding.json` namespace**
     inside a package (`json.Value` → "Value is not a static method of struct
     json"); same for `yaml`, `toml`. Users write `encoding.json.Value`.
 11. **Fixed (2026-10-24):** `json.Value`, `yaml.Value` and `toml.Value` all
@@ -39,12 +39,12 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
 12. `math.Max` is float-only; `slices.Map` over ORM `ToList()` yields `*Row`.
 
 ## Tooling
-13. **`zell test` does not support `async @test`** (`func(*testing.T)
+13. **Fixed (verified 2026-10-25):** **`zell test` does not support `async @test`** (`func(*testing.T)
     Task<void>` is not accepted); async examples with `// Output:` were used.
-14. **`zell test` builds only the package's own `src/`, not its dependencies**
+14. **Fixed (verified 2026-10-25):** **`zell test` builds only the package's own `src/`, not its dependencies**
     (`compiler/src/testrun.rs:97-102`): a package importing a git dependency
     cannot be tested, which forced the `server/` split in the web service.
-15. **A dependency's `*_test.zl` files are compiled into dependents** (zconf's
+15. **Fixed (verified 2026-10-25):** **A dependency's `*_test.zl` files are compiled into dependents** (zconf's
     test-only `Database` struct → "ambiguous name Database" downstream).
 16. `zell init --help` is an "unknown option".
 
@@ -65,7 +65,7 @@ Not an obstacle but noted: OpenAPI 3.1 generation, `web.TestServer`, DI,
 request id / tracing / metrics middleware all worked as documented.
 
 ## Added while writing `example-cli` and `example-worker` (same day)
-18. **`zell test` leaks an internal symbol**: in a package with `src/main.zl` it
+18. **Fixed (verified 2026-10-25):** **`zell test` leaks an internal symbol**: in a package with `src/main.zl` it
     prints `warning[L0007]: function zellUserMain__ is never used` — the lint
     must skip compiler-generated names.
 19. **Fixed:** `cli.App.Out/Errors` writers and `cli.ExitCoder` (2026-10-23);
@@ -75,12 +75,12 @@ request id / tracing / metrics middleware all worked as documented.
     are repeated at every use. Spec decision.
 21. **`in` is a reserved word** — `var in = …` fails; common flag name. Spec
     decision (contextual keyword?).
-22. **`strings` lacks `ContainsAny`, `IndexAny`, `ReplaceAll`**; `Replace`'s doc
+22. **Fixed (verified 2026-10-25):** **`strings` lacks `ContainsAny`, `IndexAny`, `ReplaceAll`**; `Replace`'s doc
     should say whether it replaces every occurrence.
 23. **`encoding.json.Value` / `yaml.Value` are read-only**: no `Set`/`Put` or
     mutable builder beyond `NewObject(keys, values)`; only `toml.Document.Set`
     exists. Editing a document means converting to one's own tree.
-24. **The default logger prints error traces with absolute paths over several
+24. **Fixed (verified 2026-10-25):** **The default logger prints error traces with absolute paths over several
     lines** — noisy in service logs; relative paths (or one line) by default.
 
 ## Decisions (2026-10-23, maintainer)
@@ -116,7 +116,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     interfaces with default methods are forced when the default's `this`
     is typed. `println(1)` no longer loads `reflect`.
 
-27. **Asynchronous destructors (`await using` analogue).** Synchronous
+27. **Ready for the spec (2026-10-25: `sql.Rows.Close()` already returns `Task<void!>`):** **Asynchronous destructors (`await using` analogue).** Synchronous
     `using` is already covered by `Drop` (DESIGN.md "Деструкторы"): no
     `defer f.Close()` is needed, and the examples should stop writing it.
     Proposed design when a `Close() Task<…>` first appears in the stdlib:
@@ -262,3 +262,19 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     helpers (`mustParse`, `parseError` in `testing-guide`); consider
     `testing.Ok(t, f())` returning the value and `testing.Fails(t, f())`
     returning the error.
+52. **Implicit namespaces report "unused import"**: `import task`, `import os`,
+    `import errors`, `import strings` are errors ("unused import") because those
+    namespaces are implicit, while `println` is unknown without `import io`.
+    Either accept (and ignore) an explicit import of an implicit namespace, or
+    make `io` implicit too. Found 2026-10-25 while re-verifying this file.
+
+## Verification (2026-10-25)
+
+Every open item above was re-checked on HEAD 6f25c88 with a small program
+(release build). Items 6, 7, 8, 9, 10, 13, 14, 15, 18, 22 and 24 are fixed
+and marked so; 5, 23, 28 (sync frames below a task; `sql.DB/Tx` without
+`Drop`) and 29 still hold; 27 has met its own precondition. Of item 22,
+`strings.Builder.WriteRune` is still missing (see 36). `defer f.Close()` on a
+`void!` close (38) is rejected by design, with a message that proposes a
+closure. 42 and 44 are runtime bugs (a losing `Recv` in `task.Any` swallows
+the next `Send`; arenas crash in `zell_retain` past ~12 000 objects).
