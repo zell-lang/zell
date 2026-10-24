@@ -148,6 +148,22 @@ The same cross-build works for `windows-amd64` (an `.exe`) and
 `macos-arm64` (a Mach-O executable linked on any host). A step-by-step
 version is in [Getting started](docs/guide/getting-started.md).
 
+`zell init` is optional. `zell run` and `zell build` also take a single
+file (`zell run main.zl`), a plain directory of `.zl` files (`zell run .`)
+or the smallest possible project: a directory with `main.zl` and a
+`zell.toml` beside it,
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+entry = "main.zl"
+```
+
+where the files declare `namespace hello` (the package name is the
+namespace root unless the manifest sets `namespace`). `zell init` just
+writes this manifest and a `src/` layout for you.
+
 ### Editors
 
 - **VS Code**: the extension (highlighting, `zell-lsp`, run/debug code
@@ -324,6 +340,9 @@ x86-64, wall time, best of 5; Go 1.24):
 `net/http`. Details and methodology: [benchmarks/README.md](benchmarks/README.md).
 
 ## Command line
+
+`zell --help` lists the commands and `zell <command> --help` shows the
+options of one.
 
 ```
 zell run   [path] [options] [-- args]   # build and run (a file, a directory, or the project)

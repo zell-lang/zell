@@ -151,3 +151,66 @@ The standard library ships as source next to the compiler
 `zell doc net.http` works offline. Functions implemented in the C
 runtime have declaration files (`std/strings/strings_extern.zl`) with
 their documentation.
+
+A few small things that are easy to miss:
+
+- `strings.ContainsAny(s, chars)` and `strings.IndexAny(s, chars)` look
+  for any of the runes of `chars`; `strings.ReplaceAll` is `Replace`
+  under Go's name.
+- `os.Environ()` returns the environment as `KEY=value` strings,
+  including changes made with `os.Setenv`.
+- `json.Value`, `yaml.Value` and `toml.Value` share the container tests
+  `IsObject()` and `IsArray()`, so code that walks a document does not
+  care which format it came from.
+- `cli.App.Run` returns the exit code. Help and version text go to
+  `App.Out` (stdout when nil), error messages to `App.Errors` (stderr).
+  A command error that has `func ExitCode() int` (`cli.ExitCoder`)
+  chooses the code, also when the command wrapped it with `?("context")`.
+
+```zell
+namespace guide.packages.small
+
+import io
+import encoding
+
+struct Missing {
+    func Message() string {
+        return "no such thing"
+    }
+
+    func ExitCode() int {
+        return 4
+    }
+}
+
+func find() void! {
+    return Missing{}
+}
+
+func main() void! {
+    println(strings.ContainsAny("hello", "xyz"), strings.IndexAny("hello", "lo"))
+    println(strings.ReplaceAll("a-b-c", "-", "+"))
+    println(len(os.Environ()) > 0)
+
+    var v = json.ParseValue("{\"a\": [1, 2]}")?
+    println(v.IsObject(), v.IsArray())
+
+    var out = bytes.Buffer{}
+    var err = bytes.Buffer{}
+    var app = cli.App{Name: "tool", Version: "1.0", Out: &out, Errors: &err, Commands: [
+        cli.Command{Name: "find", Run: func(c *cli.Context) void! {
+            find()?("find")
+        }},
+    ]}
+    println(app.Run(["tool", "--version"]), out.String())
+    println(app.Run(["tool", "find"]), err.String())
+}
+// Output:
+// false 2
+// a+b+c
+// true
+// true false
+// 0 tool 1.0
+//
+// 4 error: find: no such thing
+```

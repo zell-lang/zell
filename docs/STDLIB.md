@@ -31,7 +31,7 @@
 | `math/cmplx` | `math.complex` | ✅ есть (`Complex{Re, Im}`: `Add/Sub/Mul/Div/Neg/Conj/Abs/Phase/Scale/String`; `Exp/Log/Sqrt/Pow/Sin/Cos/Polar/Rect/IsNaN/IsInf`) | методы с именами интерфейсов операторов (операторы — когда появятся) |
 | `math/big` | `math.big` | ✅ есть (`Int`: арифметика и операторы `+ - * / % < ==` (`/` усекает как `int`, евклидово — `DivEuclid`/`Mod`), `Quo/Rem`, `Exp`, `ModInverse`, `GCD`, `Sqrt`, `Lsh/Rsh`, `ProbablyPrime`, `Text/ParseInt` 2..36, `Bytes/FromBytes`; `Rat`; `Decimal` с 7 режимами округления (`/` и `%` дают `Decimal!`, `DivRound(y, scale, mode)`); лимбы на C: Karatsuba, Knuth D); `Float` не планируется: точные вычисления — `Rat` и `Decimal` (деньги, фиксированная точность с явным округлением), приближённые — `float`; двоичная плавающая точка произвольной точности (`big.Float` Go: точность в битах, режимы округления IEEE) нужна редко и не окупает реализацию | неизменяемые значения, `Decimal` в stdlib, методы с именами интерфейсов операторов |
 | `unicode`, `unicode/utf8`, `unicode/utf16` | `unicode`, `unicode.utf8/utf16` | ✅ есть (полные таблицы Unicode 15 из Go: `Is*`, `ToUpper/ToLower/ToTitle`, `SimpleFold`; utf8 `RuneLen/EncodeRune/AppendRune/DecodeRune*/Valid*/RuneCount*/FullRune`; utf16 `Encode/Decode/EncodeRune/DecodeRune`); нет нормализации NFC/NFD | генератор таблиц `scripts/gen-unicode-tables.py` |
-| `strings` | `strings` | ✅ есть | `Builder`, `Runes`, `Reverse`, `Pad*`, `Title` |
+| `strings` | `strings` | ✅ есть (`Contains`, `ContainsAny`, `Index`, `IndexAny`, `Replace` — каждое вхождение, `ReplaceAll` — то же под именем Go, …) | `Builder`, `Runes`, `Reverse`, `Pad*`, `Title` |
 | `bytes` | `bytes` | ✅ есть (`Buffer` + функции `strings` над `[]byte`) | `Buffer` реализует `io.Reader/Writer` |
 | `strconv` | `strconv` | ✅ есть (`ParseInt/ParseUint` с базами и `_`, `*Bits`, `ParseFloat`, `ParseBool`, `Format*`, `Itoa/Atoi`, `Quote/QuoteToASCII/QuoteRune/Unquote`, `Parse<T>`/`Format<T>`) | generic `Parse<T>`/`Format<T>`, `errors.Is(err, strconv.ErrSyntax)` |
 | `slices` | `slices` | ✅ есть (`Sort/SortBy/SortFunc` стабильные, `BinarySearch*`, `Index*/Contains*`, `Map/Filter/Reduce`, `Unique/Compact`, `Chunk/Window/Zip/Flatten/GroupBy`, `Min/Max/Sum`, `Equal/Compare`, `Insert/Delete`, `Fill/Repeat/Shuffle`) | `Map`, `Filter`, `Reduce`, `Chunk`, `Window`, `Unique`, `Zip` generic |
@@ -52,13 +52,13 @@
 | `io` | `io` (`Reader`, `Writer`, `Closer`, `Seeker`, `Copy`, `ReadAllFrom`, `LimitReader`, `MultiWriter`, `Pipe`, `BoundedPipe`, `TeeReader`) | ✅ есть (+ `AsyncReader/AsyncWriter`, их реализует `net.Conn`; `os.File`) | интерфейсы async-совместимые (`AsyncReader`); нет `SendFile` в `Copy` |
 | `bufio` | `io.Buffered*`, `Scanner` | ✅ есть (`ReadLine/ReadString/ReadBytes/Peek/ReadRune`, `Flush`, `Scanner` с `ScanLines/Words/Runes/Bytes`, `io.Lines`/`Words`) | `Lines()`/`Words()` (срезами, итераторов нет) |
 | `fmt` | `fmt` | ✅ есть (Format, Sprintf) | `{0}`-шаблоны проверяются при компиляции, `Stringer` интерфейс |
-| `os` | `os` | ✅ есть (args, env, exit, cwd, hostname…) | константы платформы, `OnInterrupt` |
+| `os` | `os` | ✅ есть (args, `Getenv`/`Setenv`/`Environ` (все переменные как `KEY=value`, с учётом `Setenv`), exit, cwd, hostname…) | константы платформы, `OnInterrupt` |
 | `os/signal` | `os.signal` | ✅ есть (`Wait`, `WaitAny`, `Notify` → `Channel<int>`, `Catch`, `Ignore`, `Reset`, `Raise`; self-pipe + поток) | async `await signal.Wait(SIGTERM)` |
 | `os/exec` | `process` | ✅ есть (`Run/RunWith/Output`, `Start` с пайпами `AsyncReader/AsyncWriter`, `Wait/Kill/Signal`, env/dir, `Timeout` и отмена задачи, `LookPath`; pidfd) | async `Run`, пайпы как `Reader/Writer`, таймауты через контекст |
 | `os/user` | `os.user` | ✅ есть (`Current`, `Lookup`, `LookupId`, `LookupGroup(Id)`) | — |
 | `io/fs`, `path`, `path/filepath` | `fs` (+ `fs.Path` функции) | ✅ есть | `Walk` async, glob, `Watch` (inotify/FSEvents) |
 | `embed` | `@embed("file")` атрибут | ✅ есть (`string`, `[]byte`, `const`, `embed.FS` из каталога или `dir/*.ext`) | проверяется при компиляции, `embed.FS` |
-| `flag` | `cli` | ✅ есть (подкоманды, флаги из полей структуры `@cli.flag(...)` (умолчание — значение поля или `default: "текст"`), env fallback, help, «did you mean», completion bash/zsh/fish; ошибка команды с `ExitCode() int` (`cli.ExitCoder`) задаёт код выхода `App.Run`) | подкоманды, help из атрибутов, env fallback |
+| `flag` | `cli` | ✅ есть (подкоманды, флаги из полей структуры `@cli.flag(...)` (умолчание — значение поля или `default: "текст"`), env fallback, help, «did you mean», completion bash/zsh/fish; ошибка команды с `ExitCode() int` (`cli.ExitCoder`) задаёт код выхода `App.Run`, в том числе через обёртки `?("ctx")`; `App.Out` — куда писать help и версию (по умолчанию stdout), `App.Errors` — сообщения об ошибках (stderr)) | подкоманды, help из атрибутов, env fallback |
 | `sync`, `sync/atomic` | `task` (`Mutex`, `WaitGroup`) + `sync` (`RwMutex`, `Semaphore`, `Barrier`, `Once`, `AtomicInt/AtomicBool`, `Atomic<T>`, `Pool<T>`) | ✅ есть | async-aware мьютексы, generic атомики |
 | `context` | контекст задачи в `task` | ✅ есть | неявная передача, типизированные ключи, отмена дерева |
 | `math/rand`, `crypto/rand` | `random`, `crypto.rand` | ✅ есть | — |
@@ -76,7 +76,7 @@
 
 | Go | Zell | Статус | Лучше чем в Go |
 |---|---|---|---|
-| `encoding/json` | `encoding.json` | ✅ есть (Parse<T>/Format/Value) | compile-time, пути в ошибках, атрибуты |
+| `encoding/json` | `encoding.json` | ✅ есть (Parse<T>/Format/Value; `json.Value`, `yaml.Value` и `toml.Value` делят `IsObject()`/`IsArray()`) | compile-time, пути в ошибках, атрибуты |
 | `encoding/xml` | `encoding.xml` | ✅ есть (pull-`Reader` с пространствами имён, дерево `Value`, `Writer`, `Parse<T>/Decode<T>/Format<T>` с `@xml(name, attr, text, ns, omitEmpty, skip)`; C-токенизатор; DTD не раскрывается) | та же модель, pull-reader, атрибуты вместо тегов |
 | — (yaml, toml в Go нет) | `encoding.yaml`, `toml` | ✅ есть: yaml (YAML 1.2 core: блоки, flow, якоря/алиасы с лимитом, merge `<<`, теги, многодокументность; `Value`, `Parse<T>/Format<T>` с `@yaml`; сверено с PyYAML), toml (TOML 1.0 полностью, даты, `Parse<T>/Format<T>` с `@toml`; `Document` правит текст с сохранением комментариев и порядка; сверено с tomllib) | в стандартной библиотеке, round-trip с комментариями (toml `Document`; в yaml комментарии не сохраняются) |
 | `encoding/csv` | `encoding.csv` | ✅ есть (`Reader`/`Writer` как в Go, `LazyQuotes`, `FieldsPerRecord`, `Read<T>/ReadNoHeader<T>/Write<T>` с `@csv(name, index, skip, omitEmpty)`; сверено с Go) | `Read<T>`/`Write<T>` в структуры |

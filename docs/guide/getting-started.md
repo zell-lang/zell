@@ -49,8 +49,23 @@ func main() {
 // Hello, world!
 ```
 
-A single file runs without a project: `zell run hello.zl`. More about
-manifests and dependencies: [Packages](packages.md).
+`zell init` is optional. A single file runs without a project
+(`zell run hello.zl`), and so does a plain directory of `.zl` files
+(`zell run .`). The smallest project is a directory with `main.zl` and a
+`zell.toml` beside it:
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+entry = "main.zl"
+```
+
+The files then declare `namespace hello`: the package name is the root of
+its namespaces unless the manifest sets `namespace`. `zell run` finds the
+manifest from the current directory. Every command has its own help:
+`zell --help` lists the commands and `zell run --help` shows the build
+options. More about manifests and dependencies: [Packages](packages.md).
 
 ## 3. Test and format
 
