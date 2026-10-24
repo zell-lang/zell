@@ -1,35 +1,30 @@
 # Examples
 
-Two places to learn from running code: the small programs in this
-repository, and larger showcase projects in their own repositories.
+Complete programs, shown file by file, the way Zell is really written:
+each one is a project with a manifest, several source files split into
+namespaces, tests where they make sense, and a page that walks through
+every file and shows all of its code. They are deterministic and
+self-contained (fixed inputs, servers on a loopback port, databases in a
+temporary file), so `zell run` prints the same output everywhere, and
+`cargo test` (`compiler/tests/doc_examples.rs`) runs each of them, checks
+that output byte for byte, runs its tests and its leak check, and checks
+that every file on the page is the file in the repository.
 
-## In this repository: `examples/`
+| Example | What it is |
+|---|---|
+| [wordfreq](examples/wordfreq/README.md) | text processing: read files line by line, count words in a map, sort, print a table, write a report and read it back; errors at the boundary |
+| [todo-cli](examples/todo-cli/README.md) | a command-line tool with `cli` subcommands and flags on structs, a JSON file as storage, custom error types and exit codes |
+| [bookshelf-api](examples/bookshelf-api/README.md) | an HTTP JSON API on `net.http`: router, handlers over a repository interface, middleware for logging and error mapping, graceful shutdown |
+| [inventory-db](examples/inventory-db/README.md) | `database.sql` with SQLite: migrations, typed `Query<T>`, transactions that roll back, report queries, `Drop` |
+| [validate](examples/validate/README.md) | your own attributes and reflection: a generic validator on `reflect.Fields<T>()`, a command registry on `reflect.TypesWith<A>()`, `reflect.Error` |
 
-Every program in [`examples/`](../examples) has a byte-exact `.out` file and
-is built and run by `cargo test`. Run one with:
+Run one with:
 
 ```sh
-zell run examples/channels.zl
+cd docs/examples/wordfreq
+zell run
+zell test
 ```
-
-The output rules are in [examples/README.md](../examples/README.md). A
-selection:
-
-| Example | What it shows |
-|---|---|
-| [`hello.zl`](../examples/hello.zl) | the smallest program |
-| [`errors.zl`](../examples/errors.zl), [`try_block.zl`](../examples/try_block.zl) | `T!`, sentinel errors, `?`, `try ... catch`, block `try` |
-| [`errors_trace.zl`](../examples/errors_trace.zl) | error traces: where an error was created and passed through |
-| [`generics.zl`](../examples/generics.zl) | generic functions and structs, constraints, inference |
-| [`async.zl`](../examples/async.zl), [`channels.zl`](../examples/channels.zl) | tasks, `await`, a producer/consumer pipeline, `WaitGroup`, mutexes |
-| [`cancel.zl`](../examples/cancel.zl) | cancellation, timeouts and `task.Any` through the task context |
-| [`weak.zl`](../examples/weak.zl), [`drop.zl`](../examples/drop.zl) | `weak` back pointers and destructors: memory without a GC |
-| [`reflection.zl`](../examples/reflection.zl) | attributes as values and compile-time reflection |
-| [`json.zl`](../examples/json.zl) | typed JSON through reflection, `@json` attributes |
-| [`sql.zl`](../examples/sql.zl) | `database.sql` with SQLite: typed `Query<T>`, transactions |
-| [`http_server.zl`](../examples/http_server.zl) | an HTTP router queried by a client in the same program |
-| [`cli_tool.zl`](../examples/cli_tool.zl) | a CLI with subcommands and flags declared on structs |
-| [`log.zl`](../examples/log.zl), [`metrics.zl`](../examples/metrics.zl) | structured logging with message templates; Prometheus metrics |
 
 ## Showcase repositories
 
@@ -94,3 +89,27 @@ git clone https://github.com/zell-lang/example-worker && cd example-worker
 zell run           # Ctrl-C stops it gracefully
 zell test
 ```
+
+## Small programs in `examples/`
+
+Every program in [`examples/`](../examples) is a small program (most are one file) with a
+byte-exact `.out` file, built and run by `cargo test`; each shows one
+feature in isolation. Run one with `zell run examples/channels.zl`. The
+output rules are in [examples/README.md](../examples/README.md). A
+selection:
+
+| Example | What it shows |
+|---|---|
+| [`hello.zl`](../examples/hello.zl) | the smallest program |
+| [`errors.zl`](../examples/errors.zl), [`try_block.zl`](../examples/try_block.zl) | `T!`, sentinel errors, `?`, `try ... catch`, block `try` |
+| [`errors_trace.zl`](../examples/errors_trace.zl) | error traces: where an error was created and passed through |
+| [`generics.zl`](../examples/generics.zl) | generic functions and structs, constraints, inference |
+| [`async.zl`](../examples/async.zl), [`channels.zl`](../examples/channels.zl) | tasks, `await`, a producer/consumer pipeline, `WaitGroup`, mutexes |
+| [`cancel.zl`](../examples/cancel.zl) | cancellation, timeouts and `task.Any` through the task context |
+| [`weak.zl`](../examples/weak.zl), [`drop.zl`](../examples/drop.zl) | `weak` back pointers and destructors: memory without a GC |
+| [`reflection.zl`](../examples/reflection.zl) | attributes as values and compile-time reflection |
+| [`json.zl`](../examples/json.zl) | typed JSON through reflection, `@json` attributes |
+| [`sql.zl`](../examples/sql.zl) | `database.sql` with SQLite: typed `Query<T>`, transactions |
+| [`http_server.zl`](../examples/http_server.zl) | an HTTP router queried by a client in the same program |
+| [`cli_tool.zl`](../examples/cli_tool.zl) | a CLI with subcommands and flags declared on structs |
+| [`log.zl`](../examples/log.zl), [`metrics.zl`](../examples/metrics.zl) | structured logging with message templates; Prometheus metrics |
