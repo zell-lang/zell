@@ -1,0 +1,82 @@
+// A command registry with no registration code. Every struct marked
+// @Command anywhere in the program (this package and all of its
+// dependencies) is listed by reflect.TypesWith<Command>(): the compiler
+// builds that list, so there is no start-up scan and nothing to forget.
+//
+// A command is a struct with a method Run whose parameters are the
+// command's arguments. The registry reads their names and types from
+// MethodInfo.Params to print usage and convert the strings of a command
+// line, then calls Run with MethodInfo.Invoke.
+namespace validate.registry
+
+@attribute(targets: [reflect.Target.Struct])
+struct Command {
+    Name string
+    Help string
+}
+
+// Usage lists the commands with their arguments, e.g. `add <a int> <b int>`.
+func Usage() string {
+    var lines []string = []
+    for t in reflect.TypesWith<Command>() {
+        var c = t.Attribute<Command>()
+        var args = slices.Map(
+            t.Method("Run").Params,
+            (p *reflect.ParamInfo) => "<" + p.Name + " " + p.Type.Name + ">",
+        )
+        var head = strings.Trim(c.Name + " " + strings.Join(args, " "))
+        lines = append(lines, "  " + strings.PadRight(head, 46, " ") + c.Help)
+    }
+    return strings.Join(lines, "\n")
+}
+
+// Run finds the command by name, converts args to the types of Run's
+// parameters and invokes it. Invoke takes and returns `any`, so this is
+// the dynamic path: one generic dispatcher for commands it has never
+// seen. The typed path, when the signature is fixed, is
+// t.Method("Run").Call<func(*T, int) string>(), as fast as a direct call.
+func Run(line []string) string! {
+    if len(line) == 0 {
+        return error("no command")
+    }
+    for t in reflect.TypesWith<Command>() {
+        if t.Attribute<Command>().Name != line[0] {
+            continue
+        }
+        var m = t.Method("Run")
+        if len(line) - 1 != len(m.Params) {
+            return error(
+                fmt.Format(
+                    "{0}: expected {1} argument(s), got {2}",
+                    line[0],
+                    len(m.Params),
+                    len(line) - 1,
+                ),
+            )
+        }
+        var args []any = []
+        for p in m.Params {
+            args = append(args, convert(line[p.Index + 1], p)?)
+        }
+        // t.New() makes a fresh receiver (*T, zeroed) for every call.
+        var result = m.Invoke(t.New(), args)?
+        switch result {
+            case string s: return s
+            default:
+                return fmt.Format("{0}", result)
+        }
+    }
+    return error("unknown command " + strconv.Quote(line[0]))
+}
+
+// convert parses one argument by the parameter's type kind; the
+// parameter's name makes the error message useful.
+func convert(s string, p *reflect.ParamInfo) any! {
+    switch p.Type.Kind {
+        case reflect.Kind.String: return s
+        case reflect.Kind.Int: return strconv.Atoi(s)?(p.Name)
+        case reflect.Kind.Float: return strconv.ParseFloat(s)?(p.Name)
+        case reflect.Kind.Bool: return strconv.ParseBool(s)?(p.Name)
+    }
+    return error(fmt.Format("{0}: parameters of type {1} are not supported", p.Name, p.Type.Name))
+}

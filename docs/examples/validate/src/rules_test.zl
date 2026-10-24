@@ -1,0 +1,41 @@
+// Tests for the validator, on small structs declared just for them: the
+// rules come from attributes, so a test type is the clearest fixture.
+namespace validate.tests
+
+import validate.attrs
+import validate.rules
+
+struct Point {
+    @Range(Min: 0, Max: 10) X int
+    @Range(Min: 0)          Y int
+}
+
+struct Named {
+    @Required @Label("the name") Name string
+    Note string
+}
+
+@test func TestRangeOnNumbers(t *testing.T) {
+    testing.Equal(t, len(Validate(Point{X: 5, Y: 100})), 0)
+    var errs = Validate(Point{X: 11, Y: -1})
+    testing.Equal(t, len(errs), 2)
+    testing.Equal(t, errs[0].Message(), "x must be between 0 and 10")
+    testing.Equal(t, errs[1].Message(), "y must be at least 0")
+}
+
+@test func TestRequiredUsesTheLabel(t *testing.T) {
+    var errs = Validate(Named{Note: "unlabelled fields without rules are ignored"})
+    testing.Equal(t, len(errs), 1)
+    testing.Equal(t, errs[0].Path, "name")
+    testing.Equal(t, errs[0].Message(), "the name is required")
+}
+
+@test func TestCheckReturnsAllProblems(t *testing.T) {
+    try Check(Point{X: -1, Y: -1}) catch err {
+        var inv Invalid
+        testing.True(t, errors.As(err, &inv), "Invalid expected")
+        testing.Equal(t, len(inv.Errors), 2)
+        return
+    }
+    t.Fatal("Check accepted an invalid point")
+}

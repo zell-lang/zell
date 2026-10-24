@@ -1,0 +1,39 @@
+an empty form:
+  name       user name is required
+  mail       e-mail is required
+  age        age must be between 13 and 130
+  tags       tags must have a number of items between 1 and 3
+  home.city  home.city is required
+  home.zip   postal code must have a length of exactly 5
+a form with mistakes:
+  name       user name must have a length between 3 and 16
+  mail       e-mail is not an e-mail address
+  age        age must be between 13 and 130
+  tags       tags must have a number of items between 1 and 3
+  home.zip   postal code must have a length of exactly 5
+a good form:
+  valid
+commands:
+  check <name string> <mail string> <age int>   validate a sign-up from arguments
+  add <a int> <b int>                           add two integers
+  schema                                        print the rules of SignUp
+$ schema
+validate.SignUp
+  Name       string     required, range 3..16, label "user name"
+  Mail       string     required, email, label "e-mail"
+  Age        int        range 13..130
+  Tags       []string   range 1..3
+  Home       Address
+  Newsletter bool
+$ add 2 40
+42
+$ add 2
+error: add: expected 2 argument(s), got 1
+$ add two 40
+error: a: strconv.Atoi: parsing "two": invalid syntax
+$ check bob bob@example.com 40
+ok
+$ check b bob 200
+3 problem(s): user name must have a length between 3 and 16; e-mail is not an e-mail address; age must be between 13 and 130
+$ deploy
+error: unknown command "deploy"

@@ -1,0 +1,5 @@
+[package]
+name = "validate"
+version = "0.1.0"
+namespace = "validate"
+entry = "src/main.zl"

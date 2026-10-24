@@ -1,0 +1,150 @@
+// Validate<T>: a generic validator driven by the attributes of attrs.
+//
+// reflect.Fields<T>() in a generic function is unrolled by the compiler:
+// the loop body is generated once per field of T, f.Get(v) is a direct
+// field access with the field's static type, and f.Attribute<A>() is the
+// attribute value written on that field (nil when there is none). The
+// result is the code you would write by hand for each struct, with no
+// run-time type inspection.
+namespace validate.rules
+
+import validate.attrs
+
+// FieldError is one problem with one field. Path is the field's position
+// ("address.zip" for nested structs), Label what to show to a person.
+struct FieldError {
+    Path    string
+    Label   string
+    Problem string
+
+    func Message() string {
+        return this.Label + " " + this.Problem
+    }
+}
+
+// Invalid is the error returned by Check: all problems at once, so a
+// form can show every message, not just the first.
+struct Invalid {
+    Errors []FieldError
+
+    func Message() string {
+        return strings.Join(slices.Map(this.Errors, (e FieldError) => e.Message()), "; ")
+    }
+}
+
+// Validate returns the problems of v, in field order. Only structs can be
+// validated: for any other T the static `if` below raises reflect.Error,
+// a compile-time error naming the instantiation that caused it,
+// Validate<int> (the library's static_assert). The branch is compiled
+// only for the T it applies to, so for structs it costs nothing.
+func Validate<T>(v T) []FieldError {
+    if reflect.TypeOf<T>().Kind != reflect.Kind.Struct {
+        reflect.Error("Validate needs a struct, got " + reflect.TypeOf<T>().Name)
+        return []
+    } else {
+        return fieldsOf(v, "")
+    }
+}
+
+// Check is Validate for code that works with T! errors.
+func Check<T>(v T) void! {
+    var errs = Validate(v)
+    if len(errs) > 0 {
+        return Invalid{Errors: errs}
+    }
+}
+
+func fieldsOf<T>(v T, prefix string) []FieldError {
+    var out []FieldError = []
+    for f in reflect.Fields<T>() {
+        var path = prefix + strings.ToLower(f.Name)
+        var label = path
+        var l = f.Attribute<Label>()
+        if l != nil {
+            label = l.Text
+        }
+        var value = f.Get(v)
+        if f.Attribute<Required>() != nil && size(value) == 0 {
+            out = append(out, FieldError{Path: path, Label: label, Problem: "is required"})
+            // Further rules would only repeat the same complaint.
+            continue
+        }
+        var r = f.Attribute<Range>()
+        if r != nil {
+            var n = size(value)
+            if n < r.Min || n > r.Max {
+                out = append(out, FieldError{Path: path, Label: label, Problem: describe(value, r)})
+            }
+        }
+        if f.Attribute<Email>() != nil && !looksLikeEmail(text(value)) {
+            out = append(out, FieldError{
+                Path: path,
+                Label: label,
+                Problem: "is not an e-mail address",
+            })
+        }
+        for e in nested(value, path + ".") {
+            out = append(out, e)
+        }
+    }
+    return out
+}
+
+// size is what Required and Range measure. Each branch of the static
+// `if` is compiled only for the field types it matches; a field of any
+// other type (bool, enums, maps) measures 1, so it always passes.
+func size<F>(x F) int {
+    if reflect.TypeOf<F>().Kind == reflect.Kind.Int {
+        return x
+    } else if reflect.TypeOf<F>().Kind == reflect.Kind.String ||
+        reflect.TypeOf<F>().Kind == reflect.Kind.Slice {
+        return len(x)
+    } else {
+        return 1
+    }
+}
+
+func describe<F>(x F, r *Range) string {
+    var what = "must be"
+    var of = ""
+    if reflect.TypeOf<F>().Kind == reflect.Kind.String {
+        what = "must have a length"
+        of = " of"
+    } else if reflect.TypeOf<F>().Kind == reflect.Kind.Slice {
+        what = "must have a number of items"
+        of = " of"
+    }
+    if r.Min == r.Max {
+        return fmt.Format("{0}{1} exactly {2}", what, of, r.Min)
+    }
+    if r.Max == 2147483647 {
+        return fmt.Format("{0}{1} at least {2}", what, of, r.Min)
+    }
+    return fmt.Format("{0} between {1} and {2}", what, r.Min, r.Max)
+}
+
+func text<F>(x F) string {
+    if reflect.TypeOf<F>().Kind == reflect.Kind.String {
+        return x
+    } else {
+        return ""
+    }
+}
+
+// A nested struct field is validated with its own attributes, its paths
+// prefixed by the field name.
+func nested<F>(x F, prefix string) []FieldError {
+    if reflect.TypeOf<F>().Kind == reflect.Kind.Struct {
+        return fieldsOf(x, prefix)
+    } else {
+        return []
+    }
+}
+
+func looksLikeEmail(s string) bool {
+    var at = strings.Index(s, "@")
+    return at > 0 &&
+        strings.LastIndex(s, "@") == at &&
+        strings.Contains(s[at + 1..], ".") &&
+        !strings.ContainsAny(s, " ,;")
+}

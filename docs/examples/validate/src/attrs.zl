@@ -1,0 +1,33 @@
+// The attributes of the validation library. An attribute is an ordinary
+// struct marked @attribute: its fields are the attribute's parameters
+// (with defaults), and `targets` says where it may be written. The
+// compiler checks every use: an unknown attribute, a misspelled
+// parameter or a value of the wrong type is a compile error.
+//
+// The names start with a capital letter because they are used from other
+// namespaces (validate.rules, the application): attributes follow the
+// usual visibility rule.
+namespace validate.attrs
+
+// The field must not be empty: "" for strings, 0 for numbers, no
+// elements for slices.
+@attribute(targets: [reflect.Target.Field])
+struct Required {}
+
+// The value must lie in [Min, Max]: the number itself for numeric
+// fields, the length for strings and slices.
+@attribute(targets: [reflect.Target.Field])
+struct Range {
+    Min int
+    Max int = 2147483647
+}
+
+// A human-readable name for messages; the field name is used without it.
+@attribute(targets: [reflect.Target.Field])
+struct Label {
+    Text string
+}
+
+// The value must look like an e-mail address.
+@attribute(targets: [reflect.Target.Field])
+struct Email {}
