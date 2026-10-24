@@ -1,0 +1,167 @@
+// The subcommands. Each one is a cli.Command whose flags are declared as
+// a struct: cli.FlagsOf<T>() reads the @cli.flag attributes at compile time
+// to build the help text and the parser, and cli.Bind<T>(c) fills a T.
+namespace todo.commands
+
+import todo.model
+import todo.store
+
+// Global flags, accepted before or after the subcommand name.
+struct GlobalFlags {
+    @cli.flag(short: "f", env: "TODO_FILE", help: "the to-do file") File string = "todo.json"
+}
+
+struct AddFlags {
+    @cli.flag(short: "p", help: "low, normal or high") Priority string = "normal"
+    // A []string flag may be repeated: -t home -t errands.
+    @cli.flag(short: "t", help: "a tag (repeatable)") Tag []string
+}
+
+struct ListFlags {
+    @cli.flag(short: "a", help: "include finished items")   All bool
+    @cli.flag(short: "t", help: "only items with this tag") Tag string
+}
+
+// Env bundles what every command needs. The commands receive it instead
+// of reaching for globals, which is what lets main run them against a
+// temporary file and a fixed clock.
+struct Env {
+    Out   io.Writer
+    Today func() string
+}
+
+// withStore opens the store named by --file, runs f, and saves when f
+// succeeded. Every command goes through it, so none of them can forget to
+// save, and a failed command never writes a half-changed list.
+func withStore(env *Env, c *cli.Context, f func(*Store) void!) void! {
+    var g = cli.Bind<GlobalFlags>(c)?
+    var s = Store.Open(g.File, env.Today)?
+    f(s)?
+    s.Save()?
+}
+
+// ids parses the positional arguments as item ids. A bad id is a
+// UsageError, so it exits with 2 like any other mistake on the command line.
+func ids(c *cli.Context) []int! {
+    if len(c.Args) == 0 {
+        return UsageError{Text: "expected at least one item id"}
+    }
+    var out []int = []
+    for a in c.Args {
+        var n = try strconv.Atoi(a) catch err {
+            return UsageError{Text: "not an item id: " + strconv.Quote(a)}
+        }
+        out = append(out, n)
+    }
+    return out
+}
+
+func line(it Item) string {
+    var mark = "[ ]"
+    if it.Done {
+        mark = "[x]"
+    }
+    var prio = strings.ToLower(fmt.Format("{0}", it.Priority))
+    var s = mark +
+        " " +
+        strings.PadLeft(strconv.Itoa(it.Id), 3, " ") +
+        "  " +
+        strings.PadRight(prio, 6, " ") +
+        "  " +
+        it.Title
+    if len(it.Tags) > 0 {
+        s += "  #" + strings.Join(it.Tags, " #")
+    }
+    return s
+}
+
+func Commands(env *Env) []cli.Command {
+    var add = cli.Command{
+        Name: "add",
+        Help: "add an item",
+        Args: "<title...>",
+        Flags: cli.FlagsOf<AddFlags>(),
+        Run: func(c *cli.Context) void! {
+            var f = cli.Bind<AddFlags>(c)?
+            var p = ParsePriority(f.Priority)?
+            withStore(env, c, func(s *Store) void! {
+                var it = s.Add(strings.Join(c.Args, " "), p, f.Tag)?
+                io.WriteString(env.Out, fmt.Format("added {0}: {1}\n", it.Id, it.Title))?
+            })?
+        },
+    }
+    var list = cli.Command{
+        Name: "list",
+        Aliases: ["ls"],
+        Help: "show the items",
+        Flags: cli.FlagsOf<ListFlags>(),
+        Run: func(c *cli.Context) void! {
+            var f = cli.Bind<ListFlags>(c)?
+            withStore(env, c, func(s *Store) void! {
+                var shown = 0
+                for it in s.Items() {
+                    if (it.Done && !f.All) || (f.Tag != "" && !slices.Contains(it.Tags, f.Tag)) {
+                        continue
+                    }
+                    io.WriteString(env.Out, line(it) + "\n")?
+                    shown += 1
+                }
+                if shown == 0 {
+                    io.WriteString(env.Out, "nothing to do\n")?
+                }
+            })?
+        },
+    }
+    var done = cli.Command{
+        Name: "done",
+        Help: "mark items as finished",
+        Args: "<id...>",
+        Run: func(c *cli.Context) void! {
+            var xs = ids(c)?
+            withStore(env, c, func(s *Store) void! {
+                for id in xs {
+                    var it = s.Complete(id)?
+                    io.WriteString(env.Out, fmt.Format("done {0}: {1}\n", it.Id, it.Title))?
+                }
+            })?
+        },
+    }
+    var rm = cli.Command{
+        Name: "rm",
+        Help: "delete items",
+        Args: "<id...>",
+        Run: func(c *cli.Context) void! {
+            var xs = ids(c)?
+            withStore(
+                env,
+                c,
+                func(s *Store) void! {
+                    for id in xs {
+                        // Removing an id that is already gone is not an error
+                        // for `rm`: the goal (the item is not there) holds.
+                        // errors.Is sees ErrNotFound through NotFoundError.
+                        var it = try s.Remove(id) catch err {
+                            if errors.Is(err, ErrNotFound) {
+                                io.WriteString(env.Out, fmt.Format("{0} was already gone\n", id))?
+                                continue
+                            }
+                            return err
+                        }
+                        io.WriteString(env.Out, fmt.Format("removed {0}: {1}\n", it.Id, it.Title))?
+                    }
+                },
+            )?
+        },
+    }
+    return [add, list, done, rm]
+}
+
+func App(env *Env) cli.App {
+    return cli.App{
+        Name: "todo",
+        Version: "1.0.0",
+        Help: "a to-do list in a JSON file",
+        Flags: cli.FlagsOf<GlobalFlags>(),
+        Commands: Commands(env),
+    }
+}

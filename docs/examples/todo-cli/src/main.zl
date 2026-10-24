@@ -1,0 +1,65 @@
+// todo: a to-do list kept in a JSON file.
+//
+//     todo [--file todo.json] add|list|done|rm ...
+namespace todo
+
+import io
+
+import todo.commands
+
+// session runs one command line the way a shell would and prints its exit
+// code. cli.App.Run never exits the process itself: it returns the code,
+// so the same App can be driven from tests and from this demo.
+func session(file string, args []string) {
+    println("$ todo", strings.Join(args, " "))
+    var errs = io.NewBytesWriter()
+    var env = new Env{Out: os.Stdout(), Today: () => "2026-10-24"}
+    var app = commands.App(env)
+    app.Errors = errs
+    var all = ["todo", "--file", file]
+    for a in args {
+        all = append(all, a)
+    }
+    var code = app.Run(all)
+    print(errs.String())
+    if code != 0 {
+        println("[exit", code, "]")
+    }
+}
+
+func main() void! {
+    // A real tool is two lines:
+    //     var env = new Env{Out: os.Stdout(), Today: () => time.Time.Now().Format("2006-01-02")}
+    //     os.Exit(commands.App(env).Run(os.Args()))
+    // The demo runs a fixed script against a file in a temporary
+    // directory, with a fixed date, so its output is reproducible.
+    var dir = fs.Join(fs.TempDir(), "todo-cli-demo")
+    fs.MkdirAll(dir)?
+    var file = fs.Join(dir, "todo.json")
+    _ = fs.Remove(file)
+
+    session(file, ["list"])
+    session(file, ["add", "buy", "milk", "-t", "errands"])
+    session(file, ["add", "-p", "high", "fix", "the", "bike", "-t", "home", "-t", "errands"])
+    session(file, ["add", "--priority=low", "read", "a", "book"])
+    session(file, ["ls"])
+    session(file, ["done", "2"])
+    session(file, ["list", "--all"])
+    session(file, ["list", "-t", "errands"])
+    session(file, ["rm", "3", "3"])
+    session(file, ["done", "7"])
+    session(file, ["done", "x"])
+    session(file, ["add", "-p", "urgent", "panic"])
+    session(file, ["add", "--prio", "high", "typo"])
+    session(file, ["add", "--help"])
+
+    // The file the commands wrote, as another program would see it.
+    println("--- todo.json")
+    print(io.ReadFile(file)?)
+
+    // A damaged file is reported with the JSON path of the bad value, and
+    // nothing is overwritten: Save only runs after a command succeeded.
+    io.WriteFile(file, "{\"next_id\": 4, \"items\": [{\"id\": 1, \"done\": \"yes\"}]}")?
+    session(file, ["list"])
+    fs.RemoveAll(dir)?
+}

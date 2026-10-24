@@ -1,0 +1,77 @@
+// The data model: what one to-do item is, how it looks in JSON, and the
+// errors the program can report.
+namespace todo.model
+
+enum Priority { Low, Normal, High }
+
+// ParsePriority turns a flag value into a Priority. Enums print and parse
+// by their variant names in JSON already; the command line is lower-case,
+// so it gets its own small parser.
+func ParsePriority(s string) Priority! {
+    switch strings.ToLower(s) {
+        case "low": return Priority.Low
+        case "normal", "": return Priority.Normal
+        case "high": return Priority.High
+    }
+    return UsageError{Text: "unknown priority " + strconv.Quote(s) + " (low, normal, high)"}
+}
+
+// Item is one to-do. The @json attributes decide the file format: short
+// lower-case keys, empty tag lists left out. encoding.json reads them at
+// compile time, so a typo in an attribute is a compile error, not a
+// silently ignored struct tag.
+struct Item {
+    @json(name: "id")                    Id       int
+    @json(name: "title")                 Title    string
+    @json(name: "done")                  Done     bool
+    @json(name: "priority")              Priority Priority
+    @json(name: "tags", omitEmpty: true) Tags     []string
+    @json(name: "created")               Created  string
+}
+
+// The file is an object rather than a bare array so that fields can be
+// added later (NextId today) without breaking old files.
+struct File {
+    @json(name: "next_id") NextId int
+    @json(name: "items")   Items  []Item
+}
+
+// ErrNotFound is the sentinel callers test with errors.Is, whatever
+// concrete error carries it.
+const ErrNotFound = error("no such item")
+
+// NotFoundError says which id was missing. It links to ErrNotFound through
+// Unwrap, so errors.Is(err, ErrNotFound) is true for it and for anything
+// that wraps it with ?("context").
+struct NotFoundError {
+    Id int
+
+    func Message() string {
+        return fmt.Format("item {0} not found", this.Id)
+    }
+
+    func Unwrap() error {
+        return ErrNotFound
+    }
+
+    // cli.App.Run uses ExitCode() of the first error in the chain that
+    // has one (the cli.ExitCoder interface): scripts can tell "not found"
+    // (3) from other failures (1) and usage errors (2).
+    func ExitCode() int {
+        return 3
+    }
+}
+
+// UsageError is a mistake in the arguments: exit code 2, like the
+// errors cli reports itself (unknown flag, missing value).
+struct UsageError {
+    Text string
+
+    func Message() string {
+        return this.Text
+    }
+
+    func ExitCode() int {
+        return 2
+    }
+}

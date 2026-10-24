@@ -1,0 +1,70 @@
+// Tests for the store and the commands. They use a file in the temporary
+// directory, so they never touch a real to-do list.
+namespace todo.tests
+
+import todo.commands
+import todo.model
+import todo.store
+
+func fixedDay() string {
+    return "2026-01-02"
+}
+
+func tempFile(name string) string {
+    var p = fs.Join(fs.TempDir(), "todo-test-" + name + ".json")
+    _ = fs.Remove(p)
+    return p
+}
+
+@test func TestSaveAndReopen(t *testing.T) {
+    var path = tempFile("reopen")
+    var s = try Store.Open(path, fixedDay) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    _ = s.Add("one", Priority.Low, [])
+    _ = s.Add("two", Priority.High, ["x"])
+    try s.Save() catch err {
+        t.Fatal(err.Message())
+    }
+    var again = try Store.Open(path, fixedDay) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    var items = again.Items()
+    testing.Equal(t, len(items), 2)
+    // high priority sorts first
+    testing.Equal(t, items[0].Title, "two")
+    testing.Equal(t, items[0].Created, "2026-01-02")
+    _ = fs.Remove(path)
+}
+
+@test func TestNotFoundIsDetectable(t *testing.T) {
+    var s = try Store.Open(tempFile("missing"), fixedDay) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    try s.Complete(42) catch err {
+        // the sentinel is found through the typed error and a wrapper
+        testing.True(t, errors.Is(err, ErrNotFound), "Is on the typed error")
+        testing.True(t, errors.Is(errors.Wrap(err, "done"), ErrNotFound), "Is through a wrapper")
+        var nf NotFoundError
+        testing.True(t, errors.As(err, &nf), "As finds NotFoundError")
+        testing.Equal(t, nf.Id, 42)
+        return
+    }
+    t.Fatal("Complete(42) succeeded on an empty list")
+}
+
+@test func TestExitCodes(t *testing.T) {
+    var path = tempFile("codes")
+    var out = io.NewBytesWriter()
+    var app = App(new Env{Out: out, Today: fixedDay})
+    app.Errors = io.NewBytesWriter()
+    testing.Equal(t, app.Run(["todo", "-f", path, "add", "x"]), 0)
+    testing.Equal(t, app.Run(["todo", "-f", path, "done", "9"]), 3)
+    testing.Equal(t, app.Run(["todo", "-f", path, "done", "nine"]), 2)
+    testing.Equal(t, app.Run(["todo", "-f", path, "add"]), 2)
+    testing.Equal(t, out.String(), "added 1: x\n")
+    _ = fs.Remove(path)
+}

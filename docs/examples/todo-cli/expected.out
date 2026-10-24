@@ -1,0 +1,52 @@
+$ todo list
+nothing to do
+$ todo add buy milk -t errands
+added 1: buy milk
+$ todo add -p high fix the bike -t home -t errands
+added 2: fix the bike
+$ todo add --priority=low read a book
+added 3: read a book
+$ todo ls
+[ ]   2  high    fix the bike  #home #errands
+[ ]   1  normal  buy milk  #errands
+[ ]   3  low     read a book
+$ todo done 2
+done 2: fix the bike
+$ todo list --all
+[ ]   1  normal  buy milk  #errands
+[ ]   3  low     read a book
+[x]   2  high    fix the bike  #home #errands
+$ todo list -t errands
+[ ]   1  normal  buy milk  #errands
+$ todo rm 3 3
+removed 3: read a book
+3 was already gone
+$ todo done 7
+error: item 7 not found
+[exit 3 ]
+$ todo done x
+error: not an item id: "x"
+[exit 2 ]
+$ todo add -p urgent panic
+error: unknown priority "urgent" (low, normal, high)
+[exit 2 ]
+$ todo add --prio high typo
+error: unknown flag --prio (did you mean "--priority"?)
+Run 'todo add --help' for usage.
+[exit 2 ]
+$ todo add --help
+add an item
+
+Usage:
+  todo add [flags] <title...>
+
+Flags:
+  -f, --file string      the to-do file (default todo.json, env $TODO_FILE)
+  -p, --priority string  low, normal or high (default normal)
+  -t, --tag strings      a tag (repeatable)
+  -h, --help             Show help
+--- todo.json
+{"next_id":4,"items":[{"id":1,"title":"buy milk","done":false,"priority":"Normal","tags":["errands"],"created":"2026-10-24"},{"id":2,"title":"fix the bike","done":true,"priority":"High","tags":["home","errands"],"created":"2026-10-24"}]}
+$ todo list
+error: parse todo.json: items[0].done: expected bool, found string
+[exit 1 ]

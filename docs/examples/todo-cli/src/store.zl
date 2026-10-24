@@ -1,0 +1,106 @@
+// Persistence: the list of items lives in one JSON file that is read at
+// the start of every command and written back when the command changed it.
+namespace todo.store
+
+import encoding
+
+import todo.model
+
+struct Store {
+    path  string
+    data  File
+    dirty bool
+    // The clock is a field so tests and the demo get fixed dates; the
+    // real program passes a function that formats time.Time.Now().
+    today func() string
+
+    // Open reads the file, or starts empty when it does not exist yet:
+    // the first `todo add` must not fail because there is no file.
+    static func Open(path string, today func() string) *Store! {
+        var s = new Store{path: path, data: File{NextId: 1}, today: today}
+        if !fs.Exists(path) {
+            return s
+        }
+        var text = io.ReadFile(path)?
+        // Parse<File> is generated at compile time from the attributes on
+        // File and Item; a malformed file reports the JSON path of the bad
+        // value, e.g. `items[2].done: expected a boolean`.
+        s.data = json.Parse<File>(text)?("parse " + fs.Base(path))
+        return s
+    }
+
+    // Save writes only if something changed. It writes a temporary file
+    // and renames it over the old one: a crash halfway through leaves the
+    // previous list intact instead of half a JSON document.
+    func Save() void! {
+        if !this.dirty {
+            return
+        }
+        var tmp = this.path + ".tmp"
+        io.WriteFile(tmp, json.Format(this.data) + "\n")?("save")
+        fs.Rename(tmp, this.path)?("save")
+        this.dirty = false
+    }
+
+    func Add(title string, p Priority, tags []string) Item! {
+        var t = strings.Trim(title)
+        if t == "" {
+            return UsageError{Text: "the title is empty"}
+        }
+        var it = Item{
+            Id: this.data.NextId,
+            Title: t,
+            Priority: p,
+            Tags: tags,
+            Created: this.today(),
+        }
+        this.data.NextId += 1
+        this.data.Items = append(this.data.Items, it)
+        this.dirty = true
+        return it
+    }
+
+    // Items returns a sorted copy, so callers can filter or reorder it
+    // without touching what will be saved.
+    func Items() []Item {
+        var xs = slices.Clone(this.data.Items)
+        slices.SortFunc(xs, displayOrder)
+        return xs
+    }
+
+    func index(id int) int! {
+        for i, it in this.data.Items {
+            if it.Id == id {
+                return i
+            }
+        }
+        return NotFoundError{Id: id}
+    }
+
+    func Complete(id int) Item! {
+        var i = this.index(id)?
+        this.data.Items[i].Done = true
+        this.dirty = true
+        return this.data.Items[i]
+    }
+
+    func Remove(id int) Item! {
+        var i = this.index(id)?
+        var it = this.data.Items[i]
+        this.data.Items = slices.Delete(this.data.Items, i, i + 1)
+        this.dirty = true
+        return it
+    }
+}
+
+// displayOrder: open items before done ones, then high priority first,
+// then oldest (smallest id) first.
+func displayOrder(a Item, b Item) bool {
+    if a.Done != b.Done {
+        return !a.Done
+    }
+    if a.Priority != b.Priority {
+        return int(a.Priority) > int(b.Priority)
+    }
+    return a.Id < b.Id
+}
