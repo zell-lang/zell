@@ -1,0 +1,161 @@
+// The worker pool: a fixed number of workers read jobs from one bounded
+// queue (a channel) and send their results to a second channel, which a
+// single collector drains (fan-in). Stats are shared by every worker and
+// protected by a mutex.
+namespace jobrunner.pool
+
+import jobrunner.jobs
+
+// Stats counts outcomes. Workers on different threads update it at the
+// same time, so every access holds the mutex. task.Mutex suspends a
+// waiting task instead of blocking its thread.
+struct Stats {
+    mu      task.Mutex
+    started int
+    counts  map[string]int
+
+    async func Record(status string) {
+        await this.mu.Lock()
+        if status != Skipped {
+            this.started += 1
+        }
+        this.counts[status] += 1
+        this.mu.Unlock()
+    }
+
+    async func Summary() string {
+        await this.mu.Lock()
+        var s = fmt.Format("started {0}", this.started)
+        for name in [Done, Failed, TimedOut, Cancelled, Skipped] {
+            s += fmt.Format(", {0} {1}", name, this.counts[name])
+        }
+        this.mu.Unlock()
+        return s
+    }
+}
+
+// Pool owns the two channels and the context its jobs run in. The queue is bounded: once Depth jobs are
+// waiting, Submit suspends the producer until a worker takes one, which
+// is how a pool pushes back on a producer that is faster than it.
+struct Pool {
+    Workers int
+    Queue   task.Channel<Job>
+    Results task.Channel<Result>
+    Stats   *Stats
+    Jobs    task.Context
+    wg      *task.WaitGroup
+
+    // Start launches the workers. They, the collector and the stats run
+    // in the caller's context; only the jobs run in `jobs`. Cancelling
+    // `jobs` stops the work but not the bookkeeping: in a cancelled
+    // context every wait that has no value yet fails, so a collector
+    // running there would stop receiving results at once.
+    static func Start(workers int, depth int, jobs task.Context) *Pool {
+        var p = new Pool{
+            Workers: workers,
+            Jobs: jobs,
+            Queue: task.Channel<Job>(depth),
+            Results: task.Channel<Result>(workers),
+            Stats: new Stats{counts: map[string]int{}},
+            wg: new task.WaitGroup{},
+        }
+        for _ in 0..workers {
+            p.wg.Add(1)
+            _ = worker(p)
+        }
+        // Results is closed once the last worker is done, so the
+        // collector's `for r in p.Results` ends by itself.
+        _ = closeWhenDone(p)
+        return p
+    }
+
+    func Submit(job Job) Task<void> {
+        return this.Queue.Send(job)
+    }
+
+    // Close says no more jobs will come; workers finish what is queued.
+    func Close() {
+        this.Queue.Close()
+    }
+}
+
+// worker takes jobs until the queue is closed and drained, or until its
+// context is cancelled and nothing is left in the queue.
+async func worker(p *Pool) {
+    defer p.wg.Done()
+    for job in p.Queue {
+        var r = await runOne(job, p.Jobs)
+        await p.Stats.Record(r.Status)
+        await p.Results.Send(r)
+    }
+}
+
+// runOne runs a job under its own timeout and turns the outcome into a
+// Result. A timeout and a cancelled run both surface as
+// task.ErrCancelled; the difference is whether the run's context is
+// cancelled too.
+async func runOne(job Job, run task.Context) Result {
+    if run.IsCancelled() {
+        return Result{Job: job, Status: Skipped, Detail: "the run was cancelled before it started"}
+    }
+    var work = task.RunWith(run, func() Task<string!> {
+        return start(job)
+    })
+    var out = try await work catch err {
+        if errors.Is(err, ErrBadInput) {
+            return Result{Job: job, Status: Failed, Detail: err.Message()}
+        }
+        if run.IsCancelled() {
+            return Result{Job: job, Status: Cancelled, Detail: "stopped by the run"}
+        }
+        return Result{Job: job, Status: TimedOut, Detail: fmt.Format("deadline {0}ms", job.Timeout)}
+    }
+    return Result{Job: job, Status: Done, Detail: out}
+}
+
+// start begins the job, inside a scope that is cancelled after its
+// timeout when it has one. It is nested in the run's context, so
+// cancelling the run cancels it too.
+func start(job Job) Task<string!> {
+    if job.Timeout > 0 {
+        return task.WithTimeout(job.Timeout, func() Task<string!> {
+            return Work(job)
+        })
+    }
+    return Work(job)
+}
+
+async func closeWhenDone(p *Pool) {
+    await p.wg.Wait()
+    p.Results.Close()
+}
+
+// Collect is the fan-in: one task receives every result, whichever
+// worker produced it, and sorts them so the report does not depend on
+// which worker was faster.
+async func Collect(p *Pool) []Result {
+    var out []Result = []
+    for r in p.Results {
+        out = append(out, r)
+    }
+    slices.SortBy(out, (r Result) => r.Job.Id)
+    return out
+}
+
+// RunBatch submits a fixed list of jobs, closes the queue and waits for
+// every result. `run` is the context of the jobs: pass
+// task.CurrentContext(), or a cancel handle's Context to be able to stop
+// the whole batch from outside.
+async func RunBatch(list []Job, workers int, depth int, run task.Context) ([]Result, string) {
+    var p = Pool.Start(workers, depth, run)
+    var collected = Collect(p)
+    for job in list {
+        if run.IsCancelled() {
+            break
+        }
+        await p.Submit(job)
+    }
+    p.Close()
+    var results = await collected
+    return (results, await p.Stats.Summary())
+}

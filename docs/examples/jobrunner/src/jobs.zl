@@ -1,0 +1,50 @@
+// Jobs: what a worker runs. A job is simulated work: it sleeps for its
+// cost in small steps and checks for cancellation between them, the way
+// real work (a download, a query, an image resize) would stop early.
+namespace jobrunner.jobs
+
+// ErrBadInput is a sentinel error: callers test for it with errors.Is,
+// even after it has been wrapped with the job's name.
+const ErrBadInput = error("bad input")
+
+// The outcome of one job. Plain string constants print as they are.
+const Done = "done"
+const Failed = "failed"
+const TimedOut = "timed out"
+const Cancelled = "cancelled"
+const Skipped = "skipped"
+
+struct Job {
+    Id      int
+    Name    string
+    Ms      int  // how long the work takes
+    Timeout int  // the job's own deadline in milliseconds; 0 for none
+    Fails   bool // its input is bad: the job returns ErrBadInput
+}
+
+struct Result {
+    Job    Job
+    Status string
+    Detail string
+}
+
+// Work runs the job. It is an ordinary async function: it knows nothing
+// about workers, timeouts or the run it belongs to. Cancellation reaches
+// it through the task context it was started in: once that context is
+// cancelled, task.Delay returns at once and CheckCancelled fails.
+async func Work(job Job) string! {
+    var left = job.Ms
+    for left > 0 {
+        var step = 5
+        if left < step {
+            step = left
+        }
+        await task.Delay(step)
+        task.CheckCancelled()?
+        left -= step
+    }
+    if job.Fails {
+        return errors.Wrap(ErrBadInput, "job " + job.Name)
+    }
+    return fmt.Format("{0}ms of work", job.Ms)
+}

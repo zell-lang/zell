@@ -1,0 +1,5 @@
+[package]
+name = "jobrunner"
+version = "0.1.0"
+namespace = "jobrunner"
+entry = "src/main.zl"

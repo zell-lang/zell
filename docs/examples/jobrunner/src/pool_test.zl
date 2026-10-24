@@ -1,0 +1,57 @@
+// Tests for the pool. They are async: the runner awaits them, so they
+// can run batches directly. Each checks one way a job can end.
+namespace jobrunner.tests
+
+import jobrunner.jobs
+import jobrunner.pool
+
+func quick(id int) Job {
+    return Job{Id: id, Name: "q" + strconv.Itoa(id), Ms: 5}
+}
+
+@test
+async func TestEveryJobHasOneResultInOrder(t *testing.T) {
+    var list []Job = []
+    for i in 1..11 {
+        list = append(list, quick(i))
+    }
+    // More jobs than queue slots and workers: Submit has to wait.
+    var (results, summary) = await RunBatch(list, 3, 1, task.CurrentContext())
+    testing.Equal(t, len(results), 10)
+    for i, r in results {
+        testing.Equal(t, r.Job.Id, i + 1)
+        testing.Equal(t, r.Status, Done)
+    }
+    testing.Equal(t, summary, "started 10, done 10, failed 0, timed out 0, cancelled 0, skipped 0")
+}
+
+@test
+async func TestTimeoutAndFailure(t *testing.T) {
+    var list = [
+        Job{Id: 1, Name: "slow", Ms: 1000, Timeout: 20},
+        Job{Id: 2, Name: "bad", Ms: 1, Fails: true},
+    ]
+    var (results, _) = await RunBatch(list, 2, 2, task.CurrentContext())
+    testing.Equal(t, results[0].Status, TimedOut)
+    testing.Equal(t, results[1].Status, Failed)
+    testing.Contains(t, results[1].Detail, "bad input")
+}
+
+@test
+async func TestWorkKeepsTheSentinel(t *testing.T) {
+    try await Work(Job{Name: "x", Ms: 1, Fails: true}) catch err {
+        testing.True(t, errors.Is(err, ErrBadInput), "ErrBadInput expected in the chain")
+        return
+    }
+    t.Fatal("a failing job succeeded")
+}
+
+@test
+async func TestCancelledBeforeStartIsSkipped(t *testing.T) {
+    var h = task.NewCancel()
+    h.Cancel()
+    var (results, summary) = await RunBatch([quick(1), quick(2)], 1, 2, h.Context)
+    // The feeder stops at once: nothing is submitted, nothing runs.
+    testing.Equal(t, len(results), 0)
+    testing.Equal(t, summary, "started 0, done 0, failed 0, timed out 0, cancelled 0, skipped 0")
+}

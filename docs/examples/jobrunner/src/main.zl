@@ -1,0 +1,71 @@
+// jobrunner: async workers in three runs over the same pool. A batch
+// with timeouts and a failing job, the same kind of batch cancelled from
+// outside, and a long-running service that shuts down gracefully when it
+// receives SIGTERM.
+namespace jobrunner
+
+import io
+import jobrunner.jobs
+import jobrunner.pool
+import jobrunner.service
+
+func job(id int, name string, ms int) Job {
+    return Job{Id: id, Name: name, Ms: ms}
+}
+
+func print(results []Result, summary string) {
+    for r in results {
+        println(fmt.Sprintf("  #%d %-14s %-10s %s", r.Job.Id, r.Job.Name, r.Status, r.Detail))
+    }
+    println("  stats:", summary)
+}
+
+async func main() {
+    // 1. A batch: every job ends one way or another.
+    var nightly = [
+        job(1, "resize-images", 30),
+        job(2, "send-emails", 10),
+        Job{Id: 3, Name: "build-index", Ms: 400, Timeout: 50},
+        Job{Id: 4, Name: "parse-feed", Ms: 10, Fails: true},
+        job(5, "backup-db", 40),
+        job(6, "thumbnails", 20),
+        Job{Id: 7, Name: "report", Ms: 10, Timeout: 200},
+        job(8, "cleanup", 10),
+    ]
+    println("batch: 8 jobs, 3 workers, a queue of 2")
+    var (results, summary) = await RunBatch(nightly, 3, 2, task.CurrentContext())
+    print(results, summary)
+
+    // 2. The same pool cancelled from outside after 60ms. Three jobs are
+    // running and stop early; two are still in the queue and are skipped.
+    var slow []Job = []
+    for i in 1..6 {
+        slow = append(slow, job(i, "import-" + strconv.Itoa(i), 500))
+    }
+    println("cancelled run: 5 slow jobs, 3 workers, cancelled after 60ms")
+    var h = task.NewCancel()
+    var run = RunBatch(slow, 3, 5, h.Context)
+    await task.Delay(60)
+    h.Cancel()
+    var (cancelled, summary2) = await run
+    print(cancelled, summary2)
+
+    // 3. A service: a job every tick until a signal arrives. A real
+    // program passes the channel of OS signals:
+    //
+    //     var sigs = signal.Notify([signal.SIGINT, signal.SIGTERM])
+    //
+    // Here the same kind of channel is fed by a simulated operator who
+    // presses Ctrl-C (SIGTERM, 15) after the fourth job, so every run
+    // prints the same thing.
+    println("service: a job every 40ms until SIGTERM")
+    var sigs = task.Channel<int>(1)
+    var source = func(n int) Job {
+        if n == 4 {
+            _ = sigs.Send(15)
+        }
+        return job(n, "tick-" + strconv.Itoa(n), 30)
+    }
+    var (served, summary3) = await Serve(source, sigs, 40)
+    print(served, summary3)
+}

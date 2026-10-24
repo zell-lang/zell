@@ -1,0 +1,50 @@
+// A long-running service on the pool: it submits a job on every tick of
+// a timer until a signal asks it to stop, then shuts down gracefully:
+// no new jobs, the queued and running ones finish, results are reported.
+namespace jobrunner.service
+
+import io
+import os
+import jobrunner.jobs
+import jobrunner.pool
+
+// watch waits for the first signal and turns it into a cancellation of
+// the service loop's scope; it returns the signal number.
+async func watch(sigs task.Channel<int>, stop task.CancelHandle) int {
+    var sig = try await sigs.Recv() else 0
+    stop.Cancel()
+    return sig
+}
+
+// Serve runs until a signal arrives on sigs. next makes the n-th job.
+//
+// The loop waits for "a tick or a signal, whichever comes first". Zell
+// has no `select` statement; here the timer wait runs in a scope that
+// the signal watcher cancels, and a cancelled task.Delay returns at once.
+// So a signal ends the wait immediately, and nothing is lost: there is
+// exactly one receive on the signal channel, owned by the watcher.
+async func Serve(next func(int) Job, sigs task.Channel<int>, tickMs int) ([]Result, string) {
+    var p = Pool.Start(2, 4, task.CurrentContext())
+    var collected = Collect(p)
+    var stop = task.NewCancel()
+    var watcher = watch(sigs, stop)
+    var n = 0
+    for {
+        await task.RunWith(stop.Context, func() Task<void> {
+            return task.Delay(tickMs)
+        })
+        if stop.IsCancelled() {
+            break
+        }
+        n += 1
+        await p.Submit(next(n))
+    }
+    var sig = await watcher
+    println("  received", signal.Name(sig) + ": no new jobs, draining", n, "submitted")
+
+    // Graceful shutdown: closing the queue lets the workers finish what
+    // is queued and running, then they exit and Results is closed.
+    p.Close()
+    var results = await collected
+    return (results, await p.Stats.Summary())
+}
