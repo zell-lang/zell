@@ -1,0 +1,191 @@
+// A generic cache with a fixed number of slots and a pluggable eviction
+// policy, a small Result-like helper for lookups, and an iterator so a
+// cache can be walked with `for k, v in c`.
+namespace cache
+
+import cache.policy
+
+const ErrMissing = error("not in the cache")
+
+// Maybe is the result of a lookup: a value or nothing. It is generic,
+// so a Cache<string, User> returns Maybe<User> and no cast is needed.
+struct Maybe<T> {
+    value T
+    ok    bool
+
+    func Ok() bool {
+        return this.ok
+    }
+
+    // Or returns the value, or def when there is none.
+    func Or(def T) T {
+        if this.ok {
+            return this.value
+        }
+        return def
+    }
+
+    // Get turns the lookup into a T!, so it composes with ? and try.
+    func Get() T! {
+        if !this.ok {
+            return ErrMissing
+        }
+        return this.value
+    }
+}
+
+func Some<T>(v T) Maybe<T> {
+    return Maybe<T>{value: v, ok: true}
+}
+
+func None<T>() Maybe<T> {
+    return Maybe<T>{}
+}
+
+// Measured is what a report needs from anything that counts hits. Cache
+// has these methods, so *Cache<K, V> satisfies it for every K and V.
+interface Measured {
+    func Counts() (int, int, int)
+}
+
+// Cache maps keys to values in a fixed number of slots. K must be
+// Comparable because it is a map key; V can be anything.
+struct Cache<K: Comparable, V> {
+    keys      []K
+    vals      []V
+    used      []bool
+    index     map[K]int
+    free      []int
+    policy    Policy
+    hits      int
+    misses    int
+    evictions int
+
+    static func New(capacity int, p Policy) *Cache<K, V> {
+        var c = new Cache<K, V>{index: map[K]int{}, policy: p}
+        for i in 0..capacity {
+            var k K
+            var v V
+            c.keys = append(c.keys, k)
+            c.vals = append(c.vals, v)
+            c.used = append(c.used, false)
+            c.free = append(c.free, capacity - 1 - i)
+        }
+        return c
+    }
+
+    func Len() int {
+        return len(this.index)
+    }
+
+    func Get(k K) Maybe<V> {
+        var (slot, ok) = this.index[k]
+        if !ok {
+            this.misses += 1
+            return None<V>()
+        }
+        this.hits += 1
+        this.policy.Used(slot)
+        return Some(this.vals[slot])
+    }
+
+    // Put stores v under k and returns the key it evicted, if any.
+    func Put(k K, v V) Maybe<K> {
+        var (slot, ok) = this.index[k]
+        if ok {
+            this.vals[slot] = v
+            this.policy.Used(slot)
+            return None<K>()
+        }
+        var evicted = None<K>()
+        if len(this.free) == 0 {
+            var victim = this.policy.Victim()
+            evicted = Some(this.keys[victim])
+            this.remove(victim)
+            this.evictions += 1
+        }
+        slot = this.free[len(this.free) - 1]
+        this.free = this.free[..len(this.free) - 1]
+        this.keys[slot] = k
+        this.vals[slot] = v
+        this.used[slot] = true
+        this.index[k] = slot
+        this.policy.Inserted(slot)
+        return evicted
+    }
+
+    // GetOrLoad returns the cached value or calls load and caches what it
+    // returns. A failing load is not cached and its error is returned.
+    func GetOrLoad(k K, load func(K) V!) V! {
+        var m = this.Get(k)
+        if m.Ok() {
+            return m.Get()?
+        }
+        var v = load(k)?("load")
+        _ = this.Put(k, v)
+        return v
+    }
+
+    func remove(slot int) {
+        delete(this.index, this.keys[slot])
+        var k K
+        var v V
+        this.keys[slot] = k
+        this.vals[slot] = v
+        this.used[slot] = false
+        this.free = append(this.free, slot)
+        this.policy.Removed(slot)
+    }
+
+    func Counts() (int, int, int) {
+        return (this.hits, this.misses, this.evictions)
+    }
+
+    // Iter makes the cache iterable: `for k, v in c` walks the occupied
+    // slots in slot order. The iterator shares the slices, not the cache.
+    func Iter() Entries<K, V> {
+        return Entries<K, V>{keys: this.keys, vals: this.vals, used: this.used}
+    }
+}
+
+// Entries is the iterator. A Next() returning (K, V, bool) is what a
+// two-variable `for` loop calls before every step; false ends the loop.
+struct Entries<K, V> {
+    keys []K
+    vals []V
+    used []bool
+    i    int
+
+    func Next() (K, V, bool) {
+        for this.i < len(this.keys) {
+            var i = this.i
+            this.i += 1
+            if this.used[i] {
+                return (this.keys[i], this.vals[i], true)
+            }
+        }
+        var k K
+        var v V
+        return (k, v, false)
+    }
+}
+
+// SortedKeys works for any cache whose keys are Ordered: a stricter
+// constraint than the cache itself needs, checked where it is called.
+func SortedKeys<K: Ordered, V>(c *Cache<K, V>) []K {
+    var out []K = []
+    for k, _ in c {
+        out = append(out, k)
+    }
+    slices.Sort(out)
+    return out
+}
+
+// HitRate takes the interface, so it accepts every cache instance.
+func HitRate(m Measured) string {
+    var (hits, misses, _) = m.Counts()
+    if hits + misses == 0 {
+        return "n/a"
+    }
+    return fmt.Sprintf("%.1f%%", float(hits) * 100.0 / float(hits + misses))
+}

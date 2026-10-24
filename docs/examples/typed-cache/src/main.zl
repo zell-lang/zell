@@ -1,0 +1,95 @@
+// typed-cache: one generic cache, two eviction policies, three uses.
+namespace cache
+
+import io
+import cache.policy
+
+struct User {
+    Name  string
+    Admin bool
+}
+
+// trace runs the same accesses against a cache and prints what happened.
+func trace(c *Cache<string, int>, name string) {
+    var keys = ["a", "b", "c", "a", "a", "d", "b", "e"]
+    var log []string = []
+    for i, k in keys {
+        if !c.Get(k).Ok() {
+            var gone = c.Put(k, i)
+            if gone.Ok() {
+                log = append(log, k + " evicts " + gone.Or(""))
+            }
+        }
+    }
+    println(fmt.Format("  {0}: {1}; keeps {2}", name, strings.Join(log, ", "), SortedKeys(c)))
+}
+
+// Accesses is a deterministic stream of keys: 80% from 20 hot keys,
+// 20% from 500 cold ones (a linear congruential generator, fixed seed).
+struct Accesses {
+    seed int
+    left int
+
+    func Next() (int, bool) {
+        if this.left == 0 {
+            return (0, false)
+        }
+        this.left -= 1
+        this.seed = (this.seed * 1103515245 + 12345) % 2147483648
+        var r = this.seed / 65536
+        if r % 10 < 8 {
+            return (r % 20, true)
+        }
+        return (20 + r % 500, true)
+    }
+}
+
+func run(p Policy) {
+    var c = Cache<int, string>.New(32, p)
+    for k in (Accesses{seed: 42, left: 20000}) {
+        if !c.Get(k).Ok() {
+            _ = c.Put(k, "value " + strconv.Itoa(k))
+        }
+    }
+    var (hits, misses, evictions) = c.Counts()
+    println(fmt.Sprintf("  %s: %d hits, %d misses, %d evictions, hit rate %s", p.Name(), hits, misses, evictions, HitRate(c)))
+}
+
+func main() {
+    println("eviction order, capacity 3:")
+    trace(Cache<string, int>.New(3, LRU.New()), "LRU")
+    trace(Cache<string, int>.New(3, LFU.New()), "LFU")
+
+    println("a typed cache in front of a loader:")
+    var users = Cache<string, User>.New(2, LRU.New())
+    var loads = 0
+    var load = func(name string) User! {
+        loads += 1
+        if name == "mallory" {
+            return error("no user " + strconv.Quote(name))
+        }
+        return User{Name: name, Admin: name == "root"}
+    }
+    for name in ["root", "ann", "root", "mallory", "ann"] {
+        var u = try users.GetOrLoad(name, load) catch err {
+            println("  " + name + ":", err)
+            continue
+        }
+        println("  " + name + ": admin", u.Admin)
+    }
+    println("  loads:", loads, "cached:", users.Len(), "hit rate:", HitRate(users))
+    for name, u in users {
+        println("  in cache:", name, u.Admin)
+    }
+
+    println("20000 skewed accesses, capacity 32:")
+    run(LRU.New())
+    run(LFU.New())
+
+    // Maybe.Get turns "not found" into an error for code that wants one.
+    var bob = try users.Get("bob").Get() catch err {
+        println("bob:", err)
+        return
+    }
+    println("bob is cached:", bob.Name)
+}

@@ -1,0 +1,101 @@
+// Eviction policies. The cache stores entries in numbered slots and
+// tells its policy what happens to each slot; the policy decides which
+// slot to empty when the cache is full. Policies see only slot numbers,
+// never keys or values, so one policy type serves every Cache<K, V>.
+namespace cache.policy
+
+// Policy is an ordinary interface: any struct with these methods is one.
+interface Policy {
+    func Name() string
+    func Inserted(slot int)
+    func Used(slot int)
+    func Removed(slot int)
+    // Victim is the slot to evict; called only when every slot is full.
+    func Victim() int
+}
+
+// LRU evicts the slot used least recently. It stamps every use with a
+// clock; the victim has the oldest stamp.
+struct LRU {
+    clock int
+    stamp map[int]int
+
+    static func New() *LRU {
+        return new LRU{stamp: map[int]int{}}
+    }
+
+    func Name() string {
+        return "LRU"
+    }
+
+    func Inserted(slot int) {
+        this.Used(slot)
+    }
+
+    func Used(slot int) {
+        this.clock += 1
+        this.stamp[slot] = this.clock
+    }
+
+    func Removed(slot int) {
+        delete(this.stamp, slot)
+    }
+
+    func Victim() int {
+        return oldest(this.stamp, map[int]int{})
+    }
+}
+
+// LFU evicts the slot used least often; among equally used slots, the
+// one used least recently (so a burst of new keys cannot pin old ones).
+struct LFU {
+    clock int
+    uses  map[int]int
+    stamp map[int]int
+
+    static func New() *LFU {
+        return new LFU{uses: map[int]int{}, stamp: map[int]int{}}
+    }
+
+    func Name() string {
+        return "LFU"
+    }
+
+    func Inserted(slot int) {
+        this.uses[slot] = 0
+        this.Used(slot)
+    }
+
+    func Used(slot int) {
+        this.clock += 1
+        this.uses[slot] += 1
+        this.stamp[slot] = this.clock
+    }
+
+    func Removed(slot int) {
+        delete(this.uses, slot)
+        delete(this.stamp, slot)
+    }
+
+    func Victim() int {
+        return oldest(this.stamp, this.uses)
+    }
+}
+
+// oldest returns the slot with the smallest (rank, stamp) pair, where a
+// slot's rank is ranks[slot] (0 when absent). O(n) is fine for a few
+// hundred slots; a real cache would keep a list or a heap.
+func oldest(stamp map[int]int, ranks map[int]int) int {
+    var best = -1
+    for slot, s in stamp {
+        if best < 0 {
+            best = slot
+            continue
+        }
+        var (r, br) = (ranks[slot], ranks[best])
+        if r < br || (r == br && s < stamp[best]) {
+            best = slot
+        }
+    }
+    return best
+}

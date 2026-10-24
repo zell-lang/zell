@@ -1,0 +1,85 @@
+// Tests for the policies, alone and through a cache. A table drives the
+// cache tests: the same accesses, a different policy, a different victim.
+namespace cache.tests
+
+import cache
+import cache.policy
+
+@test func TestLRUPicksTheLeastRecentlyUsed(t *testing.T) {
+    var p = LRU.New()
+    p.Inserted(0)
+    p.Inserted(1)
+    p.Inserted(2)
+    p.Used(0)
+    testing.Equal(t, p.Victim(), 1)
+    p.Removed(1)
+    testing.Equal(t, p.Victim(), 2)
+}
+
+@test func TestLFUPicksTheLeastUsedThenTheOldest(t *testing.T) {
+    var p = LFU.New()
+    p.Inserted(0)
+    p.Inserted(1)
+    p.Inserted(2)
+    p.Used(0)
+    p.Used(2)
+    testing.Equal(t, p.Victim(), 1)
+    p.Used(1)
+    // Every slot has two uses now: the oldest last use loses.
+    testing.Equal(t, p.Victim(), 0)
+}
+
+struct Case {
+    Name   string
+    Policy Policy
+    Victim string
+}
+
+@test func TestCacheEvictsWhatThePolicySays(t *testing.T) {
+    var cases = [
+        Case{Name: "lru", Policy: LRU.New(), Victim: "x"},
+        Case{Name: "lfu", Policy: LFU.New(), Victim: "z"},
+    ]
+    for c in cases {
+        t.Run(c.Name, func(t *testing.T) {
+            var cache = Cache<string, int>.New(3, c.Policy)
+            _ = cache.Put("x", 1)
+            _ = cache.Put("y", 2)
+            _ = cache.Put("z", 3)
+            for k in ["x", "x", "y", "y", "z"] {
+                _ = cache.Get(k)
+            }
+            // LRU: x was used least recently (y and z came after it).
+            // LFU: z was used least often (twice, against three times).
+            var gone = cache.Put("w", 4)
+            testing.Equal(t, gone.Or("-"), c.Victim)
+            testing.Equal(t, cache.Len(), 3)
+        })
+    }
+}
+
+@test func TestMaybe(t *testing.T) {
+    testing.Equal(t, Some(5).Or(0), 5)
+    testing.Equal(t, None<int>().Or(7), 7)
+    try None<string>().Get() catch err {
+        testing.True(t, errors.Is(err, ErrMissing), "ErrMissing expected")
+        return
+    }
+    t.Fatal("None.Get succeeded")
+}
+
+@test func TestGetOrLoadDoesNotCacheFailures(t *testing.T) {
+    var c = Cache<int, string>.New(2, LRU.New())
+    var calls = 0
+    var load = func(k int) string! {
+        calls += 1
+        return error("down")
+    }
+    for _ in 0..2 {
+        try c.GetOrLoad(1, load) catch err {
+            testing.Contains(t, err.Message(), "load: down")
+        }
+    }
+    testing.Equal(t, calls, 2)
+    testing.Equal(t, c.Len(), 0)
+}

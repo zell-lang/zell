@@ -1,0 +1,5 @@
+[package]
+name = "typed-cache"
+version = "0.1.0"
+namespace = "cache"
+entry = "src/main.zl"

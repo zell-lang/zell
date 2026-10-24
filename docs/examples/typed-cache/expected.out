@@ -1,0 +1,16 @@
+eviction order, capacity 3:
+  LRU: d evicts b, b evicts c, e evicts a; keeps [b d e]
+  LFU: d evicts b, b evicts c, e evicts d; keeps [a b e]
+a typed cache in front of a loader:
+  root: admin true
+  ann: admin false
+  root: admin true
+  mallory: load: no user "mallory"
+  ann: admin false
+  loads: 3 cached: 2 hit rate: 40.0%
+  in cache: root true
+  in cache: ann false
+20000 skewed accesses, capacity 32:
+  LRU: 16381 hits, 3619 misses, 3587 evictions, hit rate 81.9%
+  LFU: 16609 hits, 3391 misses, 3359 evictions, hit rate 83.0%
+bob: not in the cache
