@@ -92,7 +92,10 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
 | 20 | **Type aliases**: `type Name = Type` is a transparent alias (no new nominal type), usable in the stdlib too. |
 | 21 | **`in` becomes a contextual keyword**: a keyword only in `for … in …`; an ordinary identifier elsewhere. |
 
-25. **Panic backtraces show symbols+offsets, not source lines**
+25. **Done (2026-10-24):** panic backtraces print `file:line function` from the
+    `.zell_lines` table (runtime/ABI.md 8.2, DESIGN.md "Паника"), stripped
+    `--release` included; ELF only, macOS/Windows still symbols+offsets.
+    **Panic backtraces show symbols+offsets, not source lines**
     (`zell_app__main+0x172` in debug, bare addresses in `--release`), while Go
     prints `main.go:10`. Wanted: a compact pc→file:line table in the binary
     (works stripped, no DWARF reader at run time), used by the panic printer and

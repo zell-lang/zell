@@ -641,7 +641,7 @@ fn emit_plain(program: &Program, name: &str, output: PathBuf, opts: &BuildOption
     } else {
         write_object_par(&machine, &module, &obj, opts)?;
     }
-    let r = link(&[obj.clone()], &output, &libs, opts);
+    let r = link(&[obj.clone()], &output, &libs, opts, &crate::lines::Names::of(program));
     if r.is_ok() && opts.emits_debug_info() {
         macos_dsym(&output, opts);
     }
@@ -683,7 +683,7 @@ fn lower<'ctx>(program: &Program, ctx: &'ctx Context, name: &str, output: &Path,
         (true, true) => 1,
         (true, false) => 2,
     };
-    let module = match codegen::emit_with(program, ctx, name, codegen::Options { leak_check, no_error_trace: opts.no_error_trace, debug_info: opts.emits_debug_info(), optimized: opts.opt > 0, inline_rc: std::env::var_os("ZELL_NO_INLINE_RC").is_none(), debug_agent: opts.debug_agent_on() }) {
+    let module = match codegen::emit_with(program, ctx, name, codegen::Options { leak_check, no_error_trace: opts.no_error_trace, debug_info: opts.emits_debug_info(), line_tables: crate::lines::supported(&crate::target::current()), optimized: opts.opt > 0, inline_rc: std::env::var_os("ZELL_NO_INLINE_RC").is_none(), debug_agent: opts.debug_agent_on() }) {
         Ok(m) => m,
         Err(errs) => {
             for e in &errs {
@@ -755,11 +755,15 @@ fn module_link_libs(module: &Module) -> Vec<&'static str> {
 /// the executable `output`: with the bundled lld when the runtime comes
 /// with link inputs (an installed toolchain, [`crate::crosslink`]), else
 /// with the system clang driver.
-fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions) -> Result<(), String> {
+fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions, names: &crate::lines::Names) -> Result<(), String> {
     let _t = phase("link");
     let target = crate::target::current();
     let clang = find_clang().unwrap_or_else(|_| "clang".into());
-    let strip = opts.strip || (opts.release && !opts.debug_info);
+    // ELF executables get the `.zell_lines` table from the DWARF after the
+    // link (`crate::lines`), which also strips them: the linker does not.
+    let lines = crate::lines::supported(&target);
+    let want_strip = opts.strip || (opts.release && !opts.debug_info);
+    let strip = want_strip && !lines;
     let lo = crate::crosslink::LinkOpts { release: opts.release, strip, static_link: opts.static_link, export_dynamic: !opts.release && !opts.static_link, clang: &clang };
     let cross = !target.is_host() || target.os == "windows";
     let lto = !cross && lto_enabled(opts);
@@ -779,7 +783,7 @@ fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions) -> 
         find_runtime()?
     };
     let (mut cmd, linker) = if lto {
-        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, true), clang.clone())
+        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, true, strip), clang.clone())
     } else if let Some(r) = crate::crosslink::bundled_link(&target, objs, &rt, output, libs, &lo) {
         r?
     } else if cross {
@@ -789,19 +793,24 @@ fn link(objs: &[PathBuf], output: &Path, libs: &[&str], opts: &BuildOptions) -> 
         find_clang()?;
         crate::crosslink::link_command(&target, objs, &rt, output, libs, &lo)?
     } else {
-        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, false), clang.clone())
+        (host_clang_command(objs, &rt, output, libs, opts, &find_clang()?, false, strip), clang.clone())
     };
     log(opts, format!("linking {} for {} ({} object(s), runtime {}) with {linker}{}", output.display(), target.triple, objs.len(), rt.display(), if lto { " (ThinLTO)" } else { "" }));
     let out = cmd.output().map_err(|e| format!("cannot run {}: {e}", cmd.get_program().to_string_lossy()))?;
     if !out.status.success() {
         return Err(format!("linking failed:\n{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout)));
     }
+    if lines {
+        let _t = phase("lines");
+        let n = crate::lines::finish(output, names, opts.emits_debug_info(), want_strip)?;
+        log(opts, format!("line table: {n} bytes"));
+    }
     Ok(())
 }
 
 /// The host link through the system clang driver (a runtime without
 /// bundled link inputs, e.g. `runtime/libzell_rt.a` of the repository).
-fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str], opts: &BuildOptions, clang: &str, lto: bool) -> Command {
+fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str], opts: &BuildOptions, clang: &str, lto: bool, strip: bool) -> Command {
     let mut cmd = Command::new(clang);
     cmd.args(objs).arg(rt);
     for l in libs {
@@ -826,7 +835,7 @@ fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str],
         cmd.arg("-rdynamic");
     }
     // Release builds are stripped unless `-g` asked for debug info.
-    if opts.strip || (opts.release && !opts.debug_info) {
+    if strip {
         cmd.arg(if macos { "-Wl,-S,-x" } else { "-s" });
     }
     if opts.static_link && !macos {
@@ -873,7 +882,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
         set_sections(&part);
         let mut h = Sha256::new();
         h.update(compiler.as_bytes());
-        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0open_defer={}\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none(), std::env::var_os("ZELL_NO_OPEN_DEFER").is_none()).as_bytes());
+        h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0open_defer={}\0lines=1\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none(), std::env::var_os("ZELL_NO_OPEN_DEFER").is_none()).as_bytes());
         h.update(format!("agent={}\0", opts.debug_agent_on()).as_bytes());
         h.update(part.print_to_string().to_bytes());
         let key = lock::hex(&h.finalize()[..8]);
@@ -893,7 +902,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
         log(opts, format!("library {} checked and compiled ({} object(s))", package::describe(pkg), objs.len()));
         return Ok(None);
     }
-    link(&objs, &output, &libs, opts)?;
+    link(&objs, &output, &libs, opts, &crate::lines::Names::of(&program))?;
     Ok(Some(output))
 }
 

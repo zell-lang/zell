@@ -1055,7 +1055,10 @@ Windows, or a panic while unwinding another one):
 1. `stdout` is flushed, so output printed before the panic is not lost.
 2. `panic: <msg>\n` is written to stderr.
 3. Unless `ZELL_NO_BACKTRACE` is set, a blank line, then
-   `backtrace (most recent call first):`, then `backtrace_symbols_fd` frames.
+   `backtrace (most recent call first):`, then one line per frame: Zell
+   code found in the line table (8.2) as `  <file>:<line> <function>`,
+   anything else as `module(symbol+0xoff)[0xaddr]` (glibc
+   `backtrace_symbols_fd` format; `module(+0xoff)[0xaddr]` without symbols).
 4. The process exits immediately with **exit code 2** (`_Exit`). No `defer`, no
    destructors, no atexit handlers.
 
@@ -1166,6 +1169,54 @@ panics on other threads (tasks the function started) still end the process.
 of the calling thread's last captured panic (+1, `""` if none).
 
 ---
+
+### 8.2 Line table (`.zell_lines`)
+
+Panic backtraces (8, 8.1 `PanicTrace`) print `file:line` from a table in
+the executable, also in stripped `--release` builds; no DWARF is read at
+run time.
+
+**Producer** (`compiler/src/lines.rs`, ELF64 little-endian targets:
+linux/freebsd amd64/arm64). Codegen always emits DWARF line tables
+(`LineTablesOnly` without `-g`; every function, helpers included, has a
+subprogram, so Zell code inlined into C `main` or a helper keeps its
+lines). After the link the compiler reads `.debug_line` of the executable,
+writes the table into a non-allocated `PROGBITS` section `.zell_lines`,
+then removes the `.debug_*` sections unless the build emits debug info and
+the symbol table of stripped builds (`--release` without `-g`, `--strip`:
+the compiler strips ELF executables itself instead of passing `-s` to the
+linker). Being data, not symbols, the section survives `strip` (binutils)
+and `objcopy --strip-debug`; `llvm-strip --strip-all` removes all
+non-allocated sections (keep it with `--keep-section=.zell_lines`).
+
+**Layout** (little-endian):
+
+| Offset | Field |
+|---|---|
+| 0 | magic `"ZLN1"` |
+| 4 | `u32 nfiles`, `u32 nlines`, `u32 nfuncs`, `u32 strsize`, `u32 0` |
+| 24 | `u64 base`: link-time address of the first line entry |
+| 32 | `u32 files[nfiles]`: offsets into `str` of the source paths, spelled as the compiler was given them (like error-trace sites, 7) |
+| | `{u32 off; u32 fl} lines[nlines]`: sorted by `off` (address − `base`); `fl = file << 20 \| line`; an entry covers addresses up to the next one; `file` `0xfff` = no line (non-Zell code, line 0, gaps) |
+| | `{u32 fl; u32 last; u32 name} funcs[nfuncs]`: source range of each Zell function (`file << 20 \| first line`, last line) and its name as in error traces (namespace stripped) |
+| | `char str[strsize]`: NUL-terminated strings |
+
+One line entry per location in DWARF's line program (one per statement,
+call and `await`), consecutive duplicates merged. At most 4095 files and
+lines up to 2^20 − 1 are described.
+
+**Consumer** (`runtime/src/lines.c`, `platform/posix.c`): on the first
+backtrace the runtime reads `.zell_lines` from `/proc/self/exe`, computes
+the load bias from `dl_iterate_phdr`, and for each return address `pc`
+looks up `pc - 1 - bias`: the last line entry at or below it gives file and
+line, the innermost `funcs` range holding that line gives the function
+(exact with inlining; without one, the symbol name). An absolute file under
+the working directory prints relative to it. `ZELL_NO_LINES=1` falls back
+to symbol+offset frames. Not found, other platforms (Mach-O, Windows/COFF):
+the symbol+offset format of 8.
+
+Inlined calls have no frame of their own: in an optimised build a frame
+shows the innermost inlined line only.
 
 ## 9. I/O
 
@@ -1815,6 +1866,7 @@ output still sitting in buffers may be lost if workers are still printing.
 |---|---|
 | `ZELL_WORKERS=n` | number of worker threads (default: online CPUs, max 256) |
 | `ZELL_NO_BACKTRACE=1` | panic prints only the `panic: ...` line (useful for golden-output tests) |
+| `ZELL_NO_LINES=1` | panic backtraces print symbol+offset frames instead of `file:line` from the line table (8.2) |
 | `ZELL_CYCLES=auto\|manual\|off` | the cycle collector (3.8): automatic collections (default), only `runtime.CollectCycles()`, or none (plain reference counting). `ZELL_CYCLES_THRESHOLD=N` fixes the number of recorded roots that triggers an automatic collection; `ZELL_CYCLES_MAX_SCAN=N` bounds the objects one collection examines (default 2^22) |
 | `ZELL_DIAG_HEAP=1` | per-type live object counters for `diag.HeapByType` / `/debug/heap` in any build (18) |
 | `ZELL_NO_SLAB=1` | objects come straight from `malloc` instead of the object heap (3.2), e.g. so Valgrind memcheck sees each object |

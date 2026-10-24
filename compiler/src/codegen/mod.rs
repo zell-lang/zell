@@ -229,6 +229,13 @@
 //! `zell_leak_check_enable` first; after the entry point returns, the
 //! globals are released (reverse initialisation order) before
 //! `zell_runtime_shutdown`, which reports live objects.
+//!
+//! **Line table** (ABI.md 8.2). With [`Options::line_tables`] (every ELF
+//! build) the module carries DWARF line tables even without `-g`; every
+//! function, helpers and C `main` included, has a subprogram, and calls
+//! without a location get line 0. `crate::lines` turns the linked
+//! executable's `.debug_line` into the `.zell_lines` section the runtime's
+//! backtrace printer reads.
 
 mod async_;
 mod cleanup;
@@ -353,6 +360,11 @@ pub struct Options {
     /// variables, types and line locations. Does not change the generated
     /// code.
     pub debug_info: bool,
+    /// Without [`Options::debug_info`]: emit DWARF line tables only
+    /// (`LineTablesOnly`: subprograms and statement locations), which the
+    /// build turns into the `.zell_lines` table of panic backtraces
+    /// (runtime/ABI.md 8.2) and then drops. Does not change the code.
+    pub line_tables: bool,
     /// The module will be optimised (`DW_AT_..._optimized` in the debug info).
     pub optimized: bool,
     /// Emit the reference-counting fast paths inline (`rc.rs`,
