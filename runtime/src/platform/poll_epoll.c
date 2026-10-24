@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -133,6 +134,20 @@ void zell__plat_poller_wake(zell__plat_poller *p) {
 }
 
 bool zell__plat_poller_edge(zell__plat_poller *p) { return p->u == NULL; }
+
+bool zell__plat_poller_shared(zell__plat_poller *p) { return p->u == NULL; }
+
+int zell__plat_poller_link(zell__plat_poller *hub, zell__plat_poller *p, uint64_t token) {
+    if (hub->u || p->u) return EOPNOTSUPP;
+    /* An epoll instance is readable while its ready list is not empty:
+     * level-triggered on the hub, so the hub keeps reporting p until
+     * somebody drains it with a wait of timeout 0. */
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = EPOLLIN;
+    ev.data.u64 = token;
+    return epoll_ctl(hub->epfd, EPOLL_CTL_ADD, p->epfd, &ev) == 0 ? 0 : errno;
+}
 
 const char *zell__plat_poller_backend(zell__plat_poller *p) {
     return p->u ? "io_uring" : "epoll";

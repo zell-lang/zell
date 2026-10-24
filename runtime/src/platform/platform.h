@@ -380,10 +380,28 @@ ZELL_PLAT_HIDDEN const char *zell__plat_poller_backend(zell__plat_poller *p);
  * ZELL_PLAT_HUP for a peer shutdown and ZELL_PLAT_ERROR for an error or
  * hang-up: both conditions last, but a read that returns the data before
  * them does not report them, so the caller treats them as permanent. */
+/* Scheduler polling (ABI.md 10.9 "Polling from the workers"): whether p
+ * may be polled by any thread of the scheduler, one at a time and mostly
+ * with timeout 0 (an idle worker looking for work), and linked into a hub
+ * poller with zell__plat_poller_link. A backend that answers true opts
+ * its pollers out of the dedicated poller threads: task_io.c then blocks
+ * in one hub (the last worker to go idle does, like Go's netpoller) and
+ * the workers pick readiness up between jobs. Today epoll answers true
+ * (io_uring, kqueue, IOCP and WSAPoll keep the dedicated threads); kqueue
+ * can opt in by implementing both functions (a kqueue is pollable by
+ * another kqueue). */
 #if defined(__linux__)
 ZELL_PLAT_HIDDEN bool zell__plat_poller_edge(zell__plat_poller *p);
+ZELL_PLAT_HIDDEN bool zell__plat_poller_shared(zell__plat_poller *p);
+/* Makes `hub` report `token` (level-triggered, no direction bits) while p
+ * has events to report, so one blocking wait on the hub covers every
+ * linked poller; the caller then polls p with timeout 0. Both must be
+ * shared pollers. Returns 0 or an errno. */
+ZELL_PLAT_HIDDEN int zell__plat_poller_link(zell__plat_poller *hub, zell__plat_poller *p, uint64_t token);
 #else
 static inline bool zell__plat_poller_edge(zell__plat_poller *p) { (void)p; return false; }
+static inline bool zell__plat_poller_shared(zell__plat_poller *p) { (void)p; return false; }
+static inline int zell__plat_poller_link(zell__plat_poller *hub, zell__plat_poller *p, uint64_t token) { (void)hub; (void)p; (void)token; return 95; /* EOPNOTSUPP */ }
 #endif
 
 /* ---- process, console, environment (posix.c / win32.c) ---------------- */
