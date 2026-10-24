@@ -1001,6 +1001,18 @@ static struct zell_task done_task = {
 
 zell_task *zell_task_done(void) { return &done_task; }
 
+/* The immortal yield sentinel: what task.Yield returns. It is never done;
+ * add_cont recognises it and posts the continuation straight to the ring
+ * tail (behind queued work) instead of registering it, so a Yield costs no
+ * task object and one job. A blocking zell_task_await of it from a
+ * non-task thread waits on a fresh task completed by a job (task_wait).
+ * Cancel, deadlines and fire on it are no-ops; retain/release are no-ops. */
+static struct zell_task yield_task = {
+    .hdr = { ZELL_RC_IMMORTAL, &task_type }, .state = TASK_PENDING,
+};
+
+static inline bool is_yield(const zell_task *t) { return t == &yield_task; }
+
 /* The current task stops running on this thread: its parent is current. */
 static void restore_parent(zell_task *t) {
     if (t_cur != t) return;
@@ -1028,6 +1040,7 @@ static bool task_complete(zell_task *t, const void *result) {
 /* pmsg/ptrace (borrowed, retained here): complete t as panicked. */
 static bool task_complete_ex(zell_task *t, const void *result, zell_string *pmsg, zell_string *ptrace) {
     if (!t) zell_panic_nil();
+    if (is_yield(t)) return false;
     /* A waiter that sees DONE may drop the last reference at once, while
      * this thread still writes t (conts, the lock word, t_cur): hold one
      * until the task is left (the drop then runs on whichever thread lets
@@ -1111,8 +1124,37 @@ bool zell_task_is_done(const zell_task *t) {
  * continuation is published: once it is, the continuation may resume on
  * another thread, whose restore_parent must not race with ours on the
  * task's ctx_saved/caller_ctx. */
+/* add_cont on the yield sentinel: the continuation is posted at once to
+ * the ring tail with the caller's context, as a registered continuation
+ * would be by a completion (same ownership: ctx retained, cur moved when
+ * suspending), never to run-next, so it runs behind already queued work. */
+static bool yield_cont(zell_resume_fn fn, void *frame, bool suspend) {
+    zell_object *ctx = t_ctx;
+    zell_retain(ctx);
+    zell_object *drop_ctx = NULL;
+    zell_task *cur = t_cur;
+    if (suspend && cur) {
+        /* restore_parent with the current-task reference moved into the
+         * job; done before posting, since the job may run elsewhere. */
+        if (cur->ctx_saved) {
+            drop_ctx = t_ctx;
+            t_ctx = cur->caller_ctx;
+            cur->caller_ctx = NULL;
+            cur->ctx_saved = 0;
+        }
+        zell_retain(cur->parent);
+        t_cur = cur->parent;
+    } else {
+        zell_retain(cur);
+    }
+    zell_release(drop_ctx);
+    sched_post_ctx(fn, frame, ctx, cur, false);
+    return true;
+}
+
 static bool add_cont(zell_task *t, zell_resume_fn fn, void *frame, bool suspend) {
     if (!t || !fn) zell_panic_nil();
+    if (is_yield(t)) return yield_cont(fn, frame, suspend);
     if (zell_task_is_done(t)) return false;
     task_lock(t);
     if (t->state == TASK_DONE) {
@@ -1194,11 +1236,13 @@ static void *checked_slot_err(zell_task *t, int64_t err_off) {
 }
 
 void *zell_task_result(const zell_task *t) {
+    if (is_yield(t)) return yield_task.slot;   /* resumed after a Yield */
     if (!zell_task_is_done(t)) zell_panic("task result read before completion");
     return checked_slot((zell_task *)t);
 }
 
 void *zell_task_result_err(zell_task *t, int64_t err_off) {
+    if (is_yield(t)) return t->slot;   /* resumed after a Yield */
     if (!zell_task_is_done(t)) zell_panic("task result read before completion");
     return checked_slot_err(t, err_off);
 }
@@ -1245,8 +1289,23 @@ void *zell_task_await_main(zell_task *t) {
     return t->slot;
 }
 
+static void yield_job(void *arg) {
+    zell_task *t = arg;
+    zell_task_complete(t, NULL);
+    zell_release(t);
+}
+
 static void *task_wait(zell_task *t) {
     if (!t) zell_panic_nil();
+    if (is_yield(t)) {
+        /* A blocking await of task.Yield: a fresh task completed by a job. */
+        zell_task *y = task_new_ex(0, NULL, 0);
+        zell_retain(y);  /* held by the job */
+        zell_sched_post(yield_job, y);
+        task_wait(y);
+        zell_release(y);
+        return t->slot;
+    }
     if (zell_task_is_done(t)) return t->slot;
     int over = 0;            /* blocked past the spare limit: watch for a stall */
     int64_t unblocks0 = 0;
@@ -1516,6 +1575,7 @@ zell_task *zell_task_delay(int64_t ms) {
 
 void zell_task_set_deadline(zell_task *t, int64_t ms) {
     if (!t) zell_panic_nil();
+    if (is_yield(t)) return;
     if (ms <= 0) { zell_task_cancel(t); return; }
     timer_insert(ms, NULL, t);
 }
@@ -1663,6 +1723,7 @@ zell_task *zell_task_rt_waker(void) { return task_new_ex(0, NULL, 0); }
  * zell_task_delay timer, the timer is cancelled first. */
 void zell_task_rt_fire(zell_task *t) {
     if (!t) zell_panic_nil();
+    if (is_yield(t)) return;
     timer *found = NULL;
     /* t->timer is set before a delay task is handed out and only cleared
      * afterwards, so NULL here means no pending timer: signals, wakers and
@@ -1695,18 +1756,7 @@ void zell_task_spin_unlock(int64_t *slot) {
     __atomic_store_n(slot, 0, __ATOMIC_RELEASE);
 }
 
-static void yield_job(void *arg) {
-    zell_task *t = arg;
-    zell_task_complete(t, NULL);
-    zell_release(t);
-}
-
-zell_task *zell_task_yield(void) {
-    zell_task *t = task_new_ex(0, NULL, 0);
-    zell_retain(t);  /* held by the job */
-    zell_sched_post(yield_job, t);
-    return t;
-}
+zell_task *zell_task_yield(void) { return &yield_task; }
 
 /* ======================================================================
  * Cancellation (ABI.md 10.11): a tree of tasks (parent = the current task
@@ -1730,6 +1780,7 @@ static void cancel_collect(zell_task *t, hook **out) {
 
 void zell_task_cancel(zell_task *t) {
     if (!t) zell_panic_nil();
+    if (is_yield(t)) return;
     hook *hs = NULL;
     cancel_collect(t, &hs);
     while (hs) {

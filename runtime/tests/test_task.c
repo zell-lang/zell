@@ -776,6 +776,70 @@ TEST(misuse_panics) {
     assert(strstr(buf, "panic: unlock of unlocked mutex"));
 }
 
+/* ---- task.Yield (ABI.md 10.2): the immortal yield sentinel posts the
+ * continuation to the ring tail, behind the jobs this worker already
+ * queued and ahead of the ones queued after it (never run-next, which
+ * would run it first). Every other worker is held busy so nobody steals
+ * and the order is deterministic. ---- */
+
+#define YQ 16
+static int64_t y_order[YQ + 2], y_n, y_blockers_in, y_release, y_done;
+
+static void y_rec(void *arg) {
+    int64_t i = __atomic_fetch_add(&y_n, 1, __ATOMIC_ACQ_REL);
+    y_order[i] = (int64_t)(intptr_t)arg;
+    if ((intptr_t)arg == YQ + 1) __atomic_store_n(&y_done, 1, __ATOMIC_RELEASE);
+}
+
+static void y_nop(void *arg) { (void)arg; }
+
+static void y_blocker(zell_task *t, void *ctx) {
+    (void)ctx;
+    __atomic_add_fetch(&y_blockers_in, 1, __ATOMIC_ACQ_REL);
+    while (!__atomic_load_n(&y_release, __ATOMIC_ACQUIRE)) sched_yield();
+    zell_task_complete(t, NULL);
+}
+
+static void y_poster(zell_task *t, void *ctx) {
+    (void)ctx;
+    for (intptr_t i = 0; i < YQ; i++) zell_sched_post(y_rec, (void *)i);
+    zell_task *y = zell_task_yield();
+    assert(y == zell_task_yield());          /* one immortal object */
+    assert(!zell_task_is_done(y));
+    assert(zell_task_add_continuation(y, y_rec, (void *)(intptr_t)YQ));
+    zell_sched_post(y_rec, (void *)(intptr_t)(YQ + 1));
+    zell_release(y);                         /* no-op */
+    zell_task_complete(t, NULL);
+}
+
+TEST(yield_ring_tail) {
+    int64_t nw = zell_sched_workers();
+    zell_task *bl[256];
+    assert(nw - 1 <= 256);
+    y_n = y_blockers_in = y_release = y_done = 0;
+    /* Spare workers of earlier tests retire when they next park: wake the
+     * parked ones with no-op jobs until only the core workers are left
+     * (the second peak call reports the threads alive now). */
+    int64_t t0 = now_ms();
+    zell__sched_threads_peak();
+    while (zell__sched_threads_peak() > nw) {
+        assert(now_ms() - t0 < 5000);
+        for (int i = 0; i < 64; i++) zell_sched_post(y_nop, NULL);
+        usleep(2000);
+    }
+    for (int64_t i = 0; i < nw - 1; i++) bl[i] = zell_task_spawn(y_blocker, NULL);
+    while (__atomic_load_n(&y_blockers_in, __ATOMIC_ACQUIRE) < nw - 1) { assert(now_ms() - t0 < 5000); sched_yield(); }
+    zell_task *p = zell_task_spawn(y_poster, NULL);
+    while (!__atomic_load_n(&y_done, __ATOMIC_ACQUIRE)) { assert(now_ms() - t0 < 5000); sched_yield(); }
+    for (int64_t i = 0; i <= YQ + 1; i++) assert(y_order[i] == i);
+    __atomic_store_n(&y_release, 1, __ATOMIC_RELEASE);
+    for (int64_t i = 0; i < nw - 1; i++) { zell_task_await(bl[i]); zell_release(bl[i]); }
+    zell_task_await(p);
+    zell_release(p);
+    /* A blocking await of the sentinel from a non-task thread returns. */
+    zell_task_await(zell_task_yield());
+}
+
 int main(int argc, char **argv) {
     printf("test_task\n");
     setenv("ZELL_WORKERS", "3", 1);
@@ -793,6 +857,7 @@ int main(int argc, char **argv) {
     RUN(spawn_await);
     RUN(many_spawns_all);
     RUN(nested_await_on_worker);
+    RUN(yield_ring_tail);
     RUN(coroutine_protocol);
     RUN(delay_any);
     RUN(timer_heap_order_and_fire);

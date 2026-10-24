@@ -1795,7 +1795,7 @@ Rules and guarantees:
 | `zell_task *zell_task_rt_waker(void)` | the same, but never fired by cancellation (`Mutex`, `WaitGroup`) |
 | `void zell_task_rt_fire(zell_task *t)` | completes `t` if it is still pending; if `t` is a pending `zell_task_delay` timer, the timer is cancelled first (used by `task.Timeout`) |
 | `void zell_task_spin_lock(int64_t *slot)` / `zell_task_spin_unlock` | a test-and-set spin lock on an `int64_t` (0 = free, 1 = held; spins, then yields the CPU). Zell code passes `&this.guard` of an `int` field. Hold it only for a few statements, never across an `await` |
-| `zell_task *zell_task_yield(void)` | `task.Yield()`: +1 `Task<void>` completed by a fresh job, so awaiting it reschedules the coroutine (on any worker) |
+| `zell_task *zell_task_yield(void)` | `task.Yield()`: the immortal yield sentinel (retain/release no-ops, never done, no allocation). `zell_task_add_continuation` on it posts the continuation at once, with the caller's context and current task, to the **tail** of the worker's ring (global queue off a worker), never to run-next, so the coroutine resumes behind already queued work, on any worker; `zell_task_all`/`zell_task_any` treat it the same way, `zell_task_result` on it returns its empty slot, and cancel, deadlines and fire on it are no-ops. A blocking `zell_task_await` of it (non-task code) waits on a fresh task completed by a job |
 
 `task.Delay`, `task.All`, `task.Any` and `task.Yield` are runtime functions; the
 rest of `task` is Zell (`compiler/src/sema/stdlib_src/task.zl`):
