@@ -187,7 +187,12 @@ ZELL_DEBUG=:2345 ./app         # start the agent, then: zell debug attach :2345
 (step out), `p expr`, `locals`, `bt`, `up`/`down`, `tasks`, `task N`,
 `catch panic`, `catch error [Type]`, `q`. Breakpoint conditions are
 evaluated inside the process, so they are fast; `next` steps over an
-`await` within the same task.
+`await` within the same task. `tasks` lists tasks, not every suspended
+async call: an `await f()` of an async function directly inside another
+one runs `f` without a task of its own (its frame is linked to the
+awaiting frame), so a chain of such calls shows up as the task at its
+root; `bt` in a stopped frame shows the frames running on the current
+thread.
 
 In VS Code, the extension in `editors/vscode` launches programs with the
 agent (`"type": "zell"` in `launch.json`) and supports breakpoints,

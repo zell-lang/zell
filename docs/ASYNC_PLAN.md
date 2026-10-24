@@ -230,6 +230,22 @@ Expected gains are derived from the profile shares and counts above;
 - Expected: yield phase 96 -> <= 28 ms (<= 4x Go); websocket CPU per message
   -8%. Risk high (the hardest race of 10.3, every async spec test). Size 16-24 h.
 
+- Done (2026-10-25), with one change to the design above: no state
+  machine and no atomics. The awaiter's handle goes into the slot's first
+  word (`{ ptr task; T value }`, no new fields), the callee leaves
+  `LINKED` there and **defers** its registration (`zell_coro_defer`); the
+  frames above it link with plain stores and the last frame of the
+  synchronous chain to suspend publishes it (`zell_coro_register`), so a
+  callee can never finish before its awaiter suspended and no CAS or
+  exchange is needed (ABI.md 10.3). Measured (medians of 3, same session,
+  HEAD -> C2, Go): await_chain yield 87 -> 20 ms (Go 7), sync 130 -> 129
+  (Go 10); websocket_echo server CPU 11.3 -> 9.2 us/msg at 538k -> 591k
+  msg/s (Go 7.6 us, 673k, measured as server ticks / messages with the Go
+  client); http_hello HTTP/1.1 server CPU 8.5 -> 8.3 us/request, h2 server
+  CPU 27.7 -> 25.9 us/request but 89k -> 86k req/s (one latency-bound
+  connection); channel_pingpong, select_many, fanout_fanin, spawn_tasks
+  unchanged within noise (fan-in and spawn run 1M +2%).
+
 ### C3. Cheaper synchronous frames (codegen + runtime)
 - Change: (a) frames from a non-zeroing allocator: the lowering already
   stores zero into every slot the unwind path reads (`entry_alloca` init

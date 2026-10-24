@@ -2,7 +2,8 @@
 //! modelled on `runtime/tests/coro_lowering.ll`).
 //!
 //! An `async func f(params) T` is `void @f(params, ptr %res)` with
-//! `%res -> { ptr task; T value }` ([`CodeGen::coro_res_ty`]). Ramp layout:
+//! `%res -> { ptr task; T value }` ([`CodeGen::coro_res_ty`]; the caller
+//! first stores NULL or its own frame handle into `task`). Ramp layout:
 //! `entry` (allocas) -> `init` (`coro.id`, `coro.alloc`) -> `coro.alloc`
 //! (frame from `zell_coro_frame_alloc`, skipped when LLVM proves the
 //! coroutine never suspends) -> `coro.begin` (`coro.begin`, the caller's
@@ -23,6 +24,18 @@
 //! `res.task` is NULL ([`CodeGen::await_expr`]); callers that keep the
 //! `Task<T>` materialise a completed one ([`CodeGen::coro_res_task`]).
 //! Outside a coroutine (C `main`), `await` blocks with `zell_task_await`.
+//!
+//! **Frame-linked await** (ABI.md 10.3): `await g()` inside a coroutine
+//! passes the frame handle in `res.task`, and `g` makes no task: its
+//! first suspension takes the link step of [`CodeGen::coro_suspend_begin`]
+//! (`coro.task` = awaiter + 1, `res.task = LINKED`) and defers its
+//! registration (`zell_coro_defer`); each awaiter above that links as well
+//! just suspends, and the last frame of the synchronous chain to suspend
+//! publishes the registration (`zell_coro_register`,
+//! [`CodeGen::await_linked`]). `g`'s return moves the result into
+//! `res.value` and hands the awaiter to `zell_coro_next` (resumed by the
+//! job loop); its destroy path hands a panic over as a `task.Panic` error
+//! in `res.task`.
 
 use super::{unsupported, CodeGen, Coro, Val, R};
 use crate::hir::{self, Callee, Expr, ExprKind, FuncId};
@@ -32,6 +45,9 @@ use inkwell::llvm_sys::prelude::{LLVMTypeRef, LLVMValueRef};
 use inkwell::types::{AsTypeRef, StructType};
 use inkwell::values::{AsValueRef, BasicValueEnum, IntValue, PointerValue};
 use inkwell::IntPredicate;
+
+/// States of a result slot's `state` word (ABI.md 10.3, `ZELL_LINK_*`).
+const LINK_LINKED: u64 = 1;
 
 impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// Calls intrinsic `name` (non-overloaded) with raw arguments.
@@ -57,16 +73,65 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
-    /// The result slot an async call writes: `{ ptr task; T value }`
-    /// (`{ ptr task }` for `Task<void>`). `task` is the coroutine's
-    /// `Task<T>` (+1) once it suspended, or NULL with the result (+1) in
-    /// `value` when it completed synchronously.
+    /// The result slot an async call writes: `{ ptr task; T value }` (no
+    /// `value` for `Task<void>`). The caller stores the awaiting frame's
+    /// handle into `task` (a direct `await` in a coroutine: frame-linked,
+    /// ABI.md 10.3) or NULL (the caller keeps the `Task<T>` or blocks).
+    /// With NULL the callee leaves its `Task<T>` (+1) there once it
+    /// suspended, or NULL with the result (+1) in `value` when it
+    /// completed synchronously. Linked, `task` becomes the hand-off state:
+    /// NULL (returned synchronously) or `LINK_LINKED` after the call, and
+    /// once the callee ended `LINK_LINKED` (returned, the result moved
+    /// into `value`) or the `task.Panic` error (+1) of its panic.
     pub(crate) fn coro_res_ty(&mut self, ret: TypeId) -> StructType<'ctx> {
         let mut fs: Vec<inkwell::types::BasicTypeEnum<'ctx>> = vec![self.ptr_ty().into()];
         if let Some(t) = self.llty_opt(ret) {
             fs.push(t);
         }
         self.ctx.struct_type(&fs, false)
+    }
+
+    /// Stores the caller's part of a result slot before the call: the
+    /// awaiting frame's handle, or NULL.
+    pub(crate) fn coro_res_init(&mut self, ret: TypeId, res: PointerValue<'ctx>, awaiter: Option<PointerValue<'ctx>>) {
+        let wp = self.coro_res_field(ret, res, 0);
+        self.b.build_store(wp, awaiter.unwrap_or(self.ptr_ty().const_null())).unwrap();
+    }
+
+    /// The thread-local `zell_coro_next` (ABI.md 10.3): the awaiter a
+    /// linked callee hands over when it ends, resumed by the job loop.
+    fn coro_next_global(&mut self) -> PointerValue<'ctx> {
+        let g = match self.module.get_global("zell_coro_next") {
+            Some(g) => g,
+            None => {
+                let g = self.module.add_global(self.ptr_ty(), None, "zell_coro_next");
+                g.set_thread_local(true);
+                g.set_linkage(inkwell::module::Linkage::External);
+                g
+            }
+        };
+        g.as_pointer_value()
+    }
+
+    /// Splits a `coro.task` slot value: the frame's own task (NULL when it
+    /// has none) and its awaiter when the frame is linked (the slot then
+    /// holds the awaiter's handle + 1; NULL otherwise).
+    fn coro_own_link(&mut self, ts: PointerValue<'ctx>) -> (PointerValue<'ctx>, PointerValue<'ctx>) {
+        let i64t = self.i64_ty();
+        let null = self.ptr_ty().const_null();
+        let bits = self.b.build_ptr_to_int(ts, i64t, "").unwrap();
+        let tag = self.b.build_and(bits, i64t.const_int(1, false), "").unwrap();
+        let linked = self.b.build_int_compare(IntPredicate::NE, tag, i64t.const_zero(), "linked").unwrap();
+        let own = self.b.build_select(linked, null, ts, "own").unwrap().into_pointer_value();
+        let aw = unsafe { self.b.build_gep(self.ctx.i8_type(), ts, &[i64t.const_all_ones()], "") }.unwrap();
+        let lk = self.b.build_select(linked, aw, null, "lk").unwrap().into_pointer_value();
+        (own, lk)
+    }
+
+    /// The slot word at `p` as an integer. Plain: the callee wrote it on
+    /// this thread (synchronously, or before the cascade that resumed us).
+    fn load_word(&mut self, p: PointerValue<'ctx>) -> IntValue<'ctx> {
+        self.b.build_load(self.i64_ty(), p, "res.word").unwrap().into_int_value()
     }
 
     /// Address of `res.task` (`i == 0`) or `res.value` (`i == 1`).
@@ -172,7 +237,29 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let sync = self.b.build_is_null(own, "").unwrap();
         let fin_sync = self.block("coro.fin.sync");
         let fin_task = self.block("coro.fin.task");
-        self.b.build_conditional_branch(sync, fin_sync, fin_task).unwrap();
+        let fin_chk = self.block("coro.fin.chk");
+        let fin_link = self.block("coro.fin.link");
+        self.b.build_conditional_branch(sync, fin_sync, fin_chk).unwrap();
+        self.b.position_at_end(fin_chk);
+        let (_, lk) = self.coro_own_link(own);
+        let linked = self.b.build_is_not_null(lk, "").unwrap();
+        self.b.build_conditional_branch(linked, fin_link, fin_task).unwrap();
+        // Suspended linked to the awaiter (no task): the result moved into
+        // its slot, the awaiter's context again, then DONE; an awaiter that
+        // suspended meanwhile is handed to the job loop (zell_coro_next).
+        self.b.position_at_end(fin_link);
+        if let Some(t) = rt {
+            self.settle_fallible_slot(t, slot);
+            let lt = self.llty(t);
+            let v = self.b.build_load(lt, slot, "").unwrap();
+            let vp = self.coro_res_field(co.ret, co.res, 1);
+            self.b.build_store(vp, v).unwrap();
+        }
+        let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
+        self.call_rt("zell_coro_leave", &[ctx0.into()]);
+        let next = self.coro_next_global();
+        self.b.build_store(next, lk).unwrap();
+        self.b.build_unconditional_branch(co.cleanup).unwrap();
         // Never suspended: the caller's context again, the result (moved,
         // no retain) and a NULL task into the caller's slot.
         self.b.position_at_end(fin_sync);
@@ -219,38 +306,50 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         };
         let ready = self.block("await.ready");
         let try_ = self.block("await.try");
-        let publish = self.block("await.publish");
-        let save = self.block("await.save");
-        let susp = self.block("await.suspend");
         let done = self.call_rt_v("zell_task_is_done", &[t.into()]).into_int_value();
         self.b.build_conditional_branch(done, ready, try_).unwrap();
-        // The coroutine's own task, made now if this is its first
-        // suspension; the caller then gets it through `res.task`.
         self.b.position_at_end(try_);
-        let cur = self.b.build_load(self.ptr_ty(), co.task_slot, "").unwrap().into_pointer_value();
-        let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
-        let own = self.call_rt_v("zell_task_lazy", &[cur.into(), co.ret_size.into(), co.ret_ops.into(), ctx0.into()]).into_pointer_value();
-        self.b.build_store(co.task_slot, own).unwrap();
-        let first = self.b.build_is_null(cur, "").unwrap();
-        self.b.build_conditional_branch(first, publish, save).unwrap();
-        self.b.position_at_end(publish);
-        let tp = self.coro_res_field(co.ret, co.res, 0);
-        self.b.build_store(tp, own).unwrap();
-        self.b.build_unconditional_branch(save).unwrap();
-        self.b.position_at_end(save);
+        let (own, kind, ctxr) = self.coro_suspend_begin();
         self.dbga_suspend();
         // Off the thread's frame chain before the frame may resume elsewhere.
         self.coro_chain_pop();
         let repush = self.block("await.repush");
         let sv = self.intrinsic("llvm.coro.save", &mut [co.hdl.as_value_ref()]);
         let resume = self.rt("zell_coro_resume").as_global_value().as_pointer_value();
-        let reg = self.call_rt_v("zell_task_add_continuation", &[t.into(), resume.into(), co.hdl.into()]).into_int_value();
-        self.b.build_conditional_branch(reg, susp, repush).unwrap();
+        let susp = self.block("await.suspend");
+        // Linked just now: the registration waits for the frame that
+        // suspends last on this stack (zell_coro_register), so nothing can
+        // resume this frame before its awaiters have suspended too.
+        let i8t = self.ctx.i8_type();
+        let now = self.b.build_int_compare(IntPredicate::EQ, kind, i8t.const_int(1, false), "").unwrap();
+        let d_b = self.block("await.defer");
+        let r_b = self.block("await.register");
+        self.b.build_conditional_branch(now, d_b, r_b).unwrap();
+        self.b.position_at_end(d_b);
+        self.call_rt("zell_coro_defer", &[t.into(), co.hdl.into(), ctxr.into()]);
+        self.b.build_unconditional_branch(susp).unwrap();
+        // A frame with a task suspends it (the parent is current again); a
+        // linked frame registers under the current task, which is not its own.
+        self.b.position_at_end(r_b);
+        let has_own = self.b.build_is_not_null(own, "").unwrap();
+        let r_own = self.block("await.reg.own");
+        let r_link = self.block("await.reg.link");
+        let r_join = self.block("await.reg");
+        self.b.build_conditional_branch(has_own, r_own, r_link).unwrap();
+        self.b.position_at_end(r_own);
+        let a = self.call_rt_v("zell_task_add_continuation", &[t.into(), resume.into(), co.hdl.into()]).into_int_value();
+        self.b.build_unconditional_branch(r_join).unwrap();
+        self.b.position_at_end(r_link);
+        let b = self.call_rt_v("zell_task_add_continuation_linked", &[t.into(), resume.into(), co.hdl.into()]).into_int_value();
+        self.b.build_unconditional_branch(r_join).unwrap();
+        self.b.position_at_end(r_join);
+        let reg = self.b.build_phi(self.ctx.bool_type(), "reg").unwrap();
+        reg.add_incoming(&[(&a, r_own), (&b, r_link)]);
+        self.b.build_conditional_branch(reg.as_basic_value().into_int_value(), susp, repush).unwrap();
         self.b.position_at_end(susp);
         let fls = self.ctx.bool_type().const_zero().as_value_ref();
         let s = self.intrinsic("llvm.coro.suspend", &mut [sv, fls]);
         let sv = unsafe { IntValue::new(s) };
-        let i8t = self.ctx.i8_type();
         self.b.build_switch(sv, co.done, &[(i8t.const_zero(), repush), (i8t.const_int(1, false), co.unwind)]).unwrap();
         self.b.position_at_end(repush);
         self.coro_chain_push();
@@ -258,6 +357,57 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.position_at_end(ready);
         self.dbga_resume();
         self.task_result_rt(t, err_off)
+    }
+
+    /// The first-suspension step of an `await` that has to suspend (ABI.md
+    /// 10.3): a frame whose caller put its handle into `res.task` links to
+    /// it (`coro.task` = handle + 1, `res.task = LINKED`, no task; the
+    /// caller's context, retained, is to be made current once the
+    /// suspension is published), any other frame makes its task
+    /// (`zell_task_lazy`, published in `res.task`). Returns the frame's
+    /// task (NULL when linked), the step taken now (0: not the first
+    /// suspension, 1: linked, 2: task made) and the retained context of
+    /// step 1 (NULL otherwise).
+    fn coro_suspend_begin(&mut self) -> (PointerValue<'ctx>, IntValue<'ctx>, PointerValue<'ctx>) {
+        let co = self.fs().coro.unwrap();
+        let null = self.ptr_ty().const_null();
+        let i8t = self.ctx.i8_type();
+        let ts = self.b.build_load(self.ptr_ty(), co.task_slot, "").unwrap().into_pointer_value();
+        let first = self.b.build_is_null(ts, "first").unwrap();
+        let (own0, _) = self.coro_own_link(ts);
+        let from = self.b.get_insert_block().unwrap();
+        let fb = self.block("susp.first");
+        let fl = self.block("susp.link");
+        let fo = self.block("susp.task");
+        let join = self.block("susp.join");
+        self.b.build_conditional_branch(first, fb, join).unwrap();
+        self.b.position_at_end(fb);
+        let wp = self.coro_res_field(co.ret, co.res, 0);
+        let aw = self.b.build_load(self.ptr_ty(), wp, "awaiter").unwrap().into_pointer_value();
+        let has = self.b.build_is_not_null(aw, "").unwrap();
+        self.b.build_conditional_branch(has, fl, fo).unwrap();
+        self.b.position_at_end(fl);
+        let tagged = unsafe { self.b.build_gep(i8t, aw, &[self.i64_ty().const_int(1, false)], "") }.unwrap();
+        self.b.build_store(co.task_slot, tagged).unwrap();
+        let linked = self.b.build_int_to_ptr(self.i64_ty().const_int(LINK_LINKED, false), self.ptr_ty(), "").unwrap();
+        self.b.build_store(wp, linked).unwrap();
+        let c0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap().into_pointer_value();
+        self.call_rt("zell_retain", &[c0.into()]);
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(fo);
+        let c1 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
+        let own = self.call_rt_v("zell_task_lazy", &[null.into(), co.ret_size.into(), co.ret_ops.into(), c1.into()]).into_pointer_value();
+        self.b.build_store(co.task_slot, own).unwrap();
+        self.b.build_store(wp, own).unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        let o = self.b.build_phi(self.ptr_ty(), "own").unwrap();
+        o.add_incoming(&[(&own0, from), (&null, fl), (&own, fo)]);
+        let k = self.b.build_phi(i8t, "step").unwrap();
+        k.add_incoming(&[(&i8t.const_zero(), from), (&i8t.const_int(1, false), fl), (&i8t.const_int(2, false), fo)]);
+        let c = self.b.build_phi(self.ptr_ty(), "ctxr").unwrap();
+        c.add_incoming(&[(&null, from), (&c0, fl), (&null, fo)]);
+        (o.as_basic_value().into_pointer_value(), k.as_basic_value().into_int_value(), c.as_basic_value().into_pointer_value())
     }
 
     /// The `T!` error word's byte offset in a task result of type `t`
@@ -288,7 +438,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// so no store to them is promoted to a register or dropped as dead:
     /// the unwind path then reads their current values from the frame.
     pub(crate) fn coro_escape_state(&mut self, open: &[(PointerValue<'ctx>, *const hir::Expr)], full: bool) {
-        let mut ptrs: Vec<PointerValue<'ctx>> = vec![self.fs().coro.unwrap().awaiting];
+        let co = self.fs().coro.unwrap();
+        let mut ptrs: Vec<PointerValue<'ctx>> = vec![co.awaiting];
         if full {
             ptrs.extend(open.iter().map(|(a, _)| *a));
             if let Some((arr, n)) = self.fs().defers {
@@ -339,8 +490,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let co = self.fs().coro.unwrap();
         let aw = self.b.build_load(self.ptr_ty(), co.awaiting, "").unwrap();
         self.call_rt("zell_release", &[aw.into()]);
-        let own = self.b.build_load(self.ptr_ty(), co.task_slot, "coro.own").unwrap();
+        let ts = self.b.build_load(self.ptr_ty(), co.task_slot, "coro.own").unwrap().into_pointer_value();
+        let (own, lk) = self.coro_own_link(ts);
         let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
+        let linked = self.b.build_is_not_null(lk, "").unwrap();
+        let ul = self.block("coro.unwind.link");
+        let uo = self.block("coro.unwind.task");
+        self.b.build_conditional_branch(linked, ul, uo).unwrap();
+        // Linked: the panic goes to the awaiter through its slot.
+        self.b.position_at_end(ul);
+        let wp = self.coro_res_field(co.ret, co.res, 0);
+        self.call_rt("zell_coro_unwound_linked", &[wp.into(), lk.into(), ctx0.into()]);
+        self.b.build_unconditional_branch(co.cleanup).unwrap();
+        self.b.position_at_end(uo);
         self.call_rt("zell_coro_unwound", &[own.into(), ctx0.into()]);
         self.b.build_unconditional_branch(co.cleanup).unwrap();
     }
@@ -376,10 +538,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     /// `await f(args)` of an async function: the result straight from the
-    /// call's slot when `f` completed synchronously, else the usual await
-    /// on the task it returned.
+    /// call's slot when `f` completed synchronously; outside a coroutine
+    /// the usual (blocking) await on the task it returned; inside one the
+    /// frame-linked protocol of ABI.md 10.3 ([`Self::await_linked`]).
     fn await_direct_call(&mut self, ty: TypeId, fid: FuncId, args: &[Expr]) -> R<Val<'ctx>> {
-        let res = self.call_async_direct(fid, args)?;
+        if let Some(co) = self.fs().coro {
+            let res = self.call_async_direct(fid, args, Some(co.hdl))?;
+            return Ok(self.await_linked(ty, res));
+        }
+        let res = self.call_async_direct(fid, args, None)?;
         let tp = self.coro_res_field(ty, res, 0);
         let t = self.b.build_load(self.ptr_ty(), tp, "res.task").unwrap().into_pointer_value();
         let sync = self.b.build_is_null(t, "").unwrap();
@@ -415,6 +582,97 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
             _ => Val::void(),
         })
+    }
+
+    /// The awaiter's side of a linked call that wrote `res` (ABI.md 10.3):
+    /// a NULL word is a synchronous return; LINKED means the callee
+    /// suspended without a task, so this frame suspends too, after its own
+    /// first-suspension step: linked as well (the registration the leaf
+    /// deferred stays pending for the frame below) or, as the last frame
+    /// of the synchronous chain, publishing it (`zell_coro_register`).
+    /// Resumed by the callee's end (`zell_coro_next`): the moved result,
+    /// or the panic it left in the word (`zell_coro_link_panic`).
+    fn await_linked(&mut self, ty: TypeId, res: PointerValue<'ctx>) -> Val<'ctx> {
+        let co = self.fs().coro.unwrap();
+        let i64t = self.i64_ty();
+        let i8t = self.ctx.i8_type();
+        let null = self.ptr_ty().const_null();
+        let wp = self.coro_res_field(ty, res, 0);
+        let st = self.load_word(wp);
+        let fast = self.block("await.fast");
+        let slow = self.block("await.linked");
+        let join = self.block("await.join");
+        let sync = self.b.build_int_compare(IntPredicate::EQ, st, i64t.const_zero(), "").unwrap();
+        self.b.build_conditional_branch(sync, fast, slow).unwrap();
+        self.b.position_at_end(fast);
+        let lt = self.llty_opt(ty);
+        let fv = lt.map(|lt| {
+            let vp = self.coro_res_field(ty, res, 1);
+            self.b.build_load(lt, vp, "").unwrap()
+        });
+        let fast_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(slow);
+        let (own, kind, ctxr) = self.coro_suspend_begin();
+        // The debug agent sees a task made just now as current (it may take
+        // the record a step was observed under, docs/DEBUGGER.md).
+        self.dbga_suspend();
+        self.coro_chain_pop();
+        let sv = self.intrinsic("llvm.coro.save", &mut [co.hdl.as_value_ref()]);
+        let now = self.b.build_int_compare(IntPredicate::EQ, kind, i8t.const_int(1, false), "").unwrap();
+        let lb = self.block("link.leave");
+        let rb = self.block("link.register");
+        let susp = self.block("link.suspend");
+        let repush = self.block("link.repush");
+        self.b.build_conditional_branch(now, lb, rb).unwrap();
+        self.b.position_at_end(lb);
+        self.call_rt("zell_coro_leave", &[ctxr.into()]);
+        self.b.build_unconditional_branch(susp).unwrap();
+        // Publishes the chain: no frame access from here to the suspend.
+        self.b.position_at_end(rb);
+        let has_own = self.b.build_is_not_null(own, "").unwrap();
+        self.call_rt("zell_coro_register", &[has_own.into()]);
+        self.b.build_unconditional_branch(susp).unwrap();
+        self.b.position_at_end(susp);
+        let fls = self.ctx.bool_type().const_zero().as_value_ref();
+        let s = self.intrinsic("llvm.coro.suspend", &mut [sv, fls]);
+        let sv = unsafe { IntValue::new(s) };
+        self.b.build_switch(sv, co.done, &[(i8t.const_zero(), repush), (i8t.const_int(1, false), co.unwind)]).unwrap();
+        self.b.position_at_end(repush);
+        self.coro_chain_push();
+        self.dbga_resume();
+        let w = self.load_word(wp);
+        let panicked = self.b.build_int_compare(IntPredicate::NE, w, i64t.const_int(LINK_LINKED, false), "").unwrap();
+        let pan = self.block("link.panicked");
+        let rd = self.block("link.value");
+        self.b.build_conditional_branch(panicked, pan, rd).unwrap();
+        // The callee panicked: the word holds its task.Panic error.
+        self.b.position_at_end(pan);
+        let e = self.b.build_int_to_ptr(w, self.ptr_ty(), "panic.err").unwrap();
+        let vp = if lt.is_some() { self.coro_res_field(ty, res, 1) } else { null };
+        let size = self.i64_ty().const_int(self.size_of(ty), false);
+        let eo = match self.fallible_err_off(ty) {
+            Some(o) => self.i64_ty().const_int(o, false),
+            None => self.i64_ty().const_all_ones(),
+        };
+        self.call_rt("zell_coro_link_panic", &[e.into(), vp.into(), size.into(), eo.into()]);
+        self.b.build_unconditional_branch(rd).unwrap();
+        self.b.position_at_end(rd);
+        let sv = lt.map(|lt| {
+            let vp = self.coro_res_field(ty, res, 1);
+            self.b.build_load(lt, vp, "").unwrap()
+        });
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        match (fv, sv) {
+            (Some(a), Some(b)) => {
+                let phi = self.b.build_phi(a.get_type(), "await.val").unwrap();
+                phi.add_incoming(&[(&a, fast_end), (&b, slow_end)]);
+                Val::owned(phi.as_basic_value())
+            }
+            _ => Val::void(),
+        }
     }
 
     /// `await t` with result type `ty`.

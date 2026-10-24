@@ -356,7 +356,28 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.agent_guard(on, |cg| {
             let v = cg.ctx.i32_type().const_int(id as u64, false);
             cg.call_rt("zell_dbg_stmt", &[frame.into(), v.into()]);
-            cg.call_rt("zell_dbg_leave", &[frame.into()]);
+            match cg.fs().coro {
+                // A frame-linked coroutine (ABI.md 10.3) ends without its
+                // task ending: it has none, its root's goes on.
+                Some(co) => {
+                    let ts = cg.b.build_load(cg.ptr_ty(), co.task_slot, "").unwrap().into_pointer_value();
+                    let bits = cg.b.build_ptr_to_int(ts, cg.i64_ty(), "").unwrap();
+                    let tag = cg.b.build_and(bits, cg.i64_ty().const_int(1, false), "").unwrap();
+                    let linked = cg.b.build_int_compare(inkwell::IntPredicate::NE, tag, cg.i64_ty().const_zero(), "").unwrap();
+                    let (lb, ob, jb) = (cg.block("dbg.leave.linked"), cg.block("dbg.leave"), cg.block("dbg.left"));
+                    cg.b.build_conditional_branch(linked, lb, ob).unwrap();
+                    cg.b.position_at_end(lb);
+                    cg.call_rt("zell_dbg_leave_linked", &[frame.into()]);
+                    cg.b.build_unconditional_branch(jb).unwrap();
+                    cg.b.position_at_end(ob);
+                    cg.call_rt("zell_dbg_leave", &[frame.into()]);
+                    cg.b.build_unconditional_branch(jb).unwrap();
+                    cg.b.position_at_end(jb);
+                }
+                None => {
+                    cg.call_rt("zell_dbg_leave", &[frame.into()]);
+                }
+            }
         });
     }
 

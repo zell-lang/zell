@@ -670,11 +670,14 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// A direct call of async function `fid`: returns the result slot it
     /// wrote (`CodeGen::coro_res_ty`), to be read by an `await` or turned
     /// into a `Task<T>` by `coro_res_task`.
-    pub(crate) fn call_async_direct(&mut self, fid: FuncId, args: &[Expr]) -> R<PointerValue<'ctx>> {
+    /// `awaiter` is the awaiting frame's handle for a linked call (ABI.md
+    /// 10.3), None when the caller keeps the `Task<T>` or blocks.
+    pub(crate) fn call_async_direct(&mut self, fid: FuncId, args: &[Expr], awaiter: Option<PointerValue<'ctx>>) -> R<PointerValue<'ctx>> {
         let (mut ma, moved_holds, d) = self.direct_args(fid, args)?;
         let ret = self.prog.funcs[fid.0 as usize].ret;
         let rty = self.coro_res_ty(ret);
         let res = self.entry_alloca(rty.into(), "res", false);
+        self.coro_res_init(ret, res, awaiter);
         ma.push(res.into());
         let fv = self.funcs[fid.0 as usize];
         self.b.build_call(fv, &ma, "").unwrap();
@@ -692,7 +695,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 if f.is_async {
                     // The call's `Task<T>` is kept (not awaited here).
                     let ret = f.ret;
-                    let res = self.call_async_direct(*fid, args)?;
+                    let res = self.call_async_direct(*fid, args, None)?;
                     let t = self.coro_res_task(ret, res);
                     return Ok(Val::owned(t.into()));
                 }

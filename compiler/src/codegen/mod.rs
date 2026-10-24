@@ -137,16 +137,28 @@
 //! closures (LIFO, up to 64 per call, kept in an alloca'd array), releases
 //! the locals and returns. `async` functions are LLVM switched-resume
 //! coroutines following ABI.md §10.3 (see [`async_`]): `void @f(params,
-//! ptr %res)` with `%res -> { ptr task; T value }`; the coroutine makes
-//! its `Task<T>` (`zell_task_lazy`) only at its first suspension and
-//! stores it into `res.task`, while a body that returns without suspending
-//! leaves NULL there and moves its result into `res.value` (the
-//! synchronous fast path: no task, and no frame when the body has no
-//! suspend point, through `llvm.coro.alloc`). Frames come from
-//! `zell_coro_frame_alloc` and go back with `zell_coro_frame_free`. Callers
-//! awaiting a direct call read `res.value` when `res.task` is NULL; callers
-//! keeping the task, and thunks of async functions used as values,
-//! materialise a done task with `zell_task_completed`. The C `main` of an
+//! ptr %res)` with `%res -> { ptr task; T value }`; the caller stores
+//! into `res.task` NULL or, for a direct `await` inside a coroutine, its
+//! own frame handle. With NULL the coroutine makes its `Task<T>`
+//! (`zell_task_lazy`) only at its first suspension and stores it into
+//! `res.task`, while a body that returns without suspending leaves NULL
+//! there and moves its result into `res.value` (the synchronous fast
+//! path: no task, and no frame when the body has no suspend point,
+//! through `llvm.coro.alloc`). With a frame handle `f` never makes a task
+//! (frame-linked await, ABI.md 10.3): at its first suspension it keeps
+//! the awaiter in its task slot (handle + 1), leaves `LINKED` (1) in
+//! `res.task` and defers its registration (`zell_coro_defer`); the frames
+//! above it link the same way, and the last frame of the synchronous chain
+//! to suspend publishes it (`zell_coro_register`). `f`'s return moves the
+//! result into `res.value` and stores the awaiter into the thread-local
+//! `zell_coro_next`, which `run_job` resumes; a panic leaves its
+//! `task.Panic` error in `res.task` (`zell_coro_unwound_linked`, read back
+//! by `zell_coro_link_panic`). Frames come from
+//! `zell_coro_frame_alloc` and go back with `zell_coro_frame_free`.
+//! Callers awaiting a direct call outside a coroutine read `res.value` when
+//! `res.task` is NULL; callers keeping the task, and thunks of async
+//! functions used as values, pass a NULL awaiter and materialise a done
+//! task with `zell_task_completed`. The C `main` of an
 //! `async func main` hands the ramp and its `main.res` slot to
 //! `zell_task_run_main(ramp, res)` (ABI.md §10.2, §11), which runs the
 //! ramp as a job on a worker and returns once it did; a non-NULL
@@ -405,11 +417,12 @@ pub(crate) struct Coro<'ctx> {
     pub ret: TypeId,
     pub ret_size: inkwell::values::IntValue<'ctx>,
     pub ret_ops: PointerValue<'ctx>,
-    /// Frame slot holding the coroutine's task (NULL until it suspends).
+    /// Frame slot holding the coroutine's task (NULL until it suspends),
+    /// or the awaiter's handle + 1 once it suspended linked (ABI.md 10.3).
     pub task_slot: PointerValue<'ctx>,
     /// Frame slot holding the caller's context (+1) to restore.
     pub ctx_slot: PointerValue<'ctx>,
-    /// The caller's result slot `{ ptr task; T value }` (last parameter).
+    /// The caller's result slot `{ ptr word; T value }` (last parameter).
     pub res: PointerValue<'ctx>,
     pub cleanup: BasicBlock<'ctx>,
     pub done: BasicBlock<'ctx>,
@@ -934,6 +947,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let ret = self.prog.funcs[entry.0 as usize].ret;
             let rty = self.coro_res_ty(ret);
             let res = self.entry_alloca(rty.into(), "main.res", true);
+            self.coro_res_init(ret, res, None);
             let ramp = ef.as_global_value().as_pointer_value();
             self.call_rt("zell_task_run_main", &[ramp.into(), res.into()]);
             let tp = self.b.build_struct_gep(rty, res, 0, "").unwrap();

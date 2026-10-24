@@ -605,6 +605,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     pub(crate) fn call_async_thunk(&mut self, target: FunctionValue<'ctx>, ret: TypeId, mut args: Vec<BasicMetadataValueEnum<'ctx>>) -> PointerValue<'ctx> {
         let rty = self.coro_res_ty(ret);
         let res = self.entry_alloca(rty.into(), "res", false);
+        self.coro_res_init(ret, res, None);
         args.push(res.into());
         self.b.build_call(target, &args, "").unwrap();
         self.coro_res_task(ret, res)
