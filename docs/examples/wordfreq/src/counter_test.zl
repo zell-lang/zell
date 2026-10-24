@@ -1,0 +1,46 @@
+// Unit tests for the counter. `zell test` in the project directory
+// compiles every *_test.zl file under src/ together with the package and
+// runs each @test function; `zell run` and `zell build` leave them out.
+namespace wordfreq.tests
+
+import wordfreq.counter
+
+@test func TestWordsAreLowerCasedAndSplitOnPunctuation(t *testing.T) {
+    var c = Counter.New()
+    c.AddLine("The cat; the CAT, the hat!")
+    testing.Equal(t, c.Count("the"), 3)
+    testing.Equal(t, c.Count("cat"), 2)
+    testing.Equal(t, c.Words, 6)
+    testing.Equal(t, c.Distinct(), 3)
+}
+
+@test func TestShortWordsAndApostrophes(t *testing.T) {
+    var c = Counter.New()
+    c.AddLine("I don't go to sea, it's cold'")
+    // "i", "go", "to" are shorter than MinLength; the apostrophe stays
+    // inside a word but not at its end.
+    testing.Equal(t, c.Count("don't"), 1)
+    testing.Equal(t, c.Count("it's"), 1)
+    testing.Equal(t, c.Count("cold"), 1)
+    testing.Equal(t, c.Count("go"), 0)
+}
+
+@test func TestTopBreaksTiesAlphabetically(t *testing.T) {
+    var c = Counter.New()
+    c.AddLine("pear apple pear fig apple kiwi")
+    var top = c.Top(3)
+    testing.Equal(t, len(top), 3)
+    testing.Equal(t, top[0].Word, "apple")
+    testing.Equal(t, top[1].Word, "pear")
+    testing.Equal(t, top[2].Word, "fig")
+    testing.Equal(t, len(c.Top(100)), 4)
+}
+
+@test func TestMissingFileIsAnError(t *testing.T) {
+    var c = Counter.New()
+    try c.AddFile("no/such/file.txt") catch err {
+        testing.Contains(t, err.Message(), "no/such/file.txt")
+        return
+    }
+    t.Fatal("AddFile succeeded on a missing file")
+}

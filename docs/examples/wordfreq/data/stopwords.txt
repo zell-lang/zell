@@ -1,0 +1,13 @@
+# Words too common to be interesting. One per line; lines starting
+# with # are comments.
+the
+and
+they
+them
+this
+that
+with
+from
+for
+its
+was

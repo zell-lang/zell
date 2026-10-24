@@ -1,0 +1,36 @@
+$ wordfreq --top 8 --stop data/stopwords.txt --out report.md data/harbor.txt data/garden.txt
+2 files, 13 lines, 70 words, 64 distinct
+
+#  word     count  share
+-  -------  -----  -----
+1  harbor       3   4.3%
+2  boats        2   2.9%
+3  rain         2   2.9%
+4  town         2   2.9%
+5  water        2   2.9%
+6  across       1   1.4%
+7  again        1   1.4%
+8  against      1   1.4%
+
+report: 15 lines written and verified
+[exit 0 ]
+
+$ wordfreq --top 3 data/garden.txt
+1 file, 6 lines, 45 words, 35 distinct
+
+#  word  count  share
+-  ----  -----  -----
+1  the       9  20.0%
+2  and       2   4.4%
+3  rain      2   4.4%
+[exit 0 ]
+
+$ wordfreq data/harbor.txt data/missing.txt
+wordfreq: open data/missing.txt: No such file or directory
+[exit 1 ]
+
+$ wordfreq --top many data/harbor.txt
+wordfreq: --top: strconv.Atoi: parsing "many": invalid syntax
+usage: wordfreq [--top N] [--stop words.txt] [--out report.md] file...
+[exit 2 ]
+

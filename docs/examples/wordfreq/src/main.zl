@@ -1,0 +1,126 @@
+// wordfreq: count the words of text files and print the most frequent
+// ones as a table, then save the same ranking as a Markdown report.
+//
+//     wordfreq [--top N] [--stop words.txt] [--out report.md] file...
+namespace wordfreq
+
+import io
+
+import wordfreq.counter
+
+// Options are the parsed command line. Hand-written parsing is enough for
+// two flags; a tool with subcommands would use the cli package (see the
+// todo-cli example).
+struct Options {
+    Top   int = 10
+    Out   string
+    Stop  string
+    Files []string
+}
+
+func parseArgs(args []string) Options! {
+    var o = Options{}
+    var i = 0
+    for i < len(args) {
+        var a = args[i]
+        switch a {
+            case "--top", "--out", "--stop":
+                if i + 1 >= len(args) {
+                    return error(a + " needs a value")
+                }
+                i += 1
+                switch a {
+                    // ?("...") wraps strconv's error with the flag name, so
+                    // the user learns which value was wrong.
+                    case "--top": o.Top = strconv.Atoi(args[i])?("--top")
+                    case "--out": o.Out = args[i]
+                    default:
+                        o.Stop = args[i]
+                }
+            default:
+                if strings.HasPrefix(a, "--") {
+                    return error("unknown flag " + a)
+                }
+                o.Files = append(o.Files, a)
+        }
+        i += 1
+    }
+    if len(o.Files) == 0 {
+        return error("no input files")
+    }
+    return o
+}
+
+// count does the work and is free to fail anywhere: every fallible step
+// ends in `?`, which hands the error to the caller unchanged or with
+// context. No error is printed here.
+func count(o Options, out io.Writer) void! {
+    var c = Counter.New()
+    if o.Stop != "" {
+        c.LoadStopWords(o.Stop)?
+    }
+    for path in o.Files {
+        c.AddFile(path)?
+    }
+    var top = c.Top(o.Top)
+    io.WriteString(out, report.Summary(c) + "\n\n")?
+    io.WriteString(out, report.Table(c, top) + "\n")?
+    if o.Out != "" {
+        report.Write(o.Out, c, top)?
+        var lines = report.Verify(o.Out, len(top))?
+        io.WriteString(out, fmt.Format("\nreport: {0} lines written and verified\n", lines))?
+    }
+}
+
+// run is the boundary between the program and the outside world: the one
+// place that turns errors into a message and an exit code. Taking the
+// writers as parameters keeps it testable.
+func run(args []string, stdout io.Writer, stderr io.Writer) int {
+    var o = try parseArgs(args) catch err {
+        _ = io.WriteString(
+            stderr,
+            "wordfreq: " +
+                err.Message() +
+                "\nusage: wordfreq [--top N] [--stop words.txt] [--out report.md] file...\n",
+        )
+        return 2
+    }
+    try count(o, stdout) catch err {
+        _ = io.WriteString(stderr, "wordfreq: " + err.Message() + "\n")
+        return 1
+    }
+    return 0
+}
+
+func main() {
+    // A real tool ends with:
+    //     os.Exit(run(os.Args()[1..], os.Stdout(), os.Stderr()))
+    // Here the argument lists are fixed so the output is reproducible, and
+    // errors go to stdout so they are part of it.
+    var out = os.Stdout()
+    var tmp = fs.Join(fs.TempDir(), "wordfreq-report.md")
+    var runs = [
+        [
+            "--top",
+            "8",
+            "--stop",
+            "data/stopwords.txt",
+            "--out",
+            tmp,
+            "data/harbor.txt",
+            "data/garden.txt",
+        ],
+        ["--top", "3", "data/garden.txt"],
+        ["data/harbor.txt", "data/missing.txt"],
+        ["--top", "many", "data/harbor.txt"],
+    ]
+    for args in runs {
+        println(
+            "$ wordfreq",
+            strings.Join(slices.Map(args, (a string) => strings.Replace(a, tmp, "report.md")), " "),
+        )
+        println("[exit", run(args, out, out), "]")
+        println()
+    }
+    _ = fs.Remove(tmp)
+}

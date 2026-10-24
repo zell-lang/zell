@@ -1,0 +1,115 @@
+// Counting words: tokenizing a line, reading a file line by line, and
+// turning the map of counts into a sorted ranking.
+namespace wordfreq.counter
+
+// Words shorter than this are skipped: "a", "an", "of" would otherwise
+// fill the top of every ranking.
+const MinLength = 3
+
+// One row of the ranking.
+struct Entry {
+    Word  string
+    Count int
+}
+
+// Counter accumulates word counts over any number of inputs.
+struct Counter {
+    counts map[string]int
+    stop   map[string]bool
+    Words  int
+    Lines  int
+    Files  int
+
+    // New returns an empty counter on the heap: the methods below change
+    // it in place, and every caller shares the one instance.
+    static func New() *Counter {
+        return new Counter{counts: map[string]int{}, stop: map[string]bool{}}
+    }
+
+    // LoadStopWords reads words to ignore, one per line. io.ReadLines is
+    // the simple way to read a small file whole; AddFile below shows the
+    // streaming way for inputs of any size.
+    func LoadStopWords(path string) void! {
+        for line in io.ReadLines(path)?("stop words") {
+            var w = strings.Trim(line)
+            if w != "" && !strings.HasPrefix(w, "#") {
+                this.stop[strings.ToLower(w)] = true
+            }
+        }
+    }
+
+    // AddLine splits one line into words. A word is a run of letters
+    // (apostrophes inside a word are kept, so "don't" stays one word);
+    // everything else separates words. Letters are lower-cased so that
+    // "The" and "the" count together.
+    func AddLine(line string) {
+        this.Lines += 1
+        var word []char = []
+        for r in strings.Runes(line) {
+            if unicode.IsLetter(r) || (r == '\'' && len(word) > 0) {
+                word = append(word, unicode.ToLower(r))
+                continue
+            }
+            this.flush(word)
+            word = []
+        }
+        this.flush(word)
+    }
+
+    func flush(runes []char) {
+        var word = strings.TrimRight(strings.FromRunes(runes), "'")
+        if len(word) < MinLength || this.stop[word] {
+            return
+        }
+        this.counts[word] += 1
+        this.Words += 1
+    }
+
+    // AddFile streams a file through a Scanner, so memory stays flat no
+    // matter how large the file is. The error from Open is returned to the
+    // caller as it is (its message already names the path). There is no
+    // `defer f.Close()`: os.File has a destructor (Drop), so the file is
+    // closed when f goes out of scope, on every path out of the function.
+    // Call Close yourself only when you want its error, as after writing.
+    func AddFile(path string) void! {
+        var f = os.Open(path)?
+        var sc = io.NewScanner(f)
+        for sc.Scan() {
+            this.AddLine(sc.Text())
+        }
+        // Scan returns false both at the end and on a read error, so the
+        // error is checked once after the loop, exactly like Go's bufio.
+        if sc.Err() != nil {
+            return errors.Wrap(sc.Err(), "read " + path)
+        }
+        this.Files += 1
+    }
+
+    // Distinct is the number of different words seen.
+    func Distinct() int {
+        return len(this.counts)
+    }
+
+    // Count returns how often a word occurred (0 when it never did).
+    func Count(word string) int {
+        return this.counts[word]
+    }
+
+    // Top returns the n most frequent words. Ties are broken
+    // alphabetically so the output is the same on every run: map
+    // iteration order is not something to rely on.
+    func Top(n int) []Entry {
+        var all []Entry = []
+        for word, count in this.counts {
+            all = append(all, Entry{Word: word, Count: count})
+        }
+        slices.SortFunc(
+            all,
+            (a Entry, b Entry) => a.Count > b.Count || (a.Count == b.Count && a.Word < b.Word),
+        )
+        if n < len(all) {
+            return all[..n]
+        }
+        return all
+    }
+}

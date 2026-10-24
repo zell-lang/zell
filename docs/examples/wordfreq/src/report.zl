@@ -1,0 +1,100 @@
+// Rendering the ranking: an aligned table for the terminal, a Markdown
+// file for sharing, and reading that file back to check what was written.
+namespace wordfreq.report
+
+import wordfreq.counter
+
+// Table renders the ranking for the terminal with text.table, which pads
+// every column to its widest cell. Numbers are right-aligned, as people
+// expect from a column of counts.
+func Table(c *Counter, top []Entry) string {
+    var t = text.table.New(header)
+    for col in [0, 2, 3] {
+        t.SetAlign(col, text.table.Right)
+    }
+    for row in rows(c, top) {
+        t.AddRow(row)
+    }
+    // The plain style pads the last column too; trimming keeps the output
+    // friendly to diff and to byte-exact tests.
+    var lines = slices.Map(strings.Split(t.String(), "\n"), (l string) => strings.TrimRight(l, " "))
+    return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+// Markdown renders the same rows as a GitHub table for the report file.
+func Markdown(c *Counter, top []Entry) string {
+    var all = [header]
+    for row in rows(c, top) {
+        all = append(all, row)
+    }
+    return text.table.Format(all, text.table.Markdown)
+}
+
+const header = ["#", "word", "count", "share"]
+
+func rows(c *Counter, top []Entry) [][]string {
+    var out [][]string = []
+    for i, e in top {
+        out = append(out, [
+            strconv.Itoa(i + 1),
+            e.Word,
+            strconv.Itoa(e.Count),
+            percent(e.Count, c.Words),
+        ])
+    }
+    return out
+}
+
+func percent(n int, total int) string {
+    if total == 0 {
+        return "-"
+    }
+    return fmt.Sprintf("%.1f%%", float(n) * 100.0 / float(total))
+}
+
+// Summary is the one-line overview printed above the table.
+func Summary(c *Counter) string {
+    return fmt.Format(
+        "{0}, {1}, {2}, {3} distinct",
+        plural(c.Files, "file"),
+        plural(c.Lines, "line"),
+        plural(c.Words, "word"),
+        c.Distinct(),
+    )
+}
+
+func plural(n int, noun string) string {
+    if n == 1 {
+        return "1 " + noun
+    }
+    return strconv.Itoa(n) + " " + noun + "s"
+}
+
+// Write saves the report as Markdown. Building the whole text first and
+// writing it with one call means a failed write never leaves half a
+// report behind with a success message printed.
+func Write(path string, c *Counter, top []Entry) void! {
+    var b = strings.Builder{}
+    b.Write("# Word frequencies\n\n")
+    b.Write(Summary(c) + "\n\n")
+    b.Write(Markdown(c, top))
+    b.Write("\n")
+    io.WriteFile(path, b.String())?("write report")
+}
+
+// Verify reads the report back and counts its table rows: a cheap
+// end-to-end check that what is on disk is what we meant to write.
+func Verify(path string, want int) int! {
+    var lines = io.ReadLines(path)?("read report back")
+    var rows = 0
+    for l in lines {
+        if strings.HasPrefix(l, "|") {
+            rows += 1
+        }
+    }
+    // header + separator + one row per entry
+    if rows != want + 2 {
+        return error(fmt.Format("report has {0} table rows, want {1}", rows, want + 2))
+    }
+    return len(lines)
+}
