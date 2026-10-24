@@ -1,0 +1,7 @@
+1h30m      5400 s = 1h30m
+90s          90 s = 1m30s
+2h5m10s    7510 s = 2h5m10s
+5m1h     error: duration "5m1h": units out of order at 3
+10x      error: duration "10x": unknown unit "x" at 2
+plan: 17m45s
+plan: step review: "review": unknown step

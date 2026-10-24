@@ -1,0 +1,121 @@
+// Tests for units.duration: a table of good inputs, a table of bad ones
+// checked by error type and position, a round-trip property, a panic,
+// examples with their output, and a benchmark.
+namespace units.duration.tests
+
+import io
+import units.duration
+
+struct Good {
+    In   string
+    Secs int
+}
+
+// Table-driven: one row per case, one subtest per row. A failing row is
+// reported by name (TestParse/1h30m) and the other rows still run.
+@test func TestParse(t *testing.T) {
+    var cases = [
+        Good{In: "45s", Secs: 45},
+        Good{In: "1h30m", Secs: 5400},
+        Good{In: "2h5m10s", Secs: 7510},
+        Good{In: "0s", Secs: 0},
+        Good{In: "100m", Secs: 6000},
+    ]
+    for c in cases {
+        t.Run(c.In, func(t *testing.T) {
+            testing.Equal(t, mustParse(t, c.In), c.Secs)
+        })
+    }
+}
+
+// mustParse is a test helper: it ends the test when parsing fails, so
+// the test body reads as if Parse could not fail.
+func mustParse(t *testing.T, s string) int {
+    var n = try Parse(s) catch err {
+        t.Fatal("Parse(" + strconv.Quote(s) + "): " + err.Message())
+        return 0
+    }
+    return n
+}
+
+// parseError runs Parse on bad input and returns its ParseError. Any
+// other outcome (success, or a different error type) fails the test.
+func parseError(t *testing.T, s string) ParseError {
+    var pe ParseError
+    try Parse(s) catch err {
+        if !errors.As(err, &pe) {
+            t.Fatal("not a ParseError: " + err.Message())
+        }
+        return pe
+    }
+    t.Fatal("Parse(" + strconv.Quote(s) + ") succeeded")
+    return pe
+}
+
+struct Bad {
+    In     string
+    Pos    int
+    Reason string
+}
+
+@test func TestParseErrors(t *testing.T) {
+    var cases = [
+        Bad{In: "", Pos: 0, Reason: "empty"},
+        Bad{In: "10", Pos: 2, Reason: "missing unit"},
+        Bad{In: "h", Pos: 0, Reason: "missing number"},
+        Bad{In: "5m1h", Pos: 3, Reason: "units out of order"},
+        Bad{In: "1m1m", Pos: 3, Reason: "units out of order"},
+        Bad{In: "3d", Pos: 1, Reason: "unknown unit \"d\""},
+    ]
+    for c in cases {
+        t.Run(strconv.Quote(c.In), func(t *testing.T) {
+            var pe = parseError(t, c.In)
+            testing.Equal(t, pe.Pos, c.Pos)
+            testing.Equal(t, pe.Reason, c.Reason)
+        })
+    }
+}
+
+// A property instead of examples: formatting and parsing back gives the
+// same number, for every duration in a range.
+@test func TestRoundTrip(t *testing.T) {
+    for secs in 0..10000 {
+        if mustParse(t, Format(secs)) != secs {
+            t.Fatal("round trip failed for " + strconv.Itoa(secs))
+        }
+    }
+}
+
+// A negative duration is a bug, and bugs panic. testing.PanicsWith runs
+// the function on a thread of its own, so the panic fails nothing.
+@test func TestFormatPanicsOnNegative(t *testing.T) {
+    testing.PanicsWith(t, func() {
+        _ = Format(-1)
+    }, "duration.Format: negative duration")
+}
+
+// Examples are documentation that is tested: `zell doc` shows this
+// under Format, and `zell test` checks the output comment.
+func ExampleFormat() {
+    println(Format(5400))
+    println(Format(61))
+    // Output:
+    // 1h30m
+    // 1m1s
+}
+
+func ExampleParse() {
+    println(try Parse("1h1s") else -1)
+    println(try Parse("1s1h") else -1)
+    // Output:
+    // 3601
+    // -1
+}
+
+// A benchmark runs its loop b.N times; `zell test --bench` picks N and
+// reports the time per iteration.
+@bench func BenchParse(b *testing.B) {
+    for _ in 0..b.N {
+        _ = try Parse("2h5m10s") else 0
+    }
+}

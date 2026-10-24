@@ -1,0 +1,5 @@
+[package]
+name = "testing-guide"
+version = "0.1.0"
+namespace = "units"
+entry = "src/main.zl"

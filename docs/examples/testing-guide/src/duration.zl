@@ -1,0 +1,79 @@
+// The code under test: durations written as "1h30m", "90s" or "2h5m10s",
+// parsed to seconds and formatted back.
+namespace units.duration
+
+// ParseError says what is wrong and where, so a caller (or a test) can
+// check the position instead of matching message text.
+struct ParseError {
+    Input  string
+    Pos    int
+    Reason string
+
+    func Message() string {
+        return fmt.Format("duration {0}: {1} at {2}", strconv.Quote(this.Input), this.Reason, this.Pos)
+    }
+}
+
+func unit(c string) int {
+    switch c {
+        case "h": return 3600
+        case "m": return 60
+        case "s": return 1
+        default: return 0
+    }
+}
+
+// Parse returns the number of seconds in s. Units must come in the
+// order h, m, s, each at most once.
+func Parse(s string) int! {
+    if s == "" {
+        return ParseError{Input: s, Pos: 0, Reason: "empty"}
+    }
+    var total = 0
+    var num = ""
+    var last = 3601 // larger than any unit: the next one must be smaller
+    for i, ch in s {
+        var c = string(ch)
+        if c >= "0" && c <= "9" {
+            num += c
+            continue
+        }
+        var u = unit(c)
+        if u == 0 {
+            return ParseError{Input: s, Pos: i, Reason: "unknown unit " + strconv.Quote(c)}
+        }
+        if num == "" {
+            return ParseError{Input: s, Pos: i, Reason: "missing number"}
+        }
+        if u >= last {
+            return ParseError{Input: s, Pos: i, Reason: "units out of order"}
+        }
+        total += strconv.Atoi(num)? * u
+        num = ""
+        last = u
+    }
+    if num != "" {
+        return ParseError{Input: s, Pos: len(s), Reason: "missing unit"}
+    }
+    return total
+}
+
+// Format writes seconds the way Parse reads them. A negative duration
+// is a bug in the caller, so it panics instead of returning an error.
+func Format(secs int) string {
+    if secs < 0 {
+        panic("duration.Format: negative duration")
+    }
+    if secs == 0 {
+        return "0s"
+    }
+    var out = ""
+    var names = ["h", "m", "s"]
+    for i, u in [3600, 60, 1] {
+        if secs >= u {
+            out += strconv.Itoa(secs / u) + names[i]
+            secs %= u
+        }
+    }
+    return out
+}

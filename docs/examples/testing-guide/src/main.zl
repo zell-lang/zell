@@ -1,0 +1,27 @@
+// testing-guide: a small program whose tests are the real content (see
+// src/*_test.zl and the README). It parses and formats durations and
+// adds up a plan.
+namespace units
+
+import io
+import units.duration
+import units.plan
+
+async func main() {
+    for s in ["1h30m", "90s", "2h5m10s", "5m1h", "10x"] {
+        var secs = try Parse(s) catch err {
+            println(fmt.Sprintf("%-8s error: %s", s, err.Message()))
+            continue
+        }
+        println(fmt.Sprintf("%-8s %6d s = %s", s, secs, Format(secs)))
+    }
+    var src = Memory{Steps: map[string]string{"build": "4m30s", "test": "12m", "deploy": "1m15s"}}
+    var total = try await Total(src, ["build", "test", "deploy"]) catch err {
+        println("plan:", err)
+        return
+    }
+    println("plan:", Format(total))
+    try await Total(src, ["build", "review"]) catch err {
+        println("plan:", err)
+    }
+}

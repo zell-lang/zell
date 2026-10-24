@@ -1,0 +1,74 @@
+// Tests for units.plan: async tests, a fake dependency, and checks at
+// the T! boundary (which error, and how it was wrapped).
+namespace units.plan.tests
+
+import units.plan
+
+// Fake is a Source for tests: fixed answers, a failing step, and a
+// count of calls, so a test can check what Total asked for.
+struct Fake {
+    answers map[string]string
+    calls   *int
+
+    func Lookup(step string) Task<string!> {
+        *this.calls += 1
+        return answer(this.answers, step)
+    }
+}
+
+async func answer(answers map[string]string, step string) string! {
+    if step == "flaky" {
+        return error("connection reset")
+    }
+    var (d, ok) = answers[step]
+    if !ok {
+        return ErrUnknownStep
+    }
+    return d
+}
+
+func fake() Fake {
+    return Fake{answers: map[string]string{"a": "1m", "b": "30s", "bad": "1x"}, calls: new int}
+}
+
+// An async test: the runner awaits it.
+@test async func TestTotal(t *testing.T) {
+    var f = fake()
+    var total = try await Total(f, ["a", "b", "a"]) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, total, 150)
+    testing.Equal(t, *f.calls, 3)
+}
+
+// The boundary: Total fails, and the test checks the error by identity
+// (errors.Is through the wrapping), by its context, and that Total
+// stopped at the first failure.
+@test async func TestTotalStopsAtTheFirstError(t *testing.T) {
+    var f = fake()
+    try await Total(f, ["a", "missing", "b"]) catch err {
+        testing.ErrorIs(t, err, ErrUnknownStep)
+        testing.Equal(t, err.Message(), "step missing: unknown step")
+        testing.Equal(t, *f.calls, 2)
+        return
+    }
+    t.Fatal("Total succeeded")
+}
+
+@test async func TestTotalReportsTheFailingLayer(t *testing.T) {
+    var f = fake()
+    try await Total(f, ["flaky"]) catch err {
+        testing.Contains(t, err.Message(), "connection reset")
+    }
+    try await Total(f, ["bad"]) catch err {
+        // The duration's own error, wrapped with the step's name.
+        testing.Contains(t, err.Message(), "step bad: duration \"1x\": unknown unit")
+    }
+}
+
+// The real Memory source, through the interface like main uses it.
+@test async func TestMemory(t *testing.T) {
+    var m = Memory{Steps: map[string]string{"x": "2m"}}
+    testing.Equal(t, try await Total(m, ["x", "x"]) else -1, 240)
+}
