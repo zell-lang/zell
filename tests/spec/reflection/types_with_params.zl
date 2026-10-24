@@ -1,0 +1,39 @@
+// test: MethodInfo.Params lists the parameters (receiver excluded) with name, index, type and attributes
+// status: passing
+namespace spec.reflection.types_with_params
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct handler {}
+
+@attribute(targets: [reflect.Target.Param])
+struct from {
+    source string = "body"
+}
+
+@handler
+struct Orders {
+    func Get(@from(source: "path") id int, @from verbose bool, limit int) string {
+        return "order"
+    }
+
+    static func Make(name string) Orders {
+        return Orders{}
+    }
+}
+
+func main() {
+    var t = reflect.TypesWith<handler>()[0]
+    for m in t.Methods {
+        println(m.Name, len(m.Params), m.Static)
+        for p in m.Params {
+            var f = p.Attribute<from>()
+            var src = "-"
+            if f != nil {
+                src = f.source
+            }
+            println(" ", p.Index, p.Name, p.Type.Name, src, len(p.Attributes<from>()))
+        }
+    }
+}

@@ -1,0 +1,20 @@
+// test: reflect.Error in a branch dropped by a static if raises nothing; the program builds and runs
+// status: passing
+namespace spec.reflection.reflect_error_static_if
+
+import io
+
+func Describe<T>(x T) string {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Int {
+        return "int"
+    } else if reflect.TypeOf<T>().Kind == reflect.Kind.String {
+        return "string"
+    } else {
+        reflect.Error("Describe: unsupported type " + reflect.TypeOf<T>().Name)
+    }
+    return ""
+}
+
+func main() {
+    println(Describe(1), Describe("a"))
+}

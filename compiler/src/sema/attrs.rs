@@ -116,9 +116,12 @@ impl<'a> Sema<'a> {
             self.cur_ns = self.file_scopes[self.cur_file].ns;
             let attrs = self.eval_attrs(&decl.attrs, "Func");
             self.funcs[fid].attrs = attrs;
+            let mut params = Vec::new();
             for p in &decl.params {
-                // Parameter attributes are checked; HIR keeps no per-param list yet.
-                self.eval_attrs(&p.attrs, "Param");
+                params.push(self.eval_attrs(&p.attrs, "Param"));
+            }
+            if params.iter().any(|a| !a.is_empty()) {
+                self.funcs[fid].param_attrs = params;
             }
         }
         for gid in 0..self.globals.len() {

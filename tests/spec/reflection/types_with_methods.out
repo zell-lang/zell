@@ -1,0 +1,5 @@
+controller users
+/users/list -> list of users
+/users/count -> 3
+controller health
+/health -> pong

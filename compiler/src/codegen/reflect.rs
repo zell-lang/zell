@@ -301,6 +301,16 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ("Size", i64t.const_int(size, false).into()),
             ("Align", i64t.const_int(align, false).into()),
         ];
+        let ns = match self.ty(t) {
+            Type::Struct(d) => Some(self.prog.structs[d.0 as usize].namespace),
+            Type::Enum(d) => Some(self.prog.enums[d.0 as usize].namespace),
+            Type::Interface(d) => Some(self.prog.interfaces[d.0 as usize].namespace),
+            _ => None,
+        };
+        if let Some(path) = ns.and_then(|n| self.prog.namespaces.get(n.0 as usize)).map(|n| n.path.clone()) {
+            let pv = self.str_lit(&path);
+            out.push(("Package", pv.into()));
+        }
         match self.ty(t).clone() {
             Type::Struct(d) => {
                 let sid = d.0;
@@ -362,6 +372,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let a = self.attr_list(&attrs);
                 out.push(("attrs", a));
             }
+            Type::Interface(d) => {
+                let attrs = self.prog.interfaces[d.0 as usize].attrs.clone();
+                let a = self.attr_list(&attrs);
+                out.push(("attrs", a));
+            }
             Type::Pointer(x) | Type::Weak(x) | Type::Slice(x) | Type::Fallible(x) | Type::Task(x) => {
                 let e = self.type_info(x);
                 out.push(("Elem", e.into()));
@@ -405,6 +420,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let f = &self.prog.funcs[fid.0 as usize];
             let is_static = matches!(f.kind, FuncKind::Method { is_static: true, .. });
             let attrs = f.attrs.clone();
+            let skip = if is_static { 0 } else { 1 };
+            let params: Vec<(String, TypeId)> = f.params.iter().skip(skip).map(|l| (f.locals[l.0 as usize].name.clone(), f.locals[l.0 as usize].ty)).collect();
+            let pattrs = f.param_attrs.clone();
+            let params = self.param_infos(params, pattrs);
             let tp = self.type_info(fty);
             let invoke = match self.invoke_thunk(fid) {
                 Ok(f) => f.as_global_value().as_pointer_value(),
@@ -426,9 +445,26 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     ("invoke", invoke.const_to_int(i64t).into()),
                     ("fnval", fnval.const_to_int(i64t).into()),
                     ("attrs", at),
+                    ("Params", params),
                 ],
             );
             elems.push(self.static_object(v, "rmethod").into());
+        }
+        let pt = self.ptr_ty().into();
+        self.const_slice(pt, elems)
+    }
+
+    /// `ParamInfo` objects of a method's parameters (receiver excluded).
+    fn param_infos(&mut self, params: Vec<(String, TypeId)>, attrs: Vec<Vec<Attr>>) -> BasicValueEnum<'ctx> {
+        let pi = self.refl().param_info;
+        let mut elems = Vec::new();
+        for (i, (name, ty)) in params.into_iter().enumerate() {
+            let nm = self.str_lit(&name);
+            let tp = self.type_info(ty);
+            let at = self.attr_list(attrs.get(i).map(|v| v.as_slice()).unwrap_or(&[]));
+            let i64t = self.i64_ty();
+            let v = self.const_struct(pi, &[("Name", nm.into()), ("Type", tp.into()), ("Index", i64t.const_int(i as u64, false).into()), ("attrs", at)]);
+            elems.push(self.static_object(v, "rparam").into());
         }
         let pt = self.ptr_ty().into();
         self.const_slice(pt, elems)
@@ -680,6 +716,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     cg.b.position_at_end(plain);
                     let et = cg.prog.types.error;
                     Some(cg.type_info(et).into())
+                }
+                Intrinsic::TypesWith(a) => {
+                    let ts = cg.refl().types_with.iter().find(|(x, _)| *x == a).map(|(_, ts)| ts.clone()).unwrap_or_default();
+                    let elems: Vec<BasicValueEnum<'ctx>> = ts.into_iter().map(|t| cg.type_info(t).into()).collect();
+                    let pt = cg.ptr_ty().into();
+                    Some(cg.const_slice(pt, elems))
                 }
                 Intrinsic::LoadAddr => {
                     let a = cg.b.build_int_to_ptr(p(0).into_int_value(), ptr, "").unwrap();

@@ -1,0 +1,36 @@
+// test: TypesWith<A>() also lists marked enums and interfaces, with their kind, attributes and package
+// status: passing
+namespace spec.reflection.types_with_enum_iface
+
+import io
+
+@attribute(targets: [reflect.Target.Struct, reflect.Target.Enum, reflect.Target.Interface])
+struct api {
+    name string
+}
+
+@api(name: "shape")
+interface Shape {
+    func Area() float
+}
+
+@api(name: "color")
+enum Color {
+    Red
+    Green
+}
+
+@api(name: "square")
+struct Square {
+    Side float
+
+    func Area() float {
+        return this.Side * this.Side
+    }
+}
+
+func main() {
+    for t in reflect.TypesWith<api>() {
+        println(t.Name, t.Kind == reflect.Kind.Interface, t.Kind == reflect.Kind.Enum, t.Attribute<api>().name, t.Package, len(t.Variants))
+    }
+}

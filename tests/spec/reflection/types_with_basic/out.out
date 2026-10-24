@@ -1,0 +1,5 @@
+3
+spec.reflection.types_with_basic.User spec.reflection.types_with_basic users 1
+spec.reflection.types_with_basic.Order spec.reflection.types_with_basic orders 2
+spec.reflection.types_with_basic.models.Product spec.reflection.types_with_basic.models products 1
+true true

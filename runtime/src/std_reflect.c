@@ -14,9 +14,11 @@ _Static_assert(offsetof(zell_reflect_type, variants) == 128, "TypeInfo.Variants"
 _Static_assert(offsetof(zell_reflect_type, elem) == 160, "TypeInfo.Elem");
 _Static_assert(offsetof(zell_reflect_type, attrs) == 184, "TypeInfo.attrs");
 _Static_assert(offsetof(zell_reflect_type, ptr_to) == 216, "TypeInfo.ptrTo");
-_Static_assert(sizeof(zell_reflect_type) == 232, "TypeInfo size");
+_Static_assert(offsetof(zell_reflect_type, package) == 232, "TypeInfo.Package");
+_Static_assert(sizeof(zell_reflect_type) == 240, "TypeInfo size");
 _Static_assert(offsetof(zell_reflect_field, attrs) == 40 && sizeof(zell_reflect_field) == 72, "FieldInfo");
-_Static_assert(offsetof(zell_reflect_method, invoke) == 24 && sizeof(zell_reflect_method) == 72, "MethodInfo");
+_Static_assert(offsetof(zell_reflect_method, invoke) == 24 && offsetof(zell_reflect_method, params) == 72 && sizeof(zell_reflect_method) == 104, "MethodInfo");
+_Static_assert(offsetof(zell_reflect_param, attrs) == 24 && sizeof(zell_reflect_param) == 56, "ParamInfo");
 _Static_assert(offsetof(zell_reflect_variant, fields) == 16 && sizeof(zell_reflect_variant) == 80, "VariantInfo");
 _Static_assert(sizeof(zell_reflect_any) == 16, "any");
 

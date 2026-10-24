@@ -834,3 +834,13 @@ fn package_cannot_own_a_stdlib_root() {
     let ok = "[package]\nname = \"iox\"\nversion = \"0.1.0\"\n";
     assert!(zell::package::Manifest::parse(ok, Format::Toml).unwrap().validate().is_ok());
 }
+
+#[test]
+fn library_types_with_sees_the_application_types() {
+    // `reflect.TypesWith<jobs.Job>()` called in the `jobs` library lists
+    // the application's marked types too (whole program, package order).
+    ensure_runtime();
+    let root = fixtures("registry");
+    let (out, _) = ok(&root.join("registry/app"), &["run"]);
+    assert_eq!(out, "app.SendMail mail: sent\napp.Report report: reported\njobs.Cleanup cleanup: library job\n");
+}
