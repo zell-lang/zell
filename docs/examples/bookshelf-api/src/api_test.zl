@@ -1,0 +1,71 @@
+// Handler tests without a network: net.http.test.NewRequest builds a
+// request, and test.Serve runs it through the router and middleware into
+// a recorder. Each test gets a fresh repository.
+namespace bookshelf.tests
+
+import net
+
+import bookshelf.api
+import bookshelf.model
+
+func handler() http.Handler {
+    var r = Routes(MemoryRepo.New())
+    r.Use(Errors())
+    return r
+}
+
+@test
+async func TestCreateThenGet(t *testing.T) {
+    var h = handler()
+    var created = await http.test.Serve(
+        h,
+        http.test.NewRequest(
+            "POST",
+            "/books",
+            "{\"title\": \"Emma\", \"author\": \"Jane Austen\", \"year\": 1815}",
+        ),
+    )
+    testing.Equal(t, created.Status, 201)
+    testing.Equal(t, created.Header("Location"), "/books/1")
+    var got = await http.test.Serve(h, http.test.NewRequest("GET", "/books/1", ""))
+    var b = try got.JSON<Book>() catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, b.Title, "Emma")
+}
+
+@test
+async func TestErrorsMapToStatuses(t *testing.T) {
+    var h = handler()
+    var cases = [
+        ["GET", "/books/9", "", "404"],
+        ["GET", "/books/nine", "", "400"],
+        ["POST", "/books", "{\"title\": \"x\", \"author\": \"\", \"year\": 1900}", "400"],
+        ["POST", "/books", "[]", "400"],
+        ["DELETE", "/books/1", "", "404"],
+    ]
+    for c in cases {
+        var res = await http.test.Serve(h, http.test.NewRequest(c[0], c[1], c[2]))
+        if strconv.Itoa(res.Status) != c[3] {
+            t.Error(fmt.Format("{0} {1}: status {2}, want {3}", c[0], c[1], res.Status, c[3]))
+        }
+    }
+}
+
+@test
+async func TestValidationNamesTheField(t *testing.T) {
+    var res = await http.test.Serve(
+        handler(),
+        http.test.NewRequest(
+            "POST",
+            "/books",
+            "{\"title\": \"T\", \"author\": \"A\", \"year\": 99}",
+        ),
+    )
+    var body = try res.JSON<ErrorBody>() catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, body.Field, "year")
+}

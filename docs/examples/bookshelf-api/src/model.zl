@@ -1,0 +1,147 @@
+// The domain: books, the input the API accepts, the errors handlers can
+// return, and the repository interface with an in-memory implementation.
+namespace bookshelf.model
+
+// Book is what the API returns. The @json names are the wire format;
+// the Go-style field names stay idiomatic in code.
+struct Book {
+    @json(name: "id")                    Id     int
+    @json(name: "title")                 Title  string
+    @json(name: "author")                Author string
+    @json(name: "year")                  Year   int
+    @json(name: "tags", omitEmpty: true) Tags   []string
+}
+
+// BookInput is the body of POST and PUT. It has no id: clients do not
+// choose ids, and a separate type makes that impossible to get wrong.
+struct BookInput {
+    @json(name: "title")  Title  string
+    @json(name: "author") Author string
+    @json(name: "year")   Year   int
+    @json(name: "tags")   Tags   []string
+
+    // Validate returns the first problem. The handlers do not check
+    // fields themselves: the error type tells the middleware to answer
+    // 400 with the field name.
+    func Validate() void! {
+        if strings.Trim(this.Title) == "" {
+            return ValidationError{Field: "title", Reason: "is required"}
+        }
+        if strings.Trim(this.Author) == "" {
+            return ValidationError{Field: "author", Reason: "is required"}
+        }
+        if this.Year < 1450 || this.Year > 2100 {
+            return ValidationError{
+                Field: "year",
+                Reason: fmt.Format("{0} is not a plausible year", this.Year),
+            }
+        }
+    }
+}
+
+const ErrBookNotFound = error("not found")
+
+struct ValidationError {
+    Field  string
+    Reason string
+
+    func Message() string {
+        return this.Field + " " + this.Reason
+    }
+}
+
+// Repository is what the handlers depend on. Its methods return tasks,
+// so a database-backed implementation (see the inventory-db example) can
+// drop in without changing a handler.
+interface Repository {
+    func List() Task<[]Book>
+    func Get(id int) Task<Book!>
+    func Create(in BookInput) Task<Book>
+    func Update(id int, in BookInput) Task<Book!>
+    func Delete(id int) Task<void!>
+}
+
+// MemoryRepo keeps books in a map. Requests are served by several worker
+// threads at once, so every access holds the mutex; task.Mutex suspends
+// the waiting task instead of blocking its thread.
+struct MemoryRepo {
+    mu     task.Mutex
+    books  map[int]Book
+    nextId int
+
+    static func New() *MemoryRepo {
+        return new MemoryRepo{books: map[int]Book{}, nextId: 1}
+    }
+
+    // Interface methods are not async, so an async implementation is a
+    // plain method that starts an async function and returns its task.
+    // The work happens in the mem* functions below.
+    func List() Task<[]Book> {
+        return memList(this)
+    }
+
+    func Get(id int) Task<Book!> {
+        return memGet(this, id)
+    }
+
+    func Create(in BookInput) Task<Book> {
+        return memCreate(this, in)
+    }
+
+    func Update(id int, in BookInput) Task<Book!> {
+        return memUpdate(this, id, in)
+    }
+
+    func Delete(id int) Task<void!> {
+        return memDelete(this, id)
+    }
+}
+
+async func memList(r *MemoryRepo) []Book {
+    await r.mu.Lock()
+    defer r.mu.Unlock()
+    // Map order is unspecified; sorting by key gives clients a stable
+    // order (by id, which is also creation order).
+    return maps.SortedValues(r.books)
+}
+
+async func memGet(r *MemoryRepo, id int) Book! {
+    await r.mu.Lock()
+    defer r.mu.Unlock()
+    var (b, ok) = r.books[id]
+    if !ok {
+        return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
+    }
+    return b
+}
+
+async func memCreate(r *MemoryRepo, in BookInput) Book {
+    await r.mu.Lock()
+    defer r.mu.Unlock()
+    var b = Book{Id: r.nextId, Title: in.Title, Author: in.Author, Year: in.Year, Tags: in.Tags}
+    r.books[b.Id] = b
+    r.nextId += 1
+    return b
+}
+
+async func memUpdate(r *MemoryRepo, id int, in BookInput) Book! {
+    await r.mu.Lock()
+    defer r.mu.Unlock()
+    var (_, ok) = r.books[id]
+    if !ok {
+        return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
+    }
+    var b = Book{Id: id, Title: in.Title, Author: in.Author, Year: in.Year, Tags: in.Tags}
+    r.books[id] = b
+    return b
+}
+
+async func memDelete(r *MemoryRepo, id int) void! {
+    await r.mu.Lock()
+    defer r.mu.Unlock()
+    var (_, ok) = r.books[id]
+    if !ok {
+        return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
+    }
+    delete(r.books, id)
+}

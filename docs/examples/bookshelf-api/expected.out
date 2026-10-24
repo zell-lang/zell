@@ -1,0 +1,47 @@
+POST /books -> 201 Location: /books/1
+    {"id":1,"title":"Dune","author":"Frank Herbert","year":1965,"tags":["sf"]}
+POST /books -> 201 Location: /books/2
+    {"id":2,"title":"Emma","author":"Jane Austen","year":1815}
+POST /books -> 201 Location: /books/3
+    {"id":3,"title":"Persuasion","author":"Jane Austen","year":1817}
+GET /books -> 200
+    [{"id":1,"title":"Dune","author":"Frank Herbert","year":1965,"tags":["sf"]},{"id":2,"title":"Emma","author":"Jane Austen","year":1815},{"id":3,"title":"Persuasion","author":"Jane Austen","year":1817}]
+GET /books?author=austen -> 200
+    [{"id":2,"title":"Emma","author":"Jane Austen","year":1815},{"id":3,"title":"Persuasion","author":"Jane Austen","year":1817}]
+GET /books/2 -> 200
+    {"id":2,"title":"Emma","author":"Jane Austen","year":1815}
+PUT /books/2 -> 200
+    {"id":2,"title":"Emma","author":"Jane Austen","year":1815,"tags":["classic"]}
+DELETE /books/3 -> 204
+GET /books/3 -> 404
+    {"error":"book 3: not found"}
+GET /books/abc -> 400
+    {"error":"id must be a number, got \"abc\""}
+POST /books -> 400
+    {"error":"title is required","field":"title"}
+POST /books -> 400
+    {"error":"year 3000 is not a plausible year","field":"year"}
+POST /books -> 400
+    {"error":"invalid JSON: json: invalid character 'n' at offset 1"}
+GET /admin/export -> 500
+    {"error":"internal error"}
+typed: Dune by Frank Herbert 1965 [sf] request 15
+in flight during shutdown: 200 report done
+server stopped
+--- access log
+POST /books -> 201 (74 bytes)
+POST /books -> 201 (58 bytes)
+POST /books -> 201 (64 bytes)
+GET /books -> 200 (200 bytes)
+GET /books?author=austen -> 200 (125 bytes)
+GET /books/2 -> 200 (58 bytes)
+PUT /books/2 -> 200 (77 bytes)
+DELETE /books/3 -> 204 (0 bytes)
+GET /books/3 -> 404 (29 bytes)
+GET /books/abc -> 400 (44 bytes)
+POST /books -> 400 (45 bytes)
+POST /books -> 400 (60 bytes)
+POST /books -> 400 (65 bytes)
+GET /admin/export -> 500 (26 bytes) cause="export: disk quota exceeded"
+GET /books/1 -> 200 (74 bytes)
+GET /books/slow/report -> 200 (12 bytes)

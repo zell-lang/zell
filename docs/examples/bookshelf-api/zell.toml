@@ -1,0 +1,5 @@
+[package]
+name = "bookshelf-api"
+version = "0.1.0"
+namespace = "bookshelf"
+entry = "src/main.zl"

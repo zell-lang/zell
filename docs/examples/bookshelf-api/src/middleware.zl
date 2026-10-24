@@ -1,0 +1,104 @@
+// Middleware: code that runs around every handler. A middleware is a
+// func(next Handler) Handler, so they compose by wrapping, and the
+// router applies them in the order of Use (the first one is outermost).
+namespace bookshelf.api
+
+import net
+
+import bookshelf.model
+
+// AccessLog collects one line per request. A real service writes to the
+// log package (http.Logging does); collecting lines lets the demo print
+// them at the end, in a stable order, after the server has stopped.
+struct AccessLog {
+    mu    task.Mutex
+    lines []string
+
+    async func Add(line string) {
+        await this.mu.Lock()
+        this.lines = append(this.lines, line)
+        this.mu.Unlock()
+    }
+
+    func Lines() []string {
+        return this.lines
+    }
+}
+
+// Logging records method, path, final status and body size, plus the
+// internal cause of a 500 that Errors left in the request's values. It is
+// outside Errors, so it sees the status Errors chose.
+func Logging(log *AccessLog) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.Func(async func(req *http.Request, res *http.Response) void! {
+            await next.Serve(req, res)?
+            var line = fmt.Format(
+                "{0} {1} -> {2} ({3} bytes)",
+                req.Method,
+                req.RequestURI(),
+                res.Status,
+                len(res.Body),
+            )
+            switch req.Value(causeKey) {
+                case string cause: line += " cause=" + strconv.Quote(cause)
+            }
+            await log.Add(line)
+        })
+    }
+}
+
+// The request-scoped value through which Errors hands the cause of a 500
+// to Logging. req.Set/req.Value live as long as the request.
+const causeKey = "bookshelf.cause"
+
+// Errors turns handler errors into JSON answers. This is the one place
+// that knows the HTTP meaning of the domain errors:
+//   ValidationError -> 400 with the field, BadRequest -> 400,
+//   anything wrapping ErrBookNotFound -> 404, everything else -> 500 with
+//   a generic message: internal details go to the log, not to the client.
+// errors.As and errors.Is search the whole chain, so a handler may wrap
+// errors with ?("context") without breaking the mapping.
+func Errors() func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.Func(
+            async func(req *http.Request, res *http.Response) void! {
+                try await next.Serve(req, res) catch err {
+                    var (status, body) = classify(err)
+                    if status == 500 {
+                        req.Set(causeKey, err.Message())
+                    }
+                    // Handled: returning nothing tells the server the answer
+                    // is complete, so it does not add its own 500 page.
+                    res.SendJSON(status, body)
+                }
+            },
+        )
+    }
+}
+
+func classify(err error) (int, ErrorBody) {
+    var ve ValidationError
+    if errors.As(err, &ve) {
+        return (400, ErrorBody{Error: ve.Message(), Field: ve.Field})
+    }
+    var br BadRequest
+    if errors.As(err, &br) {
+        return (400, ErrorBody{Error: br.Text})
+    }
+    if errors.Is(err, ErrBookNotFound) {
+        return (404, ErrorBody{Error: err.Message()})
+    }
+    return (500, ErrorBody{Error: "internal error"})
+}
+
+// RequestID numbers requests and echoes the number in a header, the
+// minimal version of the correlation id that ties log lines to requests.
+func RequestID() func(http.Handler) http.Handler {
+    var n = new sync.AtomicInt{}
+    return func(next http.Handler) http.Handler {
+        return http.Func(async func(req *http.Request, res *http.Response) void! {
+            res.SetHeader("X-Request-Id", strconv.Itoa(n.Add(1)))
+            await next.Serve(req, res)?
+        })
+    }
+}

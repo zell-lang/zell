@@ -1,0 +1,88 @@
+// The HTTP layer: routes and handlers. A handler decodes the request,
+// calls the repository and encodes the answer; it never decides status
+// codes for failures. It returns the error, and the middleware maps it.
+namespace bookshelf.api
+
+import net
+
+import bookshelf.model
+
+// ErrorBody is the JSON shape of every error answer.
+struct ErrorBody {
+    @json(name: "error")                  Error string
+    @json(name: "field", omitEmpty: true) Field string
+}
+
+// BadRequest is a malformed request (not JSON, a non-numeric id). It is
+// separate from ValidationError, which is about well-formed but invalid
+// values.
+struct BadRequest {
+    Text string
+
+    func Message() string {
+        return this.Text
+    }
+}
+
+func idParam(req *http.Request) int! {
+    var raw = req.Param("id")
+    return try strconv.Atoi(raw) catch err {
+        return BadRequest{Text: "id must be a number, got " + strconv.Quote(raw)}
+    }
+}
+
+// decode parses and validates the body. req.JSON<T>() is generated for
+// BookInput at compile time from its @json attributes.
+func decode(req *http.Request) BookInput! {
+    var in = try req.JSON<BookInput>() catch err {
+        return BadRequest{Text: "invalid JSON: " + err.Message()}
+    }
+    in.Validate()?
+    return in
+}
+
+// Routes builds the router. The handlers are closures over repo: that is
+// all the dependency injection a service of this size needs.
+func Routes(repo Repository) *http.Router {
+    var r = http.NewRouter()
+    r.Get(
+        "/books",
+        async func(req *http.Request, res *http.Response) void! {
+            var books = await repo.List()
+            // ?author= filters on the server; an absent parameter is "".
+            var author = req.QueryValue("author")
+            if author != "" {
+                books = slices.Filter(
+                    books,
+                    (b Book) => strings.Contains(
+                        strings.ToLower(b.Author),
+                        strings.ToLower(author),
+                    ),
+                )
+            }
+            res.SendJSON(200, books)
+        },
+    )
+    r.Get("/books/{id}", async func(req *http.Request, res *http.Response) void! {
+        var b = await repo.Get(idParam(req)?)?
+        res.SendJSON(200, b)
+    })
+    r.Post("/books", async func(req *http.Request, res *http.Response) void! {
+        var b = await repo.Create(decode(req)?)
+        res.SetHeader("Location", fmt.Format("/books/{0}", b.Id))
+        res.SendJSON(201, b)
+    })
+    r.Put("/books/{id}", async func(req *http.Request, res *http.Response) void! {
+        var id = idParam(req)?
+        var b = await repo.Update(id, decode(req)?)?
+        res.SendJSON(200, b)
+    })
+    r.Delete("/books/{id}", async func(req *http.Request, res *http.Response) void! {
+        await repo.Delete(idParam(req)?)?
+        res.Status = 204
+    })
+    r.Get("/health", async func(req *http.Request, res *http.Response) void! {
+        res.Text(200, "ok\n")
+    })
+    return r
+}

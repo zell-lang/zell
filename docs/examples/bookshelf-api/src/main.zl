@@ -1,0 +1,129 @@
+// bookshelf: a JSON API over HTTP. main starts the server on a free
+// loopback port, drives it with an HTTP client like a test suite would,
+// shuts it down gracefully and prints the access log.
+namespace bookshelf
+
+import io
+import net
+
+import bookshelf.api
+import bookshelf.model
+
+// call sends one request and prints the status and body; the JSON bodies
+// are printed as the client receives them.
+async func call(base string, method string, path string, body string) void! {
+    var req = http.NewRequest(method, base + path)
+    if body != "" {
+        req.Body(body).ContentType("application/json")
+    }
+    var res = await req.Send()?
+    var line = fmt.Format("{0} {1} -> {2}", method, path, res.Status)
+    if res.Header("Location") != "" {
+        line += " Location: " + res.Header("Location")
+    }
+    println(line)
+    if res.Body != "" {
+        println("   ", strings.TrimRight(res.Body, "\n"))
+    }
+}
+
+async func main() void! {
+    var log = new AccessLog{}
+    var repo = MemoryRepo.New()
+    var r = api.Routes(repo)
+    // Outermost first: every request gets an id, is logged, and its
+    // errors are mapped before the log sees the final status.
+    r.Use(api.RequestID())
+    r.Use(api.Logging(log))
+    r.Use(api.Errors())
+    // An endpoint that takes a while, to show that shutdown waits for
+    // requests already in progress.
+    r.Get("/books/slow/report", async func(req *http.Request, res *http.Response) void! {
+        await task.Delay(50)
+        res.Text(200, "report done\n")
+    })
+
+    // A handler failing for a reason the client cannot fix: the Errors
+    // middleware answers 500 without leaking the cause.
+    r.Get("/admin/export", async func(req *http.Request, res *http.Response) void! {
+        return error("export: disk quota exceeded")
+    })
+
+    // Port 0: the OS picks a free port, so the demo never collides with
+    // anything already listening. A deployed service uses a fixed
+    // address from its configuration, e.g. "0.0.0.0:8080".
+    var srv = http.Server{Addr: "127.0.0.1:0", Handler: r}
+    srv.Listen()?
+    var serving = srv.Serve()
+    var base = srv.URL()
+
+    await call(
+        base,
+        "POST",
+        "/books",
+        "{\"title\": \"Dune\", \"author\": \"Frank Herbert\", \"year\": 1965, \"tags\": [\"sf\"]}",
+    )?
+    await call(
+        base,
+        "POST",
+        "/books",
+        "{\"title\": \"Emma\", \"author\": \"Jane Austen\", \"year\": 1815}",
+    )?
+    await call(
+        base,
+        "POST",
+        "/books",
+        "{\"title\": \"Persuasion\", \"author\": \"Jane Austen\", \"year\": 1817}",
+    )?
+    await call(base, "GET", "/books", "")?
+    await call(base, "GET", "/books?author=austen", "")?
+    await call(base, "GET", "/books/2", "")?
+    await call(
+        base,
+        "PUT",
+        "/books/2",
+        "{\"title\": \"Emma\", \"author\": \"Jane Austen\", \"year\": 1815, \"tags\": [\"classic\"]}",
+    )?
+    await call(base, "DELETE", "/books/3", "")?
+    await call(base, "GET", "/books/3", "")?
+    await call(base, "GET", "/books/abc", "")?
+    await call(base, "POST", "/books", "{\"title\": \"\", \"author\": \"Nobody\", \"year\": 2000}")?
+    await call(
+        base,
+        "POST",
+        "/books",
+        "{\"title\": \"Future\", \"author\": \"Someone\", \"year\": 3000}",
+    )?
+    await call(base, "POST", "/books", "{not json")?
+    await call(base, "GET", "/admin/export", "")?
+
+    // Typed client side: the same Book struct decodes the answer.
+    var res = await http.Get(base + "/books/1")?
+    var dune = res.JSON<Book>()?
+    println(
+        "typed:",
+        dune.Title,
+        "by",
+        dune.Author,
+        dune.Year,
+        dune.Tags,
+        "request",
+        res.Header("X-Request-Id"),
+    )
+
+    // Graceful shutdown: stop accepting, let the in-flight request finish,
+    // then return. A real server waits for a signal first:
+    //     await os.signal.Wait(os.signal.SIGTERM)
+    var slow = http.Get(base + "/books/slow/report")
+    await task.Delay(10)
+    await srv.Shutdown()
+    var report = await slow?
+    print("in flight during shutdown: ", report.Status, " ", report.Body)
+    await serving?
+    println("server stopped")
+
+    println("--- access log")
+    for l in log.Lines() {
+        println(l)
+    }
+}
