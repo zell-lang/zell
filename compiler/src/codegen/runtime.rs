@@ -106,6 +106,7 @@ const RUNTIME: &[(&str, &str, bool)] = &[
     ("zell_task_result_err", "p:pl", false),
     ("zell_task_await_err", "p:pl", false),
     ("zell_task_await_main", "p:p", false),
+    ("zell_task_run_main", "v:pp", false),
     ("zell_coro_unwound", "v:pp", false),
     ("zell_task_any", "p:pl", false),
     ("zell_runtime_init", "v:ip", false),

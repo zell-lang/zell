@@ -32,6 +32,11 @@
 ;       println(await leaf(2))       // 3
 ;   }
 ;
+; and, as the entry of an `async func main` (ABI.md 11), two ramps run by
+; zell_task_run_main on a worker: one that suspends (sum(5) = 16, awaited
+; with zell_task_await_main) and one that does not (leaf(7) = 8, read
+; from res.value).
+;
 ; Protocol: `void @f(params, ptr %res)` with %res -> { ptr task; T value }.
 ; The ramp stores the coroutine's Task<T> (+1) into res.task when the body
 ; suspends for the first time, or NULL plus the result (+1) into res.value
@@ -47,6 +52,8 @@ declare zeroext i1 @zell_task_is_done(ptr)
 declare zeroext i1 @zell_task_add_continuation(ptr, ptr, ptr)
 declare ptr  @zell_task_result(ptr)
 declare ptr  @zell_task_await(ptr)
+declare void @zell_task_run_main(ptr, ptr)
+declare ptr  @zell_task_await_main(ptr)
 declare ptr  @zell_task_delay(i64)
 declare void @zell_coro_resume(ptr)
 declare ptr  @zell_coro_frame_alloc(i64)
@@ -555,6 +562,47 @@ l.slow:
 l.join:
   %l.v = phi i64 [ %l.f, %l.fast ], [ %l.s, %l.slow ]
   call void @zell_println_int(i64 %l.v)
+  %m1 = call i64 @async_main(ptr @main_ramp_sum)
+  call void @zell_println_int(i64 %m1)
+  %m2 = call i64 @async_main(ptr @main_ramp_leaf)
+  call void @zell_println_int(i64 %m2)
   call void @zell_runtime_shutdown()
   ret i32 0
+}
+
+; The ramps of two modelled `async func main`s: `void(ptr %res)`.
+define void @main_ramp_sum(ptr %res) {
+  call void @sum(i64 5, ptr %res)
+  ret void
+}
+
+define void @main_ramp_leaf(ptr %res) {
+  call void @leaf(i64 7, ptr %res)
+  ret void
+}
+
+; What the compiler emits in C `main` for an `async func main` (ABI.md 11).
+define i64 @async_main(ptr %ramp) {
+entry:
+  %res = alloca %res.i64, align 8
+  call void @zell_task_run_main(ptr %ramp, ptr %res)  ; ramp runs on a worker
+  %tp = getelementptr inbounds %res.i64, ptr %res, i64 0, i32 0
+  %t = load ptr, ptr %tp
+  %n = icmp eq ptr %t, null
+  br i1 %n, label %fast, label %slow
+
+fast:
+  %vp = getelementptr inbounds %res.i64, ptr %res, i64 0, i32 1
+  %f = load i64, ptr %vp
+  br label %join
+
+slow:
+  %p = call ptr @zell_task_await_main(ptr %t)
+  %s = load i64, ptr %p
+  call void @zell_release(ptr %t)
+  br label %join
+
+join:
+  %v = phi i64 [ %f, %fast ], [ %s, %slow ]
+  ret i64 %v
 }

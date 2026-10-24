@@ -1291,6 +1291,34 @@ void *zell_task_await_main(zell_task *t) {
     return t->slot;
 }
 
+/* The program entry of an async main (ABI.md 10.2, 11): its ramp runs as
+ * a job on a worker, with no current task as on the main thread, so the
+ * spawns and wake-ups before its first suspension take the worker's local
+ * queues instead of the global one. The main thread blocks on a gate task
+ * until the ramp returned; the caller then reads `res` as before. */
+typedef struct main_ramp {
+    zell_main_ramp_fn ramp;
+    void *res;
+    zell_task *gate;
+} main_ramp;
+
+static void main_ramp_job(void *arg) {
+    main_ramp *m = arg;
+    zell_task *gate = m->gate;  /* m lives on the main thread's stack */
+    m->ramp(m->res);
+    zell_task_complete(gate, NULL);
+    zell_release(gate);         /* the job's reference */
+}
+
+void zell_task_run_main(zell_main_ramp_fn ramp, void *res) {
+    if (!ramp || !res) zell_panic_nil();
+    main_ramp m = { ramp, res, task_new_ex(0, NULL, 0) };
+    zell_retain(m.gate);  /* held by the job */
+    zell_sched_post(main_ramp_job, &m);
+    task_wait(m.gate);
+    zell_release(m.gate);
+}
+
 static void yield_job(void *arg) {
     zell_task *t = arg;
     zell_task_complete(t, NULL);

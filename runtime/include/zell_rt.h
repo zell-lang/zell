@@ -544,6 +544,11 @@ void *zell_task_result_err(zell_task *task, int64_t err_off);
 void *zell_task_await_err(zell_task *task, int64_t err_off);
 /* The entry's await of an async main: a panic ends the process (exit 2). */
 void *zell_task_await_main(zell_task *task);
+/* The entry of an async main: runs ramp(res) as a job on a worker (no
+ * current task) and blocks until it returned; `res` then holds main's
+ * task or, if it never suspended, its result (ABI.md 11). */
+typedef void (*zell_main_ramp_fn)(void *res);
+void zell_task_run_main(zell_main_ramp_fn ramp, void *res);
 /* The destroy path of an unwound coroutine frame: completes `own` as
  * panicked and drops the frame's reference, or (own NULL, never
  * suspended) restores the caller's context ctx0 like zell_coro_leave. */

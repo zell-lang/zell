@@ -1371,6 +1371,7 @@ built as `*_async` variants that return a `zell_task *`.
 | `bool zell_task_is_done(const zell_task *t)` | acquire-load of the state |
 | `bool zell_task_add_continuation(zell_task *t, zell_resume_fn fn, void *frame)` | atomically: if `t` is still pending, registers `(fn, frame)` and returns **true** (the caller must now suspend). If `t` is already done, registers nothing and returns **false** (the caller continues immediately). Each registration fires exactly once |
 | `void *zell_task_result(const zell_task *t)` | **[borrowed]** pointer to the result slot, valid while `t` is alive. Panics `task result read before completion` if pending. To keep a refcounted result, copy and **retain** it |
+| `void zell_task_run_main(zell_main_ramp_fn ramp, void *res)` | program entry of an `async func main` (11): posts `ramp(res)` as a job (the global queue: the main thread is no worker) and blocks the calling thread (10.5) until the ramp **returned**, i.e. until main's first suspension or its synchronous end. `typedef void (*zell_main_ramp_fn)(void *res)`; `res` is the ramp's result slot `{ ptr task; T value }` (10.3), read by the caller afterwards. The ramp runs with **no current task**, as it did on the main thread (its task, made at the first suspension, is a root; the debug agent keeps it as the main record, 22), but on a worker, so spawns, `Yield`s and wake-ups before its first suspension go to that worker's local queues. A panic before the first suspension is outside a task and ends the process (8.1) |
 | `void *zell_task_await(zell_task *t)` | **blocking** await: waits until `t` is done and returns the **[borrowed]** result slot. See 10.5 for where it may be used |
 | `zell_task *zell_task_spawn(zell_task_fn fn, void *ctx)` | creates a task (8-byte POD result slot) and posts `fn(task, ctx)` to the pool. `typedef void (*zell_task_fn)(zell_task *task, void *ctx)`. `fn` must call `zell_task_complete(task, ...)`, either before returning or later. The job holds its own reference only **until `fn` returns**, so to complete later `fn` must `zell_retain(task)`. Returns +1 |
 | `zell_task_spawn_ex(fn, ctx, result_size, result_ops)` | the same, with an explicit result type |
@@ -1530,8 +1531,9 @@ synchronous results. Start from that file.
 ### 10.5 Blocking await (`zell_task_await`)
 
 - **Main thread** (or any non-worker thread): blocks on a condition variable until
-  the task is done. This is how a synchronous `main` waits for an async `main`
-  (section 11) and how `await` works in non-async code, if the language allows it.
+  the task is done. This is how the C `main` waits for an async `main`
+  (section 11: `zell_task_run_main` until its ramp returned on a worker,
+  then `zell_task_await_main` on its task) and how `await` works in non-async code, if the language allows it.
 - **Worker thread**: it also blocks, but before blocking, if no worker is idle, the
   scheduler starts a **spare worker thread** so N runnable workers remain. Spares
   retire once the blocked worker is running again and they find no work.
@@ -1876,8 +1878,10 @@ define i32 @main(i32 %argc, ptr %argv) {
   ; synchronous `func main()`:
   call void @app.main()
   ; or, for `async func main()`:
-  ;   %t = call ptr @app.main()           ; the ramp runs until the first await
-  ;   call ptr @zell_task_await_main(ptr %t)  ; main thread blocks; a panic of main's task exits 2 (8.1)
+  ;   %res = alloca { ptr, T }            ; the ramp's result slot (10.3)
+  ;   call void @zell_task_run_main(ptr @app.main, ptr %res)  ; the ramp runs on a worker until the first await
+  ;   %t = load ptr, ptr %res             ; NULL: main never suspended, its result is in %res
+  ;   call ptr @zell_task_await_main(ptr %t)  ; else the main thread blocks; a panic of main's task exits 2 (8.1)
   ;   call void @zell_release(ptr %t)
   call void @zell_runtime_shutdown()
   ret i32 0

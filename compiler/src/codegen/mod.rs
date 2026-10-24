@@ -146,7 +146,11 @@
 //! `zell_coro_frame_alloc` and go back with `zell_coro_frame_free`. Callers
 //! awaiting a direct call read `res.value` when `res.task` is NULL; callers
 //! keeping the task, and thunks of async functions used as values,
-//! materialise a done task with `zell_task_completed`. The build pipeline
+//! materialise a done task with `zell_task_completed`. The C `main` of an
+//! `async func main` hands the ramp and its `main.res` slot to
+//! `zell_task_run_main(ramp, res)` (ABI.md §10.2, §11), which runs the
+//! ramp as a job on a worker and returns once it did; a non-NULL
+//! `res.task` is then waited for with `zell_task_await_main`. The build pipeline
 //! (`crate::build`) runs `default<On>`, which in LLVM 18 includes the
 //! coroutine passes (coro-early, coro-split, coro-elide, coro-cleanup; at
 //! O0 via the CoroConditionalWrapper), so coroutines are lowered at every
@@ -923,12 +927,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let fallible = matches!(self.prog.types.get(self.prog.funcs[entry.0 as usize].ret), crate::types::Type::Fallible(_));
         let err_slot = fallible.then(|| self.entry_alloca(self.ptr_ty().into(), "main.err", true));
         if self.prog.funcs[entry.0 as usize].is_async {
-            // `async func main`: its result slot holds either the task to
+            // `async func main`: the ramp runs as a job on a worker (the
+            // main thread is none) and the main thread blocks until it
+            // returned. Its result slot then holds either the task to
             // wait for or, when it never suspended, the result itself.
             let ret = self.prog.funcs[entry.0 as usize].ret;
             let rty = self.coro_res_ty(ret);
             let res = self.entry_alloca(rty.into(), "main.res", true);
-            self.b.build_call(ef, &[res.into()], "").unwrap();
+            let ramp = ef.as_global_value().as_pointer_value();
+            self.call_rt("zell_task_run_main", &[ramp.into(), res.into()]);
             let tp = self.b.build_struct_gep(rty, res, 0, "").unwrap();
             let t = self.b.build_load(self.ptr_ty(), tp, "main.task").unwrap().into_pointer_value();
             let sync = self.b.build_is_null(t, "").unwrap();
