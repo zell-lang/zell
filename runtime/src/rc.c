@@ -114,8 +114,10 @@ static inline int is_owner(int64_t w) {
     return (int64_t)(((uint64_t)w >> ZELL_RC_OWNER_SHIFT) & ZELL_RC_OWNER_MASK) == zell_rc_owner;
 }
 
+/* Release: a thread that later drops the last reference (acquire CAS on the
+ * whole word) must see every write the owner made before this store. */
 static inline void store_b(zell_object *o, int64_t b) {
-    __atomic_store_n((uint16_t *)&o->refcount, (uint16_t)b, __ATOMIC_RELAXED);
+    __atomic_store_n((uint16_t *)&o->refcount, (uint16_t)b, __ATOMIC_RELEASE);
 }
 
 static ZELL_NORETURN void overflow(void) { zell__panicf("reference count overflow (more than 2^30 references from other threads)"); }
