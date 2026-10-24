@@ -13,10 +13,10 @@
 //! | `// exit: N` | expected exit code of the program (default 0) |
 //! | `// args: a b` | program arguments (split on whitespace) |
 //! | `// run-flags: --x` | use `zell run <src> <flags> -- <args>` instead of build + exec |
-//! | `// stderr: <text>` | stderr must contain `<text>` (stderr is otherwise not checked) |
+//! | `// stderr: <text>` | stderr must contain `<text>` (repeatable; stderr is otherwise not checked) |
 //! | `// warning: <text>` | the build's stderr must contain `<text>` (repeatable; e.g. a W0001 warning) |
 //! | `// no-warning: <text>` | the build's stderr must not contain `<text>` (repeatable) |
-//! | `// env: K=V` | environment variable of the program run (repeatable) |
+//! | `// env: K=V` | environment variable of the program run (repeatable; `K=` removes `K`, e.g. `ZELL_NO_BACKTRACE=` to check a panic backtrace) |
 //! | `// build-flags: --x` | extra `zell build` flags (also for compile-fail tests) |
 //! | `// os: linux macos` | run only on these host operating systems (`std::env::consts::OS`); skipped elsewhere |
 //!
@@ -71,7 +71,7 @@ struct Directives {
     exit: i32,
     args: Vec<String>,
     run_flags: Vec<String>,
-    stderr: Option<String>,
+    stderr: Vec<String>,
     warnings: Vec<String>,
     no_warnings: Vec<String>,
     env: Vec<(String, String)>,
@@ -106,7 +106,7 @@ fn parse_directives(file: &Path) -> Result<Directives, String> {
             "exit" => d.exit = val.parse().map_err(|_| format!("{}: bad exit directive `{val}`", file.display()))?,
             "args" => d.args = val.split_whitespace().map(String::from).collect(),
             "run-flags" => d.run_flags = val.split_whitespace().map(String::from).collect(),
-            "stderr" => d.stderr = Some(val.to_string()),
+            "stderr" => d.stderr.push(val.to_string()),
             "warning" => d.warnings.push(val.to_string()),
             "no-warning" => d.no_warnings.push(val.to_string()),
             "build-flags" => d.build_flags = val.split_whitespace().map(String::from).collect(),
@@ -284,14 +284,22 @@ fn check(case: &Case) -> Result<(), String> {
             let mut c = Command::new(&exe);
             c.current_dir(repo()).env("ZELL_NO_BACKTRACE", "1").args(&case.dirs.args);
             for (k, v) in &case.dirs.env {
-                c.env(k, v);
+                if v.is_empty() {
+                    c.env_remove(k);
+                } else {
+                    c.env(k, v);
+                }
             }
             run_with_timeout(c, RUN_TIMEOUT)?
         } else {
             let mut c = Command::new(zell());
             c.current_dir(repo()).env("ZELL_NO_BACKTRACE", "1").arg("run").arg(&rel_src).args(&case.dirs.run_flags).arg("--").args(&case.dirs.args);
             for (k, v) in &case.dirs.env {
-                c.env(k, v);
+                if v.is_empty() {
+                    c.env_remove(k);
+                } else {
+                    c.env(k, v);
+                }
             }
             let o = run_with_timeout(c, RUN_TIMEOUT + Duration::from_secs(60))?;
             check_warnings(&o.stderr)?;
@@ -305,7 +313,7 @@ fn check(case: &Case) -> Result<(), String> {
         if out.stdout != expected {
             why.push(format!("stdout differs\n--- expected\n{expected}--- got\n{}", out.stdout));
         }
-        if let Some(s) = &case.dirs.stderr {
+        for s in &case.dirs.stderr {
             if !out.stderr.contains(s.as_str()) {
                 why.push(format!("stderr does not contain `{s}`"));
             }

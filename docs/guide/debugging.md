@@ -56,9 +56,28 @@ exits with status 2. Deferred calls and destructors do not run. Set
 `ZELL_NO_BACKTRACE=1` to print only the message (the test suites do).
 
 A panic is not an error: `try` and `?` do not catch it. The backtrace
-currently shows symbols with offsets (`func+0x1c`); source `file:line` is
-planned. A panic in a `web` handler ends the process as well: the
-server does not recover it.
+names the source line and function of every Zell frame, like Go:
+
+```
+panic: runtime error: index out of range [5] with length 3
+
+backtrace (most recent call first):
+  main.zl:6 inner
+  main.zl:10 main
+./main(main+0x37)[0x452a47]
+/lib64/libc.so.6(__libc_start_main+0x88)[0x7f799edec628]
+```
+
+The lines come from a small table in the executable (`.zell_lines`), so
+they are there in stripped `--release` builds too; frames outside Zell code
+(the runtime, libc) keep the `module(symbol+0xoffset)` form. An optimised
+build inlines small functions, which then have no frame of their own: the
+frame shows the innermost line. `ZELL_NO_LINES=1` prints symbols instead.
+The table exists on Linux and FreeBSD; macOS and Windows still print
+symbols with offsets. `llvm-strip --strip-all` removes the table (GNU
+`strip` keeps it). A panic in a `web` handler without `UseRecover` ends the
+task of the request; with it, the log entry's `PanicTrace` has the same
+text.
 
 ## Logging
 

@@ -1,0 +1,22 @@
+// test: a stripped --release executable still prints file:line in panic backtraces: the line table is data, not symbols (ABI.md 8.2); inlined calls show the innermost line
+// status: passing
+// exit: 2
+// os: linux
+// build-flags: --release
+// env: ZELL_NO_BACKTRACE=
+// stderr: panic: runtime error: index out of range [5] with length 3
+// stderr:   tests/spec/panics/backtrace_lines_release.zl:15 inner
+namespace spec.panics.backtrace_lines_release
+
+import io
+
+func inner(xs []int, i int) int {
+    var k = i + 1
+    return xs[k]
+}
+
+func main() {
+    var xs = [1, 2, 3]
+    println("start")
+    println(inner(xs, len(xs) + 1))
+}

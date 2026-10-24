@@ -322,6 +322,11 @@ Hello-world binary sizes (`scripts/bench-size.sh`, stripped release):
 | C (dynamic libc) | 15 KB |
 | Go (stripped) | 1404 KB |
 
+The panic line table (`.zell_lines`, runtime/ABI.md 8.2, 2026-10-24) adds
+95 bytes of table to `hello`, 2.9 KB to `benchmarks/web_api` (2.7 MB) and
+9.2 KB to `examples/kafka.zl` (2.3 MB), about 0.4%; the code is unchanged
+(DWARF line tables do not affect code generation).
+
 Summary: Zell is faster than Go on 9 of 11 CPU/memory benchmarks and on the HTTP/1.1 server, at parity on nbody and struct_map, and slightly behind on HTTP/2 over TLS. Memory use is lower or equal everywhere except regex (lazy DFA cache), gzip and map.
 
 ## Cycle collector (2026-10-21, 4 vCPU x86-64, `--release`, 10 alternating runs, wall seconds min / median)
