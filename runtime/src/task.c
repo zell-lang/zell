@@ -575,12 +575,25 @@ static void run_job(const jobrec *j) {
      * SEH or DWARF unwinding: platform.h zell__plat_setjmp). */
     zell__job_unwind uw;
     uw.chain0 = zell_coro_chain;
+    uw.resumed = j->fn == zell_coro_resume;
     uw.prev = zell__job_unwind_tls;
     zell__job_unwind_tls = &uw;
     if (zell__plat_setjmp(uw.jb) == 0) {
         j->fn(j->arg);
     } else {
         zell_coro_chain = uw.chain0;
+    }
+    /* Frame-linked awaits (ABI.md 10.3): a linked coroutine that ended
+     * handed over its suspended awaiter; resume it here, in a loop, so a
+     * chain of N linked frames unwinds without recursion or queueing. A
+     * panic in one of them jumps back to the setjmp above and the loop
+     * goes on with the awaiter its unwinding handed over. */
+    for (;;) {
+        void *h = zell_coro_next;
+        if (!h) break;
+        zell_coro_next = NULL;
+        uw.resumed = 1;
+        zell_coro_resume(h);
     }
     zell__job_unwind_tls = uw.prev;
     PROF_START();
@@ -1411,6 +1424,88 @@ static bool add_cont(zell_task *t, zell_resume_fn fn, void *frame, bool suspend)
     task_unlock(t);
     zell_release(drop_ctx);
     return true;
+}
+
+/* A linked coroutine (no task of its own, ABI.md 10.3) registers: the
+ * current task and context are not its own, so they stay current; the
+ * continuation runs with both (retained). */
+bool zell_task_add_continuation_linked(zell_task *t, zell_resume_fn fn, void *frame) {
+    PROF_START();
+    if (!add_cont(t, fn, frame, false)) return false;
+    PROF_T(addcont);
+    return true;
+}
+
+/* The registration a linked frame deferred at its first suspension
+ * (ABI.md 10.3): until the outermost frame of the synchronous chain
+ * publishes it with zell_coro_register, nothing can resume the chain, so
+ * the frames in between link with plain stores. One per thread at most. */
+static _Thread_local struct { zell_task *t; void *frame; zell_object *ctx; } t_pend;
+
+void zell_coro_defer(zell_task *t, void *frame, zell_object *ctx0) {
+    if (t_pend.frame) zell_panic("zell_coro_defer: a registration is pending already");
+    t_pend.t = t;
+    t_pend.frame = frame;
+    t_pend.ctx = t_ctx;   /* the frame's context, moved: its continuation's */
+    t_ctx = ctx0;         /* moved: the caller's context is current again */
+}
+
+/* Publishes the deferred registration: what add_cont does for the frame
+ * that suspends now (`own`: it has a task of its own, which stops being
+ * current), but for the pending frame and with its context; when the task
+ * is done already (or is the yield sentinel), the frame's resumption is
+ * posted instead, so the registering frame always suspends. */
+void zell_coro_register(bool own) {
+    PROF_START();
+    zell_task *t = t_pend.t;
+    void *frame = t_pend.frame;
+    zell_object *ctx = t_pend.ctx;
+    if (!frame) zell_panic("zell_coro_register: nothing pending");
+    t_pend.t = NULL;
+    t_pend.frame = NULL;
+    t_pend.ctx = NULL;
+    zell_task *cur = t_cur;
+    zell_object *drop_ctx = NULL;
+    bool locked = false;
+    cont *c = NULL;
+    if (!is_yield(t) && !zell_task_is_done(t)) {
+        task_lock(t);
+        locked = true;
+        if (t->state != TASK_DONE) {
+            if (!t->cont0.fn) {
+                c = &t->cont0;
+            } else {
+                c = malloc(sizeof *c);
+                if (!c) zell_panic("out of memory (continuation)");
+                c->next = t->conts;
+                t->conts = c;
+            }
+        }
+    }
+    /* The current task stops running here if it is the frame's own (as in
+     * add_cont: its reference moves into the continuation or the job). */
+    if (own && cur) {
+        if (cur->ctx_saved) {
+            drop_ctx = t_ctx;
+            t_ctx = cur->caller_ctx;
+            cur->caller_ctx = NULL;
+            cur->ctx_saved = 0;
+        }
+        zell_retain(cur->parent);
+        t_cur = cur->parent;
+    } else {
+        zell_retain(cur);
+    }
+    if (c) {
+        c->fn = zell_coro_resume;
+        c->frame = frame;
+        c->ctx = ctx;
+        c->cur = cur;
+    }
+    if (locked) task_unlock(t);
+    zell_release(drop_ctx);
+    if (!c) sched_post_ctx(zell_coro_resume, frame, ctx, cur, !is_yield(t));   /* done: run next, like a completion */
+    PROF_T(addcont);
 }
 
 /* Public: the registering code (a coroutine) suspends when this returns
@@ -2276,6 +2371,7 @@ zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *result
  * ====================================================================== */
 
 _Thread_local void *zell_coro_chain;
+_Thread_local void *zell_coro_next;
 _Thread_local zell__job_unwind *zell__job_unwind_tls;
 
 int zell__task_running(void) { return t_cur != NULL; }
@@ -2309,6 +2405,35 @@ void zell_coro_unwound(zell_task *own, zell_object *ctx0) {
     if (!msg) zell_panic("zell_coro_unwound outside a panic");
     task_complete_ex(own, NULL, msg, trace);
     zell_release(own);
+}
+
+/* ======================================================================
+ * Frame-linked await (ABI.md 10.3)
+ * ====================================================================== */
+
+/* The destroy path of a linked frame (ABI.md 10.3): its awaiter is
+ * suspended, waiting on this thread's cascade, so the panic goes into its
+ * slot word as a task.Panic error and the awaiter is resumed next. */
+void zell_coro_unwound_linked(void *word, void *awaiter, zell_object *ctx0) {
+    zell_string *msg, *trace;
+    zell__panic_current(&msg, &trace);
+    if (!msg) zell_panic("zell_coro_unwound_linked outside a panic");
+    zell_error *e = zell__panic_error(msg, trace);
+    zell_coro_leave(ctx0);
+    memcpy(word, &e, sizeof e);
+    zell_coro_next = awaiter;
+}
+
+void zell_coro_link_panic(zell_error *e, void *value, int64_t size, int64_t err_off) {
+    if (err_off < 0) {
+        zell_string *msg = zell_task_panic_message(e);
+        zell_string *trace = zell_task_panic_trace(e);
+        zell_release(e);
+        zell__panic_traced_owned("panic in awaited task: ", msg, trace);
+    }
+    if (err_off + 8 > ZELL_ROUND8(size)) zell__panicf("zell_coro_link_panic: bad error offset");
+    if (size > 0) memset(value, 0, (size_t)size);
+    memcpy((char *)value + err_off, &e, sizeof e);
 }
 
 /* task.ErrPanic and task.Panic errors. */

@@ -342,6 +342,7 @@ ZELL_HIDDEN extern _Thread_local zell__panic_capture *zell__panic_capture_tls;
 typedef struct zell__job_unwind {
     zell__plat_jmpbuf jb;              /* zell__plat_setjmp buffer */
     void *chain0;                      /* zell_coro_chain when the job started */
+    int resumed;                       /* the job resumes coroutine frames: a panic is delivered to a task or a linked awaiter */
     struct zell__job_unwind *prev;
 } zell__job_unwind;
 ZELL_HIDDEN extern _Thread_local zell__job_unwind *zell__job_unwind_tls;
@@ -352,6 +353,9 @@ ZELL_HIDDEN void zell__coro_unwind(void *stop);
 /* The panic being unwound on this thread (borrowed strings), counted as
  * delivered to a task (panic.c); NULL message when none. */
 ZELL_HIDDEN void zell__panic_current(zell_string **msg, zell_string **trace);
+/* zell__panic_traced that consumes msg and trace (+1 each, released
+ * before the panic goes on: nothing else would). */
+ZELL_HIDDEN ZELL_NORETURN void zell__panic_traced_owned(const char *prefix, zell_string *msg, zell_string *trace);
 /* Re-panics with `prefix` + msg and the given trace text (task.c, the
  * awaiter of a panicked Task<T>). quiet: no debugger stop (the original
  * site already stopped). */

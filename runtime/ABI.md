@@ -1378,7 +1378,8 @@ built as `*_async` variants that return a `zell_task *`.
 - `async` functions are LLVM coroutines (switched-resume ABI). When a coroutine
   awaits a pending task, it registers its own handle as a continuation and
   suspends. A worker later calls `zell_coro_resume(handle)`. A coroutine has
-  **no task until it first suspends**: a body that returns without suspending
+  **no task until it first suspends**, and none at all when another
+  coroutine awaits it directly (frame-linked await, 10.3): a body that returns without suspending
   hands its result to the caller directly (10.3), so an `await` that completes
   synchronously allocates no task (and no frame when the body has no suspend
   point).
@@ -1398,6 +1399,10 @@ built as `*_async` variants that return a `zell_task *`.
 | `void zell_task_complete(zell_task *t, const void *result)` | stores the result (copies `result_size` bytes from `result`, which is borrowed: the task **retains** it with `ops`; `result` may be NULL for void tasks or a zero result), marks the task done, wakes blocking waiters, and posts the continuations. **Panics `task completed twice`** on a second call. After it returns, `t` may already have been freed by another thread unless the caller still owns a reference |
 | `bool zell_task_is_done(const zell_task *t)` | acquire-load of the state |
 | `bool zell_task_add_continuation(zell_task *t, zell_resume_fn fn, void *frame)` | atomically: if `t` is still pending, registers `(fn, frame)` and returns **true** (the caller must now suspend). If `t` is already done, registers nothing and returns **false** (the caller continues immediately). Each registration fires exactly once |
+| `bool zell_task_add_continuation_linked(zell_task *t, zell_resume_fn fn, void *frame)` | the same for a resumed linked coroutine (10.3, no task of its own): the continuation carries the current task and context (retained), which stay current |
+| `void zell_coro_defer(zell_task *t, void *frame, zell_object *ctx0)` / `void zell_coro_register(bool own)` | frame-linked await (10.3): a linked frame's first suspension on `t` is recorded (one per thread, with the current context; `ctx0`, +1 consumed, is current again) and published by the last frame of the synchronous chain to suspend, as `zell_task_add_continuation` would for that frame (`own`: its task stops being current); a done `t` posts the resumption instead |
+| `extern _Thread_local void *zell_coro_next` | the awaiter a linked frame hands over when it ends; `run_job` resumes it (10.3) |
+| `void zell_coro_unwound_linked(void *word, void *awaiter, zell_object *ctx0)` / `void zell_coro_link_panic(zell_error *e, void *value, int64_t size, int64_t err_off)` | a linked frame's destroy path (the `task.Panic` error into the awaiter's word) and the awaiter reading it (re-panic for `err_off < 0`, else `{zero, e}` into `value`), 10.3 |
 | `void *zell_task_result(const zell_task *t)` | **[borrowed]** pointer to the result slot, valid while `t` is alive. Panics `task result read before completion` if pending. To keep a refcounted result, copy and **retain** it |
 | `void zell_task_run_main(zell_main_ramp_fn ramp, void *res)` | program entry of an `async func main` (11): posts `ramp(res)` as a job (the global queue: the main thread is no worker) and blocks the calling thread (10.5) until the ramp **returned**, i.e. until main's first suspension or its synchronous end. `typedef void (*zell_main_ramp_fn)(void *res)`; `res` is the ramp's result slot `{ ptr task; T value }` (10.3), read by the caller afterwards. The ramp runs with **no current task**, as it did on the main thread (its task, made at the first suspension, is a root; the debug agent keeps it as the main record, 22), but on a worker, so spawns, `Yield`s and wake-ups before its first suspension go to that worker's local queues. A panic before the first suspension is outside a task and ends the process (8.1) |
 | `void *zell_task_await(zell_task *t)` | **blocking** await: waits until `t` is done and returns the **[borrowed]** result slot. See 10.5 for where it may be used |
@@ -1425,7 +1430,9 @@ built as `*_async` variants that return a `zell_task *`.
 For `async func f(params) T`, the compiler emits **one** LLVM function
 `void @f(params, ptr %res) presplitcoroutine` (the ramp, which is also the
 coroutine). `%res` points at a caller-owned slot `{ ptr task; T value }`
-(`{ ptr task }` for `Task<void>`). Calling `f` **starts it immediately**: the
+(`{ ptr task }` for `Task<void>`). The caller stores into `res.task`
+before the call either NULL or, for a frame-linked await (below), its own
+frame handle; `f` reads it at its first suspension. Calling `f` **starts it immediately**: the
 body runs synchronously on the caller's thread until its first real
 suspension, as in C#. The coroutine has **no task until then**: when the
 body suspends for the first time it makes its `Task<T>` (`zell_task_lazy`)
@@ -1462,12 +1469,15 @@ ready:
   x = load U from zell_task_result(t); retain x if U is a reference type
   zell_release(t)
 
-; `x = await g(args)` of a direct call of an async function g:
+; `x = await g(args)` of a direct call of an async function g, outside a
+; coroutine (with a NULL awaiter; inside one see "Frame-linked await"):
   r = alloca { ptr task; U value }
+  store null -> r.task                             ; no awaiter
   call g(args, r)
   if r.task == null: x = load r.value             ; +1, moved: no retain, no task
   else: await r.task as above, then zell_release(r.task)
 ; `t = g(args)` kept as a Task<U> (not awaited here):
+  store null -> r.task
   call g(args, r); t = r.task ?: zell_task_completed(sizeof(U), ops_U, &r.value)
 
 ; each `return v` (after the defers and the release of the locals):
@@ -1491,7 +1501,9 @@ done:
 
 Rules the compiler must respect:
 
-- **Do not touch the frame after `zell_task_add_continuation` returns true.**
+- **Do not touch the frame after `zell_task_add_continuation` (or
+  `zell_task_add_continuation_linked`) returns true, nor after
+  `zell_coro_register`.**
   Another worker may already be resuming the coroutine, because the task can
   complete at any moment and continuations are posted immediately. Between that
   call and `llvm.coro.suspend` there must be no frame accesses, and the code
@@ -1543,11 +1555,125 @@ Rules the compiler must respect:
 - `defer` inside an async function: 0.1 recommendation is to run defers at the
   logical function exit, before `zell_task_complete` / the store into `res`.
 
+**Frame-linked await.** An `await g(args)` of a direct call inside a
+coroutine makes **no task for `g`**, however deep the chain: the caller
+stores its frame handle `hdl` into the first word of the slot, which
+becomes the hand-off between the two frames:
+
+| word | meaning | written by |
+|---|---|---|
+| `hdl` | the awaiter, read by `g` at its first suspension | the caller, before the call |
+| NULL | `g` returned synchronously, `res.value` holds the result (+1) | `g`'s synchronous return |
+| 1 `ZELL_LINK_LINKED` | `g` suspended without a task; after `g` ended: it returned, the result (+1) was moved into `res.value` | `g`'s first suspension |
+| other | `g` was unwound by a panic: its `task.Panic` error (+1) | `g`'s destroy path |
+
+A linked frame keeps its awaiter in its task slot (`hdl + 1`: bit 0 tells
+"linked" from a task of its own, which is never odd). Nothing in the
+protocol is atomic: **the registration that makes a suspended chain
+resumable is published once, by the last frame of the synchronous call
+chain to suspend**. The innermost frame defers its registration on the
+awaited task in a thread-local record (`zell_coro_defer`), every frame
+above it that is linked as well just suspends, and the first frame that
+is not linked now (one with a task of its own, made now or before, or a
+frame resumed earlier, i.e. the bottom of the job's stack) publishes it
+with `zell_coro_register`. Until then no other thread can see any frame of
+the chain; after it, every awaiter is suspended, so the leaf's end hands
+over to its awaiter unconditionally.
+
+```text
+; the first suspension of a coroutine (task.slot == null):
+  aw = load res.task                               ; NULL or the awaiter
+  if aw != null:                                   ; linked: no task
+    store aw + 1 -> task.slot
+    store 1 (LINKED) -> res.task
+    ctxr = retain(load ctx.slot)                   ; the caller's context
+  else: own = zell_task_lazy(null, ...) as above; store own -> res.task
+
+; awaiting a pending task t:
+  linked just now: zell_coro_defer(t, hdl, ctxr)   ; ctxr current again; always suspends
+  else if task.slot holds a task: zell_task_add_continuation(t, ...) as above
+  else (a resumed linked frame): zell_task_add_continuation_linked(t, @zell_coro_resume, hdl)
+                                                   ; under the current task, which stays current
+
+; `x = await g(args)` inside a coroutine:
+  store hdl -> r.task
+  call g(args, r)
+  if load r.task == null: x = load r.value         ; synchronous: +1, moved
+  else:                                            ; LINKED
+    <first-suspension step above>
+    llvm.coro.save(hdl)
+    linked just now: zell_coro_leave(ctxr)         ; the registration stays pending
+    else: zell_coro_register(task.slot holds a task)   ; publishes it; no frame access after
+    suspend                                        ; resumed by g's end (zell_coro_next)
+    w = load r.task
+    if w != LINKED: zell_coro_link_panic(w, &r.value, sizeof(U), err_off)
+    x = load r.value                               ; +1, moved
+
+; `return v` of a linked frame (task.slot odd):
+  store v -> res.value                             ; moved; a T! error is settled first
+  zell_coro_leave(load ctx.slot)                   ; the awaiter's context is current
+  zell_coro_next = task.slot - 1                   ; the awaiter, resumed by run_job
+  br cleanup                                       ; frees the frame
+```
+
+- **Publishing.** `zell_coro_register(own)` is what
+  `zell_task_add_continuation` does for the registering frame (with `own`
+  its task stops being current, its reference moving into the
+  continuation; without, the current task is retained), applied to the
+  deferred frame and its context; if the task is done already (or is
+  `task.Yield`'s sentinel) the deferred frame's resumption is posted to the
+  ring instead, so the registering frame always suspends. The deferred
+  record holds one registration per thread; `zell_coro_defer` is only
+  called by a frame whose caller is a coroutine in the middle of the
+  awaiter side above, which consumes or passes it on before any other code
+  runs.
+- **The resume-next slot** `zell_coro_next` (thread-local, exported like
+  `zell_coro_chain`): `run_job` (task.c) resumes the frame it holds after
+  the job's function returned, clearing it first, in a loop, so a chain of
+  N linked frames that suspended at its leaf resumes level by level with
+  no task, continuation, queue, atomic or recursion per level. A slot is
+  set only as the last act of a frame that ends, so it holds at most one
+  frame. The whole cascade runs on the thread that resumed the leaf,
+  inside one job (one `setjmp`).
+- **Ownership.** The result is moved once: `g` stores it +1 into
+  `res.value`, the awaiter loads it without a retain (as on the
+  synchronous path). `res` lives in the awaiter's frame, which is
+  suspended until `g` hands it over. The `T!` error of a linked return is
+  settled (`zell_error_caught`, keep) as for a task result.
+- **Current task and cancellation.** A linked frame has no task. The
+  chain is registered under the registering frame's task (its own, or
+  for a resumed linked frame the current one), so it resumes and runs
+  under the task of its root (the first frame up the chain that has a
+  task). Waits created before the first suspension hook their
+  cancellation on the task current then (the root's once the root has
+  suspended before, else the root's caller's, as for the body of any
+  coroutine before its first suspension); waits created after a resume
+  hook on the root's task. Cancelling the root (a `task.Any` loser, a
+  deadline) therefore wakes the waits of the whole linked chain under it.
+- **Context.** The callee keeps the awaiter's context (`ctx.slot`, +1) and
+  makes it current at its first linked suspension and at its return, so
+  the awaiter resumes under its own context; the deferred registration
+  carries the leaf's context.
+- **Panics** (8.1). A linked frame's destroy path calls
+  `zell_coro_unwound_linked(&res.task, awaiter, ctx0)`: the panic becomes a
+  `task.Panic` error in the awaiter's word, `ctx0` is current again and
+  the awaiter goes to `zell_coro_next` (the job loop resumes it after the
+  unwinding longjmp). The awaiter's `zell_coro_link_panic` then re-panics
+  (`Task<T>`, `err_off < 0`: `panic in awaited task: ...`, one prefix) or
+  stores `{zero, error}` into `res.value` (`T!`), exactly as
+  `zell_task_result` / `zell_task_result_err` do for a panicked task. A
+  job that resumes coroutine frames (`zell__job_unwind.resumed`) contains
+  a panic even when no task is current.
+- **Diagnostics.** The debugger and `diag` list tasks, so a linked chain
+  shows as its root task only (the frames have none); the frame chain of
+  the running job is unchanged (`zell_coro_chain` pushes and pops).
+
 `tests/coro_lowering.ll` is a complete, working example. `make test` compiles it
 with `clang -O2` and runs it. It contains four async functions (one awaiting
 `task.Delay`, one awaiting the first, one without suspend points, one
 awaiting both) and a `main` that awaits with `zell_task_await` and reads
-synchronous results. Start from that file.
+synchronous results, plus frame-linked awaits: one that suspends, one that
+completes synchronously and one that panics. Start from that file.
 
 ### 10.4 Other ways to create tasks
 
@@ -1888,7 +2014,9 @@ carried by jobs and continuations exactly like the context of 10.8.
   cancellation, and scopes or tasks it starts before suspending (a
   `task.NewCancel()`, a nested call that suspends) attach to the caller's
   task, not to the task the coroutine gets later; a body that never suspends
-  has no task at all. Runtime-made tasks (delays, signals, waits, `All`,
+  has no task at all, and neither has a coroutine awaited directly by
+  another one (10.3 "Frame-linked await": it runs under the current task
+  of the job that resumes it). Runtime-made tasks (delays, signals, waits, `All`,
   `Any`, spawns) use `zell_task_new_plain`, which does neither;
   **C code that makes a task for a callback must use `zell_task_new_plain`**.
 - A child holds a reference to its parent until it is freed; the parent lists
@@ -2856,7 +2984,7 @@ behind `if (on)`:
 |---|---|
 | `zell_dbg_enter(&F, &func, locals, entry_stmt)` | after the parameters are stored; initialises `F` (compiled code does not zero it), links it, runs the entry statement |
 | `zell_dbg_stmt(&F, id)` | before every statement |
-| `zell_dbg_stmt(&F, close)` then `zell_dbg_leave(&F)` | at the start of the exit block (`close` is the closing-brace statement) |
+| `zell_dbg_stmt(&F, close)` then `zell_dbg_leave(&F)` | at the start of the exit block (`close` is the closing-brace statement); a frame-linked coroutine (10.3, its task slot odd) calls `zell_dbg_leave_linked(&F)` instead: its end is not the end of the task it ran under |
 | `zell_dbg_suspend(&F)` | in `await`, before the continuation is registered (the frame leaves this thread's chain) |
 | `zell_dbg_resume(&F)` | once the awaited task is ready (no-op unless suspended): the frame joins the chain of the thread that resumed it |
 
@@ -2920,7 +3048,8 @@ goes on, when its task completes (`zell_dbg_leave` of the bottom async
 frame), with the **awaiter** (the current task of the first continuation
 registered on the task, `zell__task_awaiter`): the awaiter's own record,
 made when it suspended, is retired unless it ever reported a stop. So one
-logical await chain keeps one id. `zell__task_parent`, `zell__task_awaiter`
+logical await chain keeps one id; a frame-linked chain (10.3) runs under
+its root's task and record throughout. `zell__task_parent`, `zell__task_awaiter`
 (task.c, borrowed results) serve this.
 
 ### 22.4 What debug reads

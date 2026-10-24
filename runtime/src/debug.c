@@ -399,7 +399,15 @@ void zell_dbg_enter(zell_dbg_frame *f, const zell_dbg_func *func, void *const *l
     zell_dbg_stmt(f, entry);
 }
 
-void zell_dbg_leave(zell_dbg_frame *f) {
+static void dbg_leave(zell_dbg_frame *f, int ends_task);
+
+void zell_dbg_leave(zell_dbg_frame *f) { dbg_leave(f, 1); }
+
+/* A frame-linked coroutine ends (ABI.md 10.3): the task it ran under is
+ * its root's, which goes on in the awaiter, so the record stays put. */
+void zell_dbg_leave_linked(zell_dbg_frame *f) { dbg_leave(f, 0); }
+
+static void dbg_leave(zell_dbg_frame *f, int ends_task) {
     if (!f->active) return;
     if (t_top == f) {
         t_top = f->prev;
@@ -422,7 +430,7 @@ void zell_dbg_leave(zell_dbg_frame *f) {
         }
         zell__plat_mutex_unlock(&g_mu);
     }
-    if (f->func && (f->func->flags & FUNC_ASYNC) && !f->prev && g_tables) {
+    if (ends_task && f->func && (f->func->flags & FUNC_ASYNC) && !f->prev && g_tables) {
         zell_task *t = zell__task_cur();
         int32_t id = t ? zell__task_dbg_id(t) : 0;
         rec *r = id ? rec_at(id) : NULL;
@@ -472,7 +480,10 @@ void zell_dbg_suspend(zell_dbg_frame *f) {
          * if it is observed again. */
         zell__plat_mutex_lock(&g_mu);
         rec *s = g_steps;
-        while (s && s->step_frame != f) s = s->next_step;
+        /* The step's frame is this one, or (frame-linked await, ABI.md
+         * 10.3) a coroutine linked under it that suspended just now on the
+         * same host record: the chain resumes under this task. */
+        while (s && s->step_frame != f && !(s->step_frame && s->step_frame->active == 2 && s->suspended == s->step_frame)) s = s->next_step;
         int took = 0;
         if (s && s->alive) {
             if (s->id == g_main_id) {

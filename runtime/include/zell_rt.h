@@ -556,6 +556,34 @@ void zell_coro_unwound(zell_task *own, zell_object *ctx0);
 /* The running coroutine frames of this thread, innermost first: nodes
  * { prev, hdl } in the frames (hdl NULL = no destroy). */
 extern _Thread_local void *zell_coro_chain;
+/* Frame-linked await (ABI.md 10.3): a directly awaited coroutine that
+ * suspends with its awaiter's handle in the first word of its result slot
+ * `{ ptr word; T value }` makes no task; it leaves ZELL_LINK_LINKED in the
+ * word, and once it ends the word holds ZELL_LINK_LINKED (returned, value
+ * moved into the slot) or the task.Panic error (+1) of its panic. */
+#define ZELL_LINK_LINKED 1
+/* The awaiter a linked callee hands over when it ends: run_job resumes
+ * it (and whatever it hands over in turn) before the job ends. */
+extern _Thread_local void *zell_coro_next;
+/* A linked coroutine (no task of its own) that was resumed registers
+ * `frame` on `task`: the continuation runs under the current task and
+ * context, which stay current here. Returns false when `task` is done. */
+bool zell_task_add_continuation_linked(zell_task *task, zell_resume_fn fn, void *frame);
+/* A linked coroutine's first suspension on `task`: its registration is
+ * deferred (one per thread) with the current context; ctx0 (+1, consumed)
+ * is current again. zell_coro_register publishes it from the frame that
+ * suspends last on this stack (`own`: that frame has a task of its own,
+ * which stops being current), posting the resumption if `task` is done. */
+void zell_coro_defer(zell_task *task, void *frame, zell_object *ctx0);
+void zell_coro_register(bool own);
+/* The destroy path of a linked frame: the panic, as a task.Panic error,
+ * goes into the awaiter's slot word, ctx0 is current again and the
+ * awaiter is handed over (zell_coro_next). */
+void zell_coro_unwound_linked(void *word, void *awaiter, zell_object *ctx0);
+/* An awaiter that found the task.Panic error `e` (consumed) in the word:
+ * err_off < 0 (a T result) re-panics "panic in awaited task: ...";
+ * otherwise (T!) value gets `size` zero bytes and `e` at err_off. */
+void zell_coro_link_panic(zell_error *e, void *value, int64_t size, int64_t err_off);
 /* The program's line table (ABI.md 8.2), registered by the constructor of
  * the line-table object the compiler links into every program. */
 void zell_lines_register(const void *table, int64_t len);
@@ -1097,6 +1125,7 @@ struct zell_dbg_func;
 void zell_dbg_enter(struct zell_dbg_frame *f, const struct zell_dbg_func *func, void *const *locals, int32_t entry_stmt);
 void zell_dbg_stmt(struct zell_dbg_frame *f, int32_t stmt);
 void zell_dbg_leave(struct zell_dbg_frame *f);
+void zell_dbg_leave_linked(struct zell_dbg_frame *f);  /* a frame-linked coroutine (ABI.md 10.3) */
 void zell_dbg_suspend(struct zell_dbg_frame *f);
 void zell_dbg_resume(struct zell_dbg_frame *f);
 /* C main: after zell_runtime_init (starts the agent when ZELL_DEBUG is

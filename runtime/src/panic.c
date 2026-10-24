@@ -94,7 +94,7 @@ static ZELL_NORETURN __attribute__((noinline)) void die_traced(const char *msg, 
         die_final(msg, len, trace, tlen, quiet);
     }
     zell__job_unwind *uw = zell__job_unwind_tls;
-    if (uw && zell__task_running()) {
+    if (uw && (uw->resumed || zell__task_running())) {
         /* A task panics: only the task ends (ABI.md 8.1). The debugger
          * stops before anything is unwound. */
         if (!quiet && __atomic_load_n(&zell_dbg_on, __ATOMIC_RELAXED) && zell__dbg_panic_fn) zell__dbg_panic_fn(msg, len);
@@ -141,6 +141,21 @@ void zell__panic_traced(const char *prefix, const zell_string *msg, const zell_s
     memcpy(buf, prefix, pl);
     memcpy(buf + pl, zell_string_data(msg), (size_t)ml);
     die_traced(buf, (int64_t)pl + ml, zell_string_data(trace), zell_string_len(trace), quiet);
+}
+
+void zell__panic_traced_owned(const char *prefix, zell_string *msg, zell_string *trace) {
+    size_t pl = strlen(prefix);
+    int64_t ml = zell_string_len(msg), tl = zell_string_len(trace);
+    if ((int64_t)pl <= ml && memcmp(zell_string_data(msg), prefix, pl) == 0) pl = 0;
+    char *buf = malloc(pl + (size_t)ml + (size_t)tl + 2);
+    if (!buf) zell_panic("out of memory (panic)");
+    memcpy(buf, prefix, pl);
+    memcpy(buf + pl, zell_string_data(msg), (size_t)ml);
+    char *tb = buf + pl + (size_t)ml + 1;
+    memcpy(tb, zell_string_data(trace), (size_t)tl);
+    zell_release(msg);
+    zell_release(trace);
+    die_traced(buf, (int64_t)pl + ml, tb, tl, 0);
 }
 
 void zell_panic(const char *msg) {

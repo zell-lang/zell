@@ -128,6 +128,166 @@ TEST(coroutine_protocol) {
     }
 }
 
+/* ---- frame-linked await (ABI.md 10.3): a C model of a chain of linked
+ * frames under a root that makes its task. The leaf defers its
+ * registration, the frames above link with plain stores, the root
+ * publishes it (zell_coro_register) while a plain thread races to
+ * complete the awaited task; run_job resumes the awaiters (zell_coro_next) ---- */
+
+typedef struct lk_res { uintptr_t word; int64_t value; } lk_res;   /* { ptr word; int value } */
+
+typedef struct lk_frame {
+    void (*resume)(void *);       /* word 0: what zell_coro_resume calls */
+    int depth;                    /* 0: the leaf */
+    lk_res *res;                  /* the caller's slot */
+    void *link;                   /* the awaiter, once linked */
+    zell_object *ctx0;            /* the caller's context, +1 */
+    zell_task *wait;              /* leaf: the awaited task */
+    zell_task *own;               /* root: its task */
+    lk_res sub;                   /* the callee's slot */
+} lk_frame;
+
+enum { LK_N = 3000, LK_DEPTH = 3 };
+static zell_task *lk_results[LK_N];
+static int64_t lk_started, lk_handoffs;
+static zell_object *lk_ctx;
+static zell_task *lk_q[LK_N];
+static int64_t lk_qn;
+
+static void *lk_completer(void *arg) {
+    (void)arg;
+    for (int64_t k = 0; k < LK_N; k++) {
+        zell_task *t;
+        while ((t = __atomic_load_n(&lk_q[k], __ATOMIC_ACQUIRE)) == NULL) {}
+        zell_task_complete(t, NULL);
+        zell_release(t);
+    }
+    return NULL;
+}
+
+/* A frame ends: what coro_return emits for each kind of frame. */
+static void lk_return(lk_frame *f, int64_t v) {
+    lk_res *res = f->res;
+    if (f->own) {
+        zell_task_complete(f->own, &v);
+        zell_release(f->own);
+    } else if (!f->link) {
+        zell_coro_leave(f->ctx0);
+        res->word = 0;
+        res->value = v;
+    } else {
+        res->value = v;               /* the word stays LINKED */
+        zell_coro_leave(f->ctx0);     /* the awaiter's context */
+        assert(zell_coro_next == NULL);
+        zell_coro_next = f->link;     /* suspended: resumed by run_job next */
+        __atomic_add_fetch(&lk_handoffs, 1, __ATOMIC_RELAXED);
+    }
+    free(f);
+}
+
+static void lk_leaf_resumed(void *p) {
+    lk_frame *f = p;
+    zell_release(f->wait);
+    lk_return(f, 1);
+}
+
+static void lk_after(lk_frame *f) {
+    assert(f->sub.word == 0 || f->sub.word == ZELL_LINK_LINKED);   /* no panic here */
+    lk_return(f, f->sub.value + 1);
+}
+
+static void lk_mid_resumed(void *p) {
+    lk_frame *f = p;
+    if (f->own) {
+        zell_task *cur = zell_task_current();
+        assert(cur == f->own);    /* the chain ran under the root's task */
+        zell_release(cur);
+    }
+    lk_after(f);
+}
+
+/* The first-suspension link step: the awaiter from the word, LINKED. */
+static zell_object *lk_link_step(lk_frame *f) {
+    f->link = (void *)f->res->word;
+    f->res->word = ZELL_LINK_LINKED;
+    zell_retain(f->ctx0);
+    return f->ctx0;
+}
+
+static void lk_start(lk_frame *f, lk_res *res, int depth, int root) {
+    memset(f, 0, sizeof *f);
+    f->depth = depth;
+    f->res = res;
+    f->ctx0 = zell_task_get_ctx();
+    if (depth == 0) {
+        f->resume = lk_leaf_resumed;
+        zell_task *t = zell_task_new_plain(0, NULL);
+        zell_retain(t);
+        int64_t k = __atomic_fetch_add(&lk_qn, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&lk_q[k], t, __ATOMIC_RELEASE);   /* the completer races us */
+        f->wait = t;
+        if (zell_task_is_done(t)) {
+            lk_leaf_resumed(f);
+            return;
+        }
+        zell_coro_defer(t, f, lk_link_step(f));   /* nothing can resume f yet */
+        return;
+    }
+    f->resume = lk_mid_resumed;
+    lk_frame *c = malloc(sizeof *c);
+    f->sub.word = (uintptr_t)f;
+    lk_start(c, &f->sub, depth - 1, 0);
+    if (f->sub.word == 0) {
+        lk_after(f);
+        return;
+    }
+    assert(f->sub.word == ZELL_LINK_LINKED);
+    if (root) {
+        zell_task *own = zell_task_lazy(NULL, 8, NULL, f->ctx0);
+        f->own = own;
+        res->word = (uintptr_t)own;
+        zell_coro_register(true);   /* publishes the chain; posts it if the task is done */
+        return;
+    }
+    zell_coro_leave(lk_link_step(f));
+}
+
+static void lk_root_job(void *arg) {
+    int64_t i = (int64_t)(intptr_t)arg;
+    if (i % 2) zell_task_set_ctx(lk_ctx);
+    zell_object *before = zell_task_get_ctx();
+    zell_task *cur0 = zell_task_current();
+    lk_res r;
+    r.word = 0;
+    lk_frame *f = malloc(sizeof *f);
+    lk_start(f, &r, LK_DEPTH, 1);
+    zell_object *after = zell_task_get_ctx();
+    zell_task *cur1 = zell_task_current();
+    assert(after == before && cur1 == cur0);   /* context and task isolation across the ramp */
+    zell_release(after);
+    zell_release(before);
+    zell_release(cur0);
+    zell_release(cur1);
+    lk_results[i] = r.word ? (zell_task *)r.word : zell_task_completed(8, NULL, &r.value);
+    __atomic_add_fetch(&lk_started, 1, __ATOMIC_RELEASE);
+}
+
+TEST(linked_await_chain) {
+    lk_ctx = (zell_object *)zell_string_new("ctx", 3);
+    lk_ctx->refcount |= ZELL_RC_NOBIAS;   /* retained on every worker, like a task */
+    pthread_t th;
+    assert(pthread_create(&th, NULL, lk_completer, NULL) == 0);
+    for (int64_t i = 0; i < LK_N; i++) zell_sched_post(lk_root_job, (void *)(intptr_t)i);
+    while (__atomic_load_n(&lk_started, __ATOMIC_ACQUIRE) < LK_N) sched_yield();
+    for (int i = 0; i < LK_N; i++) {
+        assert(*(int64_t *)zell_task_await(lk_results[i]) == LK_DEPTH + 1);
+        zell_release(lk_results[i]);
+    }
+    pthread_join(th, NULL);
+    zell_release(lk_ctx);
+    printf("    (%lld linked hand-offs)\n", (long long)__atomic_load_n(&lk_handoffs, __ATOMIC_RELAXED));
+}
+
 /* ---- delay / any ---- */
 
 TEST(delay_any) {
@@ -1055,6 +1215,7 @@ int main(int argc, char **argv) {
     RUN(nested_await_on_worker);
     RUN(yield_ring_tail);
     RUN(coroutine_protocol);
+    RUN(linked_await_chain);
     RUN(delay_any);
     RUN(timer_heap_order_and_fire);
     RUN(relay_handoffs);
