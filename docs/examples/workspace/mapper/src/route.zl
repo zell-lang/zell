@@ -1,0 +1,57 @@
+// mapper.route: routes made of named stops, built on the geo package.
+// `import geo` makes geo's exported names usable without the prefix;
+// the full form (geo.Distance) works too, but only for packages listed
+// in this package's [dependencies].
+namespace mapper.route
+
+import geo
+
+struct Stop {
+    Name string
+    At   Point
+}
+
+struct Leg {
+    From     string
+    To       string
+    Km       float
+}
+
+func Legs(stops []Stop) []Leg {
+    var out []Leg = []
+    for i in 1..len(stops) {
+        var (a, b) = (stops[i - 1], stops[i])
+        out = append(out, Leg{From: a.Name, To: b.Name, Km: Distance(a.At, b.At)})
+    }
+    return out
+}
+
+func Length(stops []Stop) float {
+    var km = 0.0
+    for l in Legs(stops) {
+        km += l.Km
+    }
+    return km
+}
+
+// Nearest returns the stop closest to p.
+func Nearest(stops []Stop, p Point) Stop! {
+    if len(stops) == 0 {
+        return error("no stops")
+    }
+    var best = stops[0]
+    for s in stops {
+        if Distance(s.At, p) < Distance(best.At, p) {
+            best = s
+        }
+    }
+    return best
+}
+
+func Points(stops []Stop) []Point {
+    var out []Point = []
+    for s in stops {
+        out = append(out, s.At)
+    }
+    return out
+}

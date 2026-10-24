@@ -1,0 +1,31 @@
+// The application's tests, against geo as a dependency: `zell test
+// mapper` from the workspace root.
+namespace mapper.tests
+
+import geo
+import mapper.route
+
+func stop(name string, lat float, lon float) Stop {
+    return Stop{Name: name, At: Point{Lat: lat, Lon: lon}}
+}
+
+@test func TestLegsAndLength(t *testing.T) {
+    var stops = [stop("a", 0, 0), stop("b", 0, 1), stop("c", 0, 2)]
+    var legs = Legs(stops)
+    testing.Equal(t, len(legs), 2)
+    testing.Equal(t, legs[1].From, "b")
+    // One degree of longitude on the equator is about 111.2 km.
+    testing.True(t, math.Abs(Length(stops) - 222.4) < 0.5, "two degrees along the equator")
+}
+
+@test func TestNearest(t *testing.T) {
+    var stops = [stop("north", 10, 0), stop("south", -10, 0)]
+    var s = try Nearest(stops, Point{Lat: -3, Lon: 1}) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, s.Name, "south")
+    try Nearest([], Point{}) catch err {
+        testing.Contains(t, err.Message(), "no stops")
+    }
+}

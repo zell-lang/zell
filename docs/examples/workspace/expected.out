@@ -1,0 +1,9 @@
+route:
+  Lisbon  -> Madrid    502.4 km
+  Madrid  -> Paris    1052.9 km
+  Paris   -> Berlin    877.5 km
+  Berlin  -> Vienna    523.5 km
+  total 2956.3 km
+bounding box: (38.72, -9.14) to (52.52, 16.37)
+center (45.62, 3.62) is nearest to Paris
+Zurich inside the box: true

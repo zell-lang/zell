@@ -7,7 +7,8 @@
 //!    the project is shown that way (so the page can never drift from the
 //!    code);
 //! 2. `zell run` in the project prints exactly `expected.out`;
-//! 3. `zell test` passes when the project has `*_test.zl` files;
+//! 3. `zell test` passes when the project has `*_test.zl` files (in a
+//!    workspace, `zell test <member>` for each member package);
 //! 4. `zell run --leak-check` finishes without leaking.
 //!
 //! The project is copied to a temporary directory first, so runs never
@@ -165,10 +166,23 @@ fn check_project(root: &Path) -> Vec<String> {
             }
         }
     }
-    if files(root).iter().any(|f| f.ends_with("_test.zl")) {
-        let o = zell(&dir, &["test"]);
-        if !o.status.success() {
-            errs.push(format!("zell test failed:\n{}", text(&o)));
+    // `zell test` works on one package, so a workspace root (a manifest
+    // with `[workspace]`) is tested member by member: `zell test <dir>`
+    // for every direct subdirectory that has a manifest and tests.
+    let workspace = std::fs::read_to_string(root.join("zell.toml")).is_ok_and(|m| m.lines().any(|l| l.trim() == "[workspace]"));
+    let members: Vec<String> = if workspace {
+        let mut m: Vec<String> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).filter(|p| p.join("zell.toml").is_file()).map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        m.sort();
+        m
+    } else {
+        vec![String::new()]
+    };
+    for m in &members {
+        if files(&root.join(m)).iter().any(|f| f.ends_with("_test.zl")) {
+            let o = if m.is_empty() { zell(&dir, &["test"]) } else { zell(&dir, &["test", m]) };
+            if !o.status.success() {
+                errs.push(format!("zell test {m} failed:\n{}", text(&o)));
+            }
         }
     }
     let o = zell(&dir, &["run", "--leak-check"]);

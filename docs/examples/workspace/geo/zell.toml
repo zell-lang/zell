@@ -1,0 +1,6 @@
+[package]
+name = "geo"
+version = "0.2.0"
+namespace = "geo"
+description = "Points, distances and bounding boxes on a sphere"
+license = "MIT"

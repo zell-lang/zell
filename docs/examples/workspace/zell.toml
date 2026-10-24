@@ -1,0 +1,5 @@
+# The workspace root: no package of its own, just the list of members.
+# zell build, run and test at this level work across all of them, and
+# they share one zell.lock here.
+[workspace]
+members = ["geo", "mapper"]

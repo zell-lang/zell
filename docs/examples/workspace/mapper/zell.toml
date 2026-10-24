@@ -1,0 +1,8 @@
+[package]
+name = "mapper"
+version = "0.1.0"
+namespace = "mapper"
+entry = "src/main.zl"
+
+[dependencies]
+geo = { path = "../geo" }

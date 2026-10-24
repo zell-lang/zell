@@ -1,0 +1,31 @@
+// The library's own tests: `zell test geo` from the workspace root, or
+// `zell test` inside geo/. They are never compiled into dependents.
+namespace geo.tests
+
+import geo
+import geo.bounds
+
+func near(t *testing.T, got float, want float) {
+    testing.True(t, math.Abs(got - want) < 1.0, fmt.Sprintf("got %.1f, want %.1f", got, want))
+}
+
+@test func TestDistance(t *testing.T) {
+    var paris = Point{Lat: 48.8566, Lon: 2.3522}
+    var london = Point{Lat: 51.5074, Lon: -0.1278}
+    near(t, Distance(paris, london), 343.6)
+    testing.Equal(t, Distance(paris, paris), 0.0)
+}
+
+@test func TestBounds(t *testing.T) {
+    var b = try Of([Point{Lat: 1, Lon: 5}, Point{Lat: -2, Lon: 7}]) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, b.Min.Lat, -2.0)
+    testing.Equal(t, b.Max.Lon, 7.0)
+    testing.True(t, b.Contains(b.Center()), "the center is inside")
+    testing.False(t, b.Contains(Point{Lat: 0, Lon: 0}), "outside")
+    try Of([]) catch err {
+        testing.Contains(t, err.Message(), "no points")
+    }
+}

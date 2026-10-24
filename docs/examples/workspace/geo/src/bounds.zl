@@ -1,0 +1,34 @@
+// geo.bounds: a sub-namespace of the same package. Inside the package it
+// is reached as `geo.bounds`; a dependent imports it the same way.
+namespace geo.bounds
+
+import geo
+
+// Box is the smallest latitude/longitude rectangle around some points.
+struct Box {
+    Min Point
+    Max Point
+
+    func Contains(p Point) bool {
+        return p.Lat >= this.Min.Lat && p.Lat <= this.Max.Lat && p.Lon >= this.Min.Lon && p.Lon <= this.Max.Lon
+    }
+
+    func Center() Point {
+        return Point{Lat: (this.Min.Lat + this.Max.Lat) / 2.0, Lon: (this.Min.Lon + this.Max.Lon) / 2.0}
+    }
+}
+
+// Of returns the box around points; an empty list is an error.
+func Of(points []Point) Box! {
+    if len(points) == 0 {
+        return error("bounds of no points")
+    }
+    var b = Box{Min: points[0], Max: points[0]}
+    for p in points {
+        b.Min.Lat = math.Min(b.Min.Lat, p.Lat)
+        b.Min.Lon = math.Min(b.Min.Lon, p.Lon)
+        b.Max.Lat = math.Max(b.Max.Lat, p.Lat)
+        b.Max.Lon = math.Max(b.Max.Lon, p.Lon)
+    }
+    return b
+}

@@ -1,0 +1,33 @@
+// Package geo: points on the Earth and the distance between them. This
+// is a library package: its manifest has no `entry`, so it builds no
+// program of its own, and other packages use it as a dependency.
+namespace geo
+
+// EarthRadiusKm is the mean radius used by Distance.
+const EarthRadiusKm = 6371.0
+
+// Point is a position in degrees. Capitalised names are exported: a
+// dependent package sees Point, Lat and Lon, but not `radians` below.
+struct Point {
+    Lat float
+    Lon float
+
+    func String() string {
+        return fmt.Sprintf("(%.2f, %.2f)", this.Lat, this.Lon)
+    }
+}
+
+func radians(deg float) float {
+    return deg * math.Pi / 180.0
+}
+
+// Distance is the great-circle distance in kilometres (the haversine
+// formula).
+func Distance(a Point, b Point) float {
+    var dLat = radians(b.Lat - a.Lat)
+    var dLon = radians(b.Lon - a.Lon)
+    var s1 = math.Sin(dLat / 2.0)
+    var s2 = math.Sin(dLon / 2.0)
+    var h = s1 * s1 + math.Cos(radians(a.Lat)) * math.Cos(radians(b.Lat)) * s2 * s2
+    return 2.0 * EarthRadiusKm * math.Atan2(math.Sqrt(h), math.Sqrt(1.0 - h))
+}

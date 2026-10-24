@@ -1,0 +1,33 @@
+// mapper: the application package of the workspace. It depends on geo
+// by path (see mapper/zell.toml) and is what `zell run` at the
+// workspace root runs, because it is the only member with an entry.
+namespace mapper
+
+import io
+import geo
+import geo.bounds
+import mapper.route
+
+func main() void! {
+    var trip = [
+        Stop{Name: "Lisbon", At: Point{Lat: 38.7223, Lon: -9.1393}},
+        Stop{Name: "Madrid", At: Point{Lat: 40.4168, Lon: -3.7038}},
+        Stop{Name: "Paris", At: Point{Lat: 48.8566, Lon: 2.3522}},
+        Stop{Name: "Berlin", At: Point{Lat: 52.52, Lon: 13.405}},
+        Stop{Name: "Vienna", At: Point{Lat: 48.2082, Lon: 16.3738}},
+    ]
+    println("route:")
+    for l in Legs(trip) {
+        println(fmt.Sprintf("  %-7s -> %-7s %7.1f km", l.From, l.To, l.Km))
+    }
+    println(fmt.Sprintf("  total %.1f km", Length(trip)))
+
+    var box = Of(Points(trip))?("bounding box")
+    println("bounding box:", box.Min.String(), "to", box.Max.String())
+    var mid = box.Center()
+    var near = Nearest(trip, mid)?
+    println("center", mid.String(), "is nearest to", near.Name)
+
+    var zurich = Point{Lat: 47.3769, Lon: 8.5417}
+    println("Zurich inside the box:", box.Contains(zurich))
+}
