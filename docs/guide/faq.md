@@ -84,7 +84,7 @@ func main() {
 | `AsyncLocal<T>` | `task.Key<T>()`, `task.With`, `task.Get` |
 | LINQ | `slices` (`Map`, `Filter`, `Reduce`, `SortBy`, `GroupBy`) and lambdas |
 | attributes + reflection | attributes + compile-time reflection (`reflect.Fields<T>()`): JSON, SQL mapping and DI without run-time cost |
-| ASP.NET Core minimal APIs / controllers | `web` (see [web.md](web.md)) |
+| ASP.NET Core minimal APIs / controllers | `net.http` routing and middleware for now; an attribute-routed framework returns as the package `zell-lang/web` |
 | Serilog | `log` |
 | `IDisposable` / `using` | `func Drop()`: runs when the value goes away, no `using` needed |
 | inheritance | composition: embedded structs and interfaces with default methods |

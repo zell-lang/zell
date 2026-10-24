@@ -1,5 +1,5 @@
 //! Compile-time expansion for `data` (docs/FRAMEWORK.md section 3),
-//! with the technique of [`super::web`]: the compiler generates Zell
+//! with source templates: the compiler generates Zell
 //! source of stdlib templates in namespace `data` whose type
 //! parameters are bound to the concrete types, and instantiates them.
 //!

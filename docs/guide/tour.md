@@ -657,6 +657,5 @@ func main() void! {
 - [packages.md](packages.md): projects, dependencies, workspaces.
 - [testing.md](testing.md): `zell test`, benchmarks, examples.
 - [debugging.md](debugging.md): traces, the debugger, leak checks, profiles.
-- [web.md](web.md): HTTP services with `web`.
 - [faq.md](faq.md): how Zell differs from Go and C#.
 - `zell doc strings.Split`, `zell doc std --html out/`: the API reference.

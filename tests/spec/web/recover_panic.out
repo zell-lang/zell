@@ -1,4 +1,0 @@
-log: ERR web: GET /boom panicked: runtime error: index out of range [5] with length 2
--> 500 application/problem+json
-{"type":"about:blank","title":"Internal Server Error","status":500,"detail":"internal error","instance":"/boom"}
--> 200 still serving

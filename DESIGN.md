@@ -71,7 +71,7 @@ var names = users
 `import X` делает содержимое пространства имён `X` доступным по коротким
 именам (как `using` в C#). Пространства имён стандартной библиотеки —
 корневые (`io`, `fmt`, `strings`, `net`, `net.http`, `log`,
-`encoding.json`, `crypto.hash`, `web`, `data`, `task`, `reflect`,
+`encoding.json`, `crypto.hash`, `data`, `task`, `reflect`,
 `debug`, `os`, `collections`, …), как и корни пакетов (`app`):
 
 | Импорт | Обращение |
@@ -102,7 +102,7 @@ var names = users
   исправлением `import io`, `namespace std...` зарезервирован.
 - Имя встроенной функции (`delete`, `len`, `append`, `panic`, `typeof`,
   `error`) не перекрывается одноимённым членом пространства stdlib,
-  импортированного целиком (атрибут `@delete` из `web`): вне атрибутов
+  импортированного целиком (атрибут `@delete`): вне атрибутов
   оно остаётся встроенной функцией.
 - Имя встроенного атрибута (`json`, `yaml`, `toml`, `xml`, `csv`, …) в
   голове составного пути (`json.Value`) при `import encoding.json`
@@ -637,8 +637,8 @@ Go): `a + b` для `T` без `Ordered` — ошибка в самой декл
 последними: если параметр — ровно `T`, уже выведенный из другого аргумента,
 константа получает этот тип (`Max(x, 1)` при `x float`), иначе — тип по
 умолчанию (`Max(1, 2)` — `Max<int>`). Параметр, который встречается только в результате, выводится из
-ожидаемого типа вызова (`return web.NotFound()` в функции с результатом
-`web.Result<User>!` даёт `NotFound<User>`; `!` ожидаемого типа
+ожидаемого типа вызова (`return Empty()` при `func Empty<T>() []T` в
+функции с результатом `[]User!` даёт `Empty<User>`; `!` ожидаемого типа
 снимается, если результат шаблона не `T!`). Разные типы для одного параметра
 (`conflicting types for type parameter T`) и невыводимый параметр
 (`cannot infer type parameter T`, например `Id(nil)`) — ошибки. Лямбды
@@ -979,8 +979,7 @@ func LoadUsers(path string) []User! {
    `try`/`catch` для паник, продолжить выполнение этой задачи нельзя.
    Задача — единица планировщика: тело `async`-функции с момента её
    первой приостановки (до неё функция выполняется в задаче
-   вызывающего, раздел «Асинхронность»), `task.Go`/`Spawn`, обработчик
-   запроса `web`.
+   вызывающего, раздел «Асинхронность»), `task.Go`/`Spawn`.
 2. **Раскрутка задачи** выполняет отложенные `defer` и освобождает живые
    значения кадров её `async`-функций: `Drop` вызывается, мьютекс,
    отпускаемый в `defer`, освобождается, счётчики ссылок сходятся
@@ -1001,8 +1000,7 @@ func LoadUsers(path string) []User! {
      в ожидающей задаче с сообщением `panic in awaited task: <сообщение>`
      и исходной трассой (вложенные ожидания не повторяют префикс).
      Режима «вернуть нулевое значение» нет.
-   - Задача, которую никто не ждёт (`task.Go`, таймеры, задачи запросов
-     `web` без `UseRecover`): паника печатается в stderr (сообщение и
+   - Задача, которую никто не ждёт (`task.Go`, таймеры): паника печатается в stderr (сообщение и
      трасса, в обычном формате), когда задачу отпускают; процесс
      продолжает работу. `WaitGroup` (через `defer wg.Done()`), `select` и
      каналы видят такую задачу завершённой.
@@ -1011,16 +1009,10 @@ func LoadUsers(path string) []User! {
    Паника в задаче `async main` после её первой приостановки
    раскручивает задачу, затем главный поток печатает панику и
    завершает процесс с кодом 2.
-5. **`web`**: `UseRecover` выполняет остаток конвейера в отдельной задаче,
-   поэтому паника обработчика даёт 500 Problem Details с общим `detail`
-   `internal error` (и в Development), сообщение пишется в лог уровня
-   Error (трасса — свойство `PanicTrace`), и сервер обслуживает
-   следующий запрос. Без `UseRecover` паника завершает задачу запроса
-   (правило 3, «никто не ждёт»): соединение этого запроса бросается.
-6. **`zell test`**: паника в тесте — провал этого теста (сообщение и
+5. **`zell test`**: паника в тесте — провал этого теста (сообщение и
    трасса в отчёте), прогон продолжается со следующего теста (каждый
    тест — отдельный процесс).
-7. **Отладчик** (`zell debug`) останавливается на панике до раскрутки.
+6. **Отладчик** (`zell debug`) останавливается на панике до раскрутки.
 
 Так на всех платформах (Linux, macOS, Windows).
 
@@ -1490,7 +1482,7 @@ var span = task.Get(CurrentSpan)              // *SpanInfo или nil, в люб
   без задачи): рантайм возвращает контекст вызывающего (runtime/ABI.md,
   10.3 и 10.8).
 - Используется `zell.diag` (текущий span), `zell.log` (`Enrich.FromContext`),
-  `http.Client` и `sql` (автоматический `traceparent`), DI-scope в `zell.web`.
+  `http.Client` и `sql` (автоматический `traceparent`).
 
 ## Память
 
@@ -2146,7 +2138,7 @@ brotli, bzip2, lzw.
     `NewServerWith(h, Options{...})` — сервер на свободном порту
     `127.0.0.1` с полями `URL`, `Client`, `Transport` и `Close()`;
     `NewRecorder()`, `NewRequest(method, target, body)`, `Serve(h, req)`.
-| `net.tls` | Собственная реализация **TLS 1.3 и TLS 1.2** (1.2 только ECDHE + AEAD): протокол, record layer, X.509 и проверка цепочек, SNI, ALPN, session tickets, HKDF — на Zell; примитивы с константным временем (AES-GCM, ChaCha20-Poly1305, X25519, P-256, Ed25519, RSA-PSS) — на C в рантайме. API: `tls.Dial(addr, Config{ServerName, ALPN, RootCAs, ClientCert})`, `tls.ServerConfig{Certificates, ClientAuth, MinVersion}`; системные корни через слой платформы. Тесты: трассы RFC 8448, векторы Wycheproof, interop с OpenSSL и curl, fuzzing. Без внешних C-библиотек; ACME в `zell.web`. ✓ реализовано (см. ниже), кроме OCSP, ACME и горячей перезагрузки сертификатов |
+| `net.tls` | Собственная реализация **TLS 1.3 и TLS 1.2** (1.2 только ECDHE + AEAD): протокол, record layer, X.509 и проверка цепочек, SNI, ALPN, session tickets, HKDF — на Zell; примитивы с константным временем (AES-GCM, ChaCha20-Poly1305, X25519, P-256, Ed25519, RSA-PSS) — на C в рантайме. API: `tls.Dial(addr, Config{ServerName, ALPN, RootCAs, ClientCert})`, `tls.ServerConfig{Certificates, ClientAuth, MinVersion}`; системные корни через слой платформы. Тесты: трассы RFC 8448, векторы Wycheproof, interop с OpenSSL и curl, fuzzing. Без внешних C-библиотек; ACME — в будущем пакете `zell-lang/web`. ✓ реализовано (см. ниже), кроме OCSP, ACME и горячей перезагрузки сертификатов |
 | `net.ws` | WebSocket (RFC 6455) клиент и сервер: `Upgrade(req, res) Task<Conn!>` / `UpgradeWith(req, res, UpgradeOptions{Subprotocols, Origins, Headers})` внутри `http.Handler`, `Dial(url)` / `DialWith(url, DialOptions{...})` (`ws://`, `wss://`); `Conn`: `Send(Message)`, `SendText`, `SendBinary`, `SendFragments`, `Ping`, `Recv() Task<Message!>`, `for msg in conn`, `Close()`, `CloseWith(code, reason)`, `Pongs()`, `SetMaxMessageSize`; фрагментация, ping/pong (pong — автоматически), коды закрытия (`CloseError`, `IsCloseError`), маскирование, проверка UTF-8; `Send` из нескольких задач сериализуется мьютексом. permessage-deflate не реализован. ✓ реализовано |
 | `net.url` | разбор и сборка URL, query-параметры |
 | `net.mail` | адреса RFC 5322, сборка MIME-писем и отправка по SMTP — ✓ (см. ниже) |
@@ -2371,22 +2363,17 @@ HMAC — собственная реализация на C по FIPS 180-4 / RF
 ### Фреймворк
 
 Поверх стандартной библиотеки строится фреймворк уровня ASP.NET Core:
-`zell.web` (маршруты через атрибуты, DI, middleware, OpenAPI),
 `zell.data` (ORM уровня EF Core с переводом лямбд в SQL при компиляции и
 миграциями; реализован как `data`, см. ниже), `zell.log` (структурированный логгер уровня Serilog с sinks и
 enrichers), `zell.diag` (профилировщик CPU/памяти/задач в формате pprof,
 метрики, OpenTelemetry, `zell tool pprof`). Подробно: `docs/FRAMEWORK.md`.
 
-Пока нет реестра пакетов, `zell.web` живёт в stdlib как `web`
-(`web.auth.jwt`, `web.config`). Вызовы `app.MapController<C>()`,
-`app.MapGet(path, handler)` и `app.Services.AddSingleton<T>()` (и их
-родственники) компилятор раскрывает при компиляции (`sema/web.rs`): по
-атрибутам и сигнатурам он порождает исходник обобщённой функции stdlib,
-чьи параметры типа связаны с конкретными типами программы, — таблицу
-маршрутов с привязкой параметров и фабрики DI. Неверный маршрут и
-зависимость, которую программа нигде не регистрирует, — ошибки компиляции.
-Внутри таких экземпляров `T.New(...)` с параметром типа, связанным со
-структурой, вызывает её статический метод.
+Атрибутный веб-фреймворк (маршруты через атрибуты, DI, middleware,
+OpenAPI) жил в stdlib как `web` и раскрывался компилятором; до появления
+`reflect.TypesWith<A>()` его нет в дереве (исходники — тег git
+`web-in-tree`, последний тулчейн с ним — `v0.1.0-rc.3`), он вернётся
+пакетом `zell-lang/web` (docs/FRAMEWORK.md, «План»). Корень `web` не
+зарезервирован за stdlib.
 
 **Перевод лямбд в SQL при компиляции (`data`).** `zell.data` тоже
 живёт в stdlib как `data` (docs/FRAMEWORK.md §3). Лямбда, переданная

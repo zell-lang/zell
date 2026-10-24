@@ -20,8 +20,8 @@ impl<'a> Sema<'a> {
                 return self.type_member_call(ty, name, args, span);
             }
             // `T.New(...)` with `T` a type parameter bound to a concrete
-            // struct (instances of stdlib templates, e.g. generated web
-            // factories): a static method of that struct.
+            // struct (instances of stdlib templates, e.g. generated
+            // code): a static method of that struct.
             if let ast::ExprKind::Ident(id) = &expr::strip_parens(base).kind {
                 if self.lookup_local(&id.name, false).is_none() {
                     if let Some(ty) = self.gen.tenv.iter().rev().find(|(n, _)| *n == id.name).map(|x| x.1) {
@@ -194,11 +194,6 @@ impl<'a> Sema<'a> {
         };
         // log level methods: compiled message templates (logtmpl.rs).
         let base = match self.log_method_call(base, name, targs, args, span) {
-            Ok(e) => return e,
-            Err(b) => b,
-        };
-        // web: route tables and DI factories generated at compile time (web.rs).
-        let base = match self.web_method_call(base, name, targs, args, span) {
             Ok(e) => return e,
             Err(b) => b,
         };

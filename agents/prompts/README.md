@@ -15,5 +15,6 @@ paste the prompt from the file.
 Planned next (not written yet): logger and ORM hot spots
 (RESULTS-framework.md), the self-contained distribution
 (docs/PLATFORMS.md "Дистрибутив": bundled lld, glibc/musl/mingw/macOS link
-inputs for every target), test-suite speed-up, moving `web`/`data` into
-packages (docs/FRAMEWORK.md plan).
+inputs for every target), test-suite speed-up, moving `data` into a
+package (docs/FRAMEWORK.md plan; `web` already left the tree, git tag
+`web-in-tree`).

@@ -115,16 +115,7 @@ pub(crate) const MODULES: &[(&str, &str, &str)] = &[
     ("cloud.s3", "s3_multi.zl", include_str!("stdlib_src/s3_multi.zl")),
     ("cloud.blob", "blob.zl", include_str!("stdlib_src/blob.zl")),
     // <<< tier 3b stdlib
-    // >>> web (docs/FRAMEWORK.md section 2)
-    ("web", "web_app.zl", include_str!("stdlib_src/web_app.zl")),
-    ("web", "web_di.zl", include_str!("stdlib_src/web_di.zl")),
-    ("web", "web_bind.zl", include_str!("stdlib_src/web_bind.zl")),
-    ("web", "web_mw.zl", include_str!("stdlib_src/web_mw.zl")),
-    ("web", "web_openapi.zl", include_str!("stdlib_src/web_openapi.zl")),
-    ("web.config", "web_config.zl", include_str!("stdlib_src/web_config.zl")),
-    ("web.auth.jwt", "web_jwt.zl", include_str!("stdlib_src/web_jwt.zl")),
-    ("encoding.json", "web_schema.zl", include_str!("stdlib_src/web_schema.zl")),
-    // <<< web
+    ("encoding.json", "json_schema.zl", include_str!("stdlib_src/json_schema.zl")),
     // >>> data (docs/FRAMEWORK.md section 3)
     ("data", "data.zl", include_str!("stdlib_src/data.zl")),
     ("data", "data_query.zl", include_str!("stdlib_src/data_query.zl")),

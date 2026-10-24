@@ -129,13 +129,13 @@
 
 ## Уровень 4 — фреймворк (`docs/FRAMEWORK.md`)
 
-`zell.web`, `zell.data`, `zell.log` (расширенные sinks), `zell.diag`
+`zell.data`, `zell.log` (расширенные sinks), `zell.diag`
 (endpoints, trace), `zell.config`, `zell.cache`, `zell.jobs`,
 `zell.auth`, `zell.messaging`, `zell.cli`, `zell.test`.
 
 | Аналог | Zell | Статус | Лучше чем в Go |
 |---|---|---|---|
-| ASP.NET Core, `gin`/`echo` + `wire` + `viper` + `golang-jwt` + `swag` | `web` (`web.auth.jwt`, `web.config`; станет пакетом `zell.web`, когда появится реестр) | ✅ есть (контроллеры `@route`/`@get…` и minimal API `MapGet((id int, svc *Svc) => …)` — таблица маршрутов, привязка и фабрики DI генерируются при компиляции (`sema/web.rs`), неверный маршрут или незарегистрированная зависимость — ошибка компиляции; привязка path/query/header/form/JSON с `@validate` и 400 Problem Details; DI singleton/scoped/transient с `Drop` в конце запроса; middleware (логирование, recover, CORS, gzip, статика, rate limit, request id, трассировка, JWT HS256/RS256/ES256 + `@authorize(roles)`, body limit, timeout, health checks); `config.Bind<T>` из json/yaml/toml + env + args, `Options<T>` с перезагрузкой; `Result<T>` с content negotiation; OpenAPI 3.1 + `/swagger`; `TestServer`/`TestClient` в памяти; см. FRAMEWORK.md §2) | без рефлексии при старте и без кодогенерации отдельным шагом; ошибки маршрутов и DI — при компиляции |
+| ASP.NET Core, `gin`/`echo` + `wire` + `viper` + `golang-jwt` + `swag` | будущий пакет `zell-lang/web` | ⏸ вынесен из дерева до `reflect.TypesWith<A>()` (был в stdlib как `web`; исходники — тег git `web-in-tree`, последний тулчейн с ним — `v0.1.0-rc.3`); пока — `net.http` (роутер, middleware, HTTP/2, WebSocket) | атрибутная маршрутизация и DI без рефлексии в рантайме |
 
 ## Чего в Go нет, а в Zell будет в stdlib
 

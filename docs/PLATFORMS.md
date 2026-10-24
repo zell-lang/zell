@@ -130,7 +130,7 @@ x86-64 с clang-18, mingw-w64, Wine 9.0, qemu-user 8, musl-tools; macOS и
 | windows-amd64 (MinGW) | 19/19 `make -C runtime CROSS=x86_64-w64-mingw32 test-wine` (IOCP и `ZELL_POLLER=wsapoll`) | 38 + 5 сетевых (IOCP и WSAPoll) + sql с `sqlite3.dll` | Wine 9.0 |
 | macos-arm64 / amd64 | все 94 файла и C-тесты компилируются (`-Werror`) против `runtime/stub-sdk/macos` | 49/49 → Mach-O объекты | без SDK: ничего не слинковано и не запущено; на Mac — `scripts/macos-verify.sh` |
 
-Не прошедшие 2 из 49 на arm64/musl — `sql` и `web_app`: им нужен
+Не прошедшие 2 из 49 на arm64/musl — `sql` и `web_app` (последний удалён вместе с `web`, тег `web-in-tree`): им нужен
 `libsqlite3` цели (в кросс-sysroot arm64 его нет, статического для musl
 тоже; рантайм musl собран без `<sqlite3.h>`, `database.sqlite`
 отвечает «not available»). Всё перечисленное — `compiler/tests/cross.rs`

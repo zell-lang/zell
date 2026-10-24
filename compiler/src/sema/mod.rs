@@ -54,9 +54,6 @@ mod stdsrc;
 mod suggest;
 pub mod stdlib;
 pub mod units;
-// >>> web (docs/FRAMEWORK.md section 2)
-mod web;
-// <<< web
 // >>> data (docs/FRAMEWORK.md section 3)
 mod orm;
 mod orm_model;
@@ -380,8 +377,6 @@ pub(crate) struct Sema<'a> {
     pub(crate) gen: generics::GenState<'a>,
     /// Reflection state (lazily loaded library sources, compile-time fields).
     pub(crate) refl: reflect::ReflState,
-    /// web compile-time expansion (route tables, DI factories).
-    pub(crate) web: web::WebState,
     /// data compile-time expansion (models, query translation).
     pub(crate) orm: orm_model::OrmState,
     /// Unit mode for incremental IDE analysis (see [`units`]); `None` =
@@ -434,7 +429,6 @@ impl<'a> Sema<'a> {
             cancel: None,
             gen: generics::GenState::default(),
             refl: reflect::ReflState::default(),
-            web: web::WebState::default(),
             orm: orm_model::OrmState::default(),
             unit: None,
         }
@@ -487,7 +481,6 @@ impl<'a> Sema<'a> {
         if let Some(u) = self.unit.as_mut() {
             u.in_bodies = false;
         }
-        self.web_finish();
         self.check_unused_imports();
         if self.unit.is_some() {
             // The entry point is chosen over the whole program (see units).

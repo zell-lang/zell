@@ -26,7 +26,7 @@ pub struct SiteOptions {
 }
 
 /// The guides in reading order; other files of docs/guide follow sorted.
-const GUIDE_ORDER: &[&str] = &["tour", "errors", "async", "memory", "packages", "testing", "debugging", "web", "faq"];
+const GUIDE_ORDER: &[&str] = &["tour", "errors", "async", "memory", "packages", "testing", "debugging", "faq"];
 
 const SITE_NAV: &[(&str, &str)] = &[("Guide", "guide/tour.html"), ("Design", "design/index.html"), ("Std", "std/index.html")];
 

@@ -170,7 +170,7 @@ impl<'a> super::Sema<'a> {
 pub const STD_ROOTS: &[&str] = &[
     "archive", "arena", "bytes", "cli", "cloud", "cmp", "collections", "compress", "crypto", "data", "database", "debug", "diag", "embed", "encoding", "errors", "fmt", "fs", "hash", "html", "io",
     "log", "maps", "math", "mime", "net", "os", "plugin", "process", "random", "reflect", "regex", "runtime", "slices", "strconv", "strings", "sync", "task", "testing", "text", "thread", "time",
-    "unicode", "unsafe", "uuid", "web",
+    "unicode", "unsafe", "uuid",
 ];
 
 /// Whether `path` (a namespace path or a full name such as `io.File` or

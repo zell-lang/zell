@@ -30,7 +30,6 @@ selection:
 | [`http_server.zl`](../examples/http_server.zl) | an HTTP router queried by a client in the same program |
 | [`cli_tool.zl`](../examples/cli_tool.zl) | a CLI with subcommands and flags declared on structs |
 | [`log.zl`](../examples/log.zl), [`metrics.zl`](../examples/metrics.zl) | structured logging with message templates; Prometheus metrics |
-| [`web_app/`](../examples/web_app) | a multi-file users API on `web` with SQLite, DI, validation, JWT |
 
 ## Showcase repositories
 
@@ -59,7 +58,11 @@ zell test
 [github.com/zell-lang/example-web-service](https://github.com/zell-lang/example-web-service):
 a REST service in a clean architecture. Shows: dependency injection,
 middleware that maps errors to HTTP statuses, an OpenAPI document, metrics,
-and SQLite through `data`. See also [Web services](guide/web.md).
+and SQLite through `data`. It is written on the `web` framework, which
+has moved out of the toolchain until it returns as the package
+`zell-lang/web` (see [FRAMEWORK.md](FRAMEWORK.md); the in-tree sources are
+kept by the git tag `web-in-tree`), so build it with toolchain
+**`v0.1.0-rc.3`**, the last release with the built-in `web`.
 
 ```sh
 git clone https://github.com/zell-lang/example-web-service && cd example-web-service

@@ -1,0 +1,38 @@
+// test: encoding.json.Schema<T>() outside any framework: structs by fields with @json names and skip, scalars with formats, slices, arrays, string-keyed maps, pointers, plain enums, time.Time, a recursive type stopping at the repetition
+// status: passing
+// run-flags: --leak-check
+namespace spec.stdlib5.json_schema
+
+import io
+
+enum Role {
+    Admin,
+    User,
+}
+
+@allowCycle
+struct Node {
+    Name string
+    Next *Node
+}
+
+struct Item {
+    @json(name: "id")
+    Id int
+    Title string
+    @json(skip: true)
+    Secret string
+    Price float
+    Small int32
+    Tags []string
+    Pair [2]bool
+    Attrs map[string]float
+    Role Role
+    At time.Time
+}
+
+func main() {
+    println(encoding.json.Schema<Item>())
+    println(encoding.json.Schema<Node>())
+    println(encoding.json.Schema<[]int>())
+}

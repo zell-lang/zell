@@ -75,9 +75,9 @@ same on Linux, macOS and Windows. Frames outside Zell code (the runtime,
 libc) keep the `module(symbol+0xoffset)` form. An optimised build inlines
 small functions, which then have no frame of their own: the frame shows the
 innermost line. `ZELL_NO_LINES=1` prints symbols instead. ThinLTO builds
-(`ZELL_LTO=1`) have no table yet. A panic in a `web` handler without `UseRecover` ends the
-task of the request; with it, the log entry's `PanicTrace` has the same
-text.
+(`ZELL_LTO=1`) have no table yet. A panic in a task nobody awaits prints
+the same text when the task ends; `task.PanicTrace(err)` returns it for a
+fallible task.
 
 ## Logging
 

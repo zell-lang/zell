@@ -14,8 +14,8 @@
 //!   being checked, or — for code shared through a cache (generic
 //!   instances, the `data` model) — every file that asked for it;
 //! * checks over the whole program are left to the caller: unused imports
-//!   (reported only when the program has no other error), the `main`
-//!   signature, `web` services and duplicate routes;
+//!   (reported only when the program has no other error) and the `main`
+//!   signature;
 //! * bodies of stdlib functions that are not instances are not checked
 //!   (they cannot report anything about user code).
 
@@ -58,28 +58,6 @@ impl From<Inst> for InstKey {
     }
 }
 
-/// A `web` service dependency (see `Sema::web_finish`).
-#[derive(Clone, Debug)]
-pub struct WebRequired {
-    /// Full spelling of the service type (identity across runs).
-    pub key: String,
-    pub owner: String,
-    /// The complete diagnostic, reported when no file registers `key`.
-    pub diag: Diagnostic,
-}
-
-/// A route mapped by `web` (`MapGet`, controllers).
-#[derive(Clone, Debug)]
-pub struct WebRoute {
-    /// Normalized `GET /a/{}`.
-    pub key: String,
-    pub pattern: String,
-    pub who: String,
-    pub verb: String,
-    pub span: Span,
-    pub file: usize,
-}
-
 /// The `main` function of a namespace.
 #[derive(Clone, Debug)]
 pub struct MainInfo {
@@ -109,9 +87,6 @@ pub(crate) struct UnitState {
     /// (index in the diagnostics, node) for diagnostics of node code.
     pub diag_nodes: Vec<(usize, Req)>,
     pub unused_imports: Vec<Diagnostic>,
-    pub web_required: Vec<WebRequired>,
-    pub web_registered: Vec<(String, usize)>,
-    pub web_routes: Vec<WebRoute>,
 }
 
 impl UnitState {
@@ -262,29 +237,6 @@ impl<'a> Sema<'a> {
         }
     }
 
-    /// The file on whose behalf the current code is analysed (for a node:
-    /// its first requesting file).
-    pub(crate) fn unit_origin_file(&self) -> usize {
-        let Some(u) = &self.unit else { return self.cur_file };
-        let mut r = match u.cur {
-            Some(n) => Req::Node(n),
-            None if u.in_bodies => Req::File(u.body_file),
-            None => Req::File(self.cur_file),
-        };
-        let mut steps = 0;
-        while let Req::Node(n) = r {
-            steps += 1;
-            match u.nodes.get(n as usize).and_then(|v| v.first()) {
-                Some(&next) if steps < 1000 => r = next,
-                _ => return self.cur_file,
-            }
-        }
-        match r {
-            Req::File(f) => f,
-            Req::Node(_) => self.cur_file,
-        }
-    }
-
     /// The `main` functions of the user namespaces of full files.
     fn unit_mains(&self) -> Vec<MainInfo> {
         let Some(u) = &self.unit else { return Vec::new() };
@@ -316,9 +268,6 @@ pub struct RunOutput {
     /// has no other error.
     pub unused_imports: Vec<Diagnostic>,
     pub mains: Vec<MainInfo>,
-    pub web_required: Vec<WebRequired>,
-    pub web_registered: Vec<(String, usize)>,
-    pub web_routes: Vec<WebRoute>,
     /// Names of the type parameters (`Type::Param` ids).
     pub tparams: Vec<String>,
 }
@@ -387,9 +336,6 @@ pub fn run_unit(files: &[&ast::File], texts: &[&str], full: Vec<bool>, index_ns:
         diag_origins: origins,
         unused_imports: unit.unused_imports,
         mains,
-        web_required: unit.web_required,
-        web_registered: unit.web_registered,
-        web_routes: unit.web_routes,
         tparams: names,
     })
 }

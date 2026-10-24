@@ -7,7 +7,7 @@
 use super::remap::{Copier, DeclStore, Keys};
 use crate::diagnostics::Diagnostic;
 use crate::sema::index::{ImportInfo, SymKey, Symbol, SymbolId, SymbolKind};
-use crate::sema::units::{MainInfo, RunOutput, WebRequired, WebRoute};
+use crate::sema::units::{MainInfo, RunOutput};
 use crate::span::Span;
 use crate::types::TypeId;
 use std::collections::HashMap;
@@ -104,9 +104,6 @@ pub(crate) struct Fragment {
     pub diags: Vec<Diagnostic>,
     pub unused_imports: Vec<Diagnostic>,
     pub mains: Vec<MainInfo>,
-    pub web_required: Vec<WebRequired>,
-    pub web_registered: Vec<String>,
-    pub web_routes: Vec<WebRoute>,
     /// Types of the symbols and the declarations they name.
     pub mini: DeclStore,
     pub mini_params: Vec<String>,
@@ -178,9 +175,6 @@ pub(crate) fn split(run: &RunOutput, files: &[RunFile], wanted: &dyn Fn(usize) -
             diags: Vec::new(),
             unused_imports: Vec::new(),
             mains: Vec::new(),
-            web_required: Vec::new(),
-            web_registered: Vec::new(),
-            web_routes: Vec::new(),
             mini: DeclStore::default(),
             mini_params: Vec::new(),
             n_funcs: 0,
@@ -336,22 +330,6 @@ pub(crate) fn split(run: &RunOutput, files: &[RunFile], wanted: &dyn Fn(usize) -
         let Some(u) = unit_of(m.file) else { continue };
         let p = path_idx[&(u, m.file)];
         out.get_mut(&u).unwrap().mains.push(MainInfo { file: p as usize, ..m.clone() });
-    }
-    for w in &run.web_required {
-        let Some(u) = unit_of(w.diag.file) else { continue };
-        let p = path_idx[&(u, w.diag.file)];
-        let mut w = w.clone();
-        w.diag.file = p as usize;
-        out.get_mut(&u).unwrap().web_required.push(w);
-    }
-    for (key, origin) in &run.web_registered {
-        let Some(u) = unit_of(*origin) else { continue };
-        out.get_mut(&u).unwrap().web_registered.push(key.clone());
-    }
-    for r in &run.web_routes {
-        let Some(u) = unit_of(r.file) else { continue };
-        let p = path_idx[&(u, r.file)];
-        out.get_mut(&u).unwrap().web_routes.push(WebRoute { file: p as usize, ..r.clone() });
     }
     for (u, frag) in out.iter_mut() {
         frag.mini_params = frag.mini.param_names();
