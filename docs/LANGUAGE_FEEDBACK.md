@@ -119,3 +119,15 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     no error — callers who want the close error call `await x.Close()?`
     first and `Drop` is then a no-op. Not needed yet: every stdlib `Close()`
     is synchronous.
+
+28. **A panic in one request kills the whole web server.** `web.UseRecover`
+    turns handler *errors* into 500s; a panic (nil dereference, index out of
+    range) in a handler ends the process, since panics are not recoverable
+    (DESIGN.md). Go's `http.Server` and .NET contain the failure to the
+    request. Spec decision needed: make a panic terminate its *task* (the
+    request) rather than the process, with the scheduler unwinding the task,
+    releasing its ARC objects, and reporting the panic to the task's owner
+    (`web` → 500 + log; `task.Go` → `Task` completes with a panic error;
+    `main` → exit 2 as today). Related: `database.sql.DB`/`Tx` have no `Drop`
+    (only `Rows`), so `examples/sql.zl` still needs `defer tx.Rollback()`
+    and `defer db.Close()`; give them a `Drop`.
