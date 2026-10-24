@@ -227,7 +227,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     pool takes the jobs' `task.Context` as a parameter and runs only the
     jobs in it (`task.RunWith(run, ...)`). Consider `Send` returning
     `Task<void!>`.
-44. **Arenas crash with many or large allocations.** Repro: `a.New<P>()`
+44. **Fixed (2026-10-25):** cause: a `for` loop's copy of its sequence lived until function exit and was released after the locals (the `Arena` included), and `Free` returned chunks to the system, so releasing a slice of arena pointers read freed memory; now the copy is released at the loop's end, scoped temporaries go before locals, and `Free` keeps its chunks as spares (ABI.md 3.6). **Arenas crash with many or large allocations.** Repro: `a.New<P>()`
     20 000 times into a `[]*P`, then `for p in ps { sum += p.X }` ends in
     SIGSEGV in `zell_retain` (`runtime/src/mem.c:305`); 8 000 objects
     work. `a.Alloc<Particle>(50000)` crashes the same way, and two frames

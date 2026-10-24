@@ -54,8 +54,42 @@ TEST(slices_and_strings) {
     assert(zell_live_objects() == live - 1);
 }
 
+/* 100k objects across many chunks, an Alloc larger than a chunk, mixed;
+ * the records stay readable (retain/release are no-ops) after Free until
+ * the arena allocates again (ABI.md 3.6), and across several cycles. */
+TEST(many_large_and_released_after_free) {
+    enum { N = 100000 };
+    static zell_object *objs[N];
+    int64_t a = zell_arena_create();
+    for (int cycle = 0; cycle < 3; cycle++) {
+        drops = 0;
+        for (int i = 0; i < N; i++) {
+            objs[i] = zell_arena_object(a, &node_type, 24);
+            if (i % 997 == 0) {
+                zell_slice s;
+                zell_arena_slice(&s, a, 40, 50000 + cycle, &zell_ops_ref);  /* 2 MB: own chunk */
+                assert(s.backing->refcount == ZELL_RC_ARENA && s.len == 50000 + cycle);
+                assert(((zell_string **)s.data)[49999] == NULL);
+            }
+        }
+        for (int i = 0; i < N; i++) {
+            assert(objs[i]->refcount == ZELL_RC_ARENA && objs[i]->type == &node_type);
+            zell_retain(objs[i]);
+        }
+        zell_slice big;
+        zell_arena_slice(&big, a, 8, 1 << 17, &zell_ops_ref);   /* 1 MB */
+        assert(zell_arena_objects(a) == N + N / 997 + 2);
+        zell_arena_free(a);
+        assert(drops == N);
+        for (int i = 0; i < N; i++) zell_release(objs[i]);   /* dangling, but not reused */
+        zell_slice_release(&big);
+    }
+    zell_arena_destroy(a);
+}
+
 int main(void) {
     RUN(objects_freed_at_once);
     RUN(slices_and_strings);
+    RUN(many_large_and_released_after_free);
     return 0;
 }

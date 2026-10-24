@@ -1,0 +1,63 @@
+// test: arenas past one chunk: 20 000 a.New objects collected in a slice, a.Alloc larger than a chunk, per-frame Free with the frame's slice released after Free (leak-check clean)
+// status: passing
+// run-flags: --leak-check
+namespace spec.memory2.arena_large
+
+import io
+
+struct P {
+    X int
+    Y int
+}
+
+func spawn(a arena.Arena, n int) []*P {
+    var ps []*P
+    for i in 0..n {
+        var p = a.New<P>()
+        p.X = i
+        ps = append(ps, p)
+    }
+    return ps
+}
+
+func firstOver(a arena.Arena, n int, limit int) int {
+    for p in spawn(a, n) {
+        if p.X > limit {
+            return p.X
+        }
+    }
+    return -1
+}
+
+func main() {
+    var a = arena.New()
+    var ps = spawn(a, 20000)
+    var sum = 0
+    for p in ps {
+        sum += p.X
+    }
+    println("new", len(ps), sum, a.Len())
+
+    var b = arena.New()
+    var big = b.Alloc<P>(50000)
+    for i in 0..len(big) {
+        big[i].Y = 2
+    }
+    var t = 0
+    for q in big {
+        t += q.Y
+    }
+    println("alloc", len(big), t)
+
+    var f = arena.New()
+    for frame in 0..3 {
+        var qs = spawn(f, 1000 + frame)
+        var s = 0
+        for q in qs {
+            s += q.X
+        }
+        println("frame", frame, len(qs), s, f.Len())
+        f.Free()
+    }
+    println("first over", firstOver(f, 15000, 12345))
+}

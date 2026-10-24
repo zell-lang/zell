@@ -344,6 +344,20 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.scoped_slot(t, Val::owned(v))
     }
 
+    /// Releases the sequence slot of a finished `for` and zeroes it (the
+    /// release at function exit is then a no-op). The sequence must not
+    /// outlive the loop: its elements may point into an arena that the code
+    /// after the loop frees.
+    fn end_scoped_slot(&mut self, p: PointerValue<'ctx>, t: TypeId) {
+        if !self.needs_rc(t) || self.terminated_block() {
+            return;
+        }
+        let lt = self.llty(t);
+        let v = self.b.build_load(lt, p, "").unwrap();
+        self.release_val(t, v);
+        self.b.build_store(p, lt.const_zero()).unwrap();
+    }
+
     fn for_slice(&mut self, label: Label, index: Option<LocalId>, elem: Option<LocalId>, seq: &Expr, body: &Block) -> R<()> {
         let sv = self.expr(seq)?;
         let tmp = self.scoped_slot(seq.ty, sv);
@@ -388,6 +402,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_store(ctr, n).unwrap();
         self.b.build_unconditional_branch(head).unwrap();
         self.b.position_at_end(done);
+        self.end_scoped_slot(tmp, seq.ty);
         Ok(())
     }
 
@@ -424,6 +439,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_store(ctr, n).unwrap();
         self.b.build_unconditional_branch(head).unwrap();
         self.b.position_at_end(done);
+        self.end_scoped_slot(tmp, string.ty);
         Ok(())
     }
 
@@ -458,6 +474,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         self.loop_body(label, done, head, body, &[key, value])?;
         self.b.position_at_end(done);
+        self.end_scoped_slot(tmp, map.ty);
         Ok(())
     }
 

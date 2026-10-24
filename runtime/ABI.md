@@ -478,13 +478,20 @@ Handles are raw pointers passed as `int64_t`; arenas are not thread-safe.
 | `void *zell_arena_object(int64_t a, const zell_type_info *type, int64_t size)` | a zeroed object of `size` bytes (header included) in the arena, header `{ZELL_RC_ARENA, type}`; returns the header (borrowed) |
 | `void zell_arena_slice(zell_slice *out, int64_t a, int64_t elem_size, int64_t n, const zell_value_ops *ops)` | `*out` = `n` zeroed elements in a backing array in the arena (layout of 5.1); `ops` releases elements at `Free`. `n == 0` gives the nil slice. Growing it by `append` copies it to the heap (the count is never 1) |
 | `zell_string *zell_arena_string(int64_t a, const zell_string *s)` | a copy of `s` (borrowed) in the arena; NULL for `""` |
-| `void zell_arena_free(int64_t a)` | runs `type->drop` of every object in allocation order (releasing what they reference outside the arena; objects allocated by a drop are freed too), then frees all memory; the arena stays usable |
-| `void zell_arena_destroy(int64_t a)` | `zell_arena_free`, then frees the arena itself |
+| `void zell_arena_free(int64_t a)` | runs `type->drop` of every object in allocation order (releasing what they reference outside the arena; objects allocated by a drop are freed too), then keeps the emptied chunks as spares for the next allocations (spares left unused since the previous `free` go back to the system); the arena stays usable |
+| `void zell_arena_destroy(int64_t a)` | `zell_arena_free`, then frees the spares and the arena itself |
 | `int64_t zell_arena_objects(int64_t a)` | number of objects allocated since the last free |
 
 Memory: 64 KB chunks (an object larger than 16 KB gets a chunk of its own);
 each object is preceded by a 16-byte record prefix. After `free` every
-pointer into the arena is dangling (not checked). `arena.Arena` (a
+pointer into the arena is dangling (not checked) for use, but until the
+arena allocates again its headers still read `ZELL_RC_ARENA`, so
+releasing such a pointer (or a slice of them) is a no-op: locals that go
+out of scope after `defer a.Free()` or after the `Free` at the end of a
+loop body are safe. After `destroy` nothing may touch them: compiled code
+releases a function's `for` sequence temporaries at the end of the loop,
+and the remaining scoped temporaries before the locals (`codegen/funcs.rs`
+`release_locals`), so an `Arena` local outlives them. `arena.Arena` (a
 Zell source, `compiler/src/sema/stdlib_src/arena.zl`) holds the handle in
 a refcounted object whose `Drop` destroys the arena.
 

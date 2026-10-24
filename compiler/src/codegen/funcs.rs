@@ -155,18 +155,21 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         Ok(())
     }
 
-    /// Releases every local slot (last declared first) and scoped temporary
-    /// of the function.
+    /// Releases every scoped temporary (last created first), then every
+    /// local slot (last declared first) of the function. Temporaries go
+    /// first: they hold copies of values computed from earlier locals (the
+    /// sequence of a `for`), and an owner such as an arena must outlive
+    /// them, since releasing a slice of arena pointers reads their headers.
     pub(crate) fn release_locals(&mut self) {
         let Some(f) = self.fs().hir else { return };
-        for i in (0..f.locals.len()).rev() {
-            self.release_local_final(LocalId(i as u32), false);
-        }
         let scoped = self.fs().scoped.clone();
-        for (p, t) in scoped {
+        for (p, t) in scoped.into_iter().rev() {
             let ty = self.llty(t);
             let v = self.b.build_load(ty, p, "").unwrap();
             self.release_val(t, v);
+        }
+        for i in (0..f.locals.len()).rev() {
+            self.release_local_final(LocalId(i as u32), false);
         }
     }
 

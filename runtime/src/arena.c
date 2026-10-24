@@ -6,7 +6,15 @@
  * zell_arena_free runs the type's drop of every record (releasing what the
  * objects reference outside the arena) in allocation order, then frees the
  * chunks. Arena objects are not counted by zell_live_objects. Arenas are
- * not thread-safe. */
+ * not thread-safe.
+ *
+ * Free keeps the chunks it emptied as spares for the next allocations and
+ * leaves their bytes alone: a pointer into the arena that is merely
+ * released after Free (a local slice of arena pointers going out of scope,
+ * `defer a.Free()` before the locals) still reads a ZELL_RC_ARENA header,
+ * until the arena allocates again (ABI.md 3.6). Spares that the next cycle
+ * did not reuse go back to the system at the following Free, so an arena
+ * keeps at most its previous cycle's footprint. */
 #include "rt_internal.h"
 #include "platform/platform.h"
 
@@ -24,6 +32,7 @@ typedef struct chunk {
 
 typedef struct arena {
     chunk *first, *last;
+    chunk *spare;          /* emptied by the last Free, not reused yet */
     int64_t objects;
 } arena;
 
@@ -57,6 +66,26 @@ static arena *get(int64_t h) {
 
 int64_t zell_arena_create(void) { return (int64_t)(intptr_t)zell_alloc(sizeof(arena)); }
 
+/* The first spare chunk with room for `need` bytes, unlinked; NULL if none. */
+static chunk *take_spare(arena *a, int64_t need) {
+    for (chunk **pp = &a->spare; *pp; pp = &(*pp)->next) {
+        chunk *c = *pp;
+        if (c->cap >= need) {
+            *pp = c->next;
+            return c;
+        }
+    }
+    return NULL;
+}
+
+static void free_chunks(chunk *c) {
+    while (c) {
+        chunk *next = c->next;
+        zell__plat_aligned_free(c);
+        c = next;
+    }
+}
+
 void *zell_arena_object(int64_t h, const zell_type_info *type, int64_t size) {
     arena *a = get(h);
     if (size < (int64_t)sizeof(zell_object) || size > INT64_MAX / 2)
@@ -64,12 +93,15 @@ void *zell_arena_object(int64_t h, const zell_type_info *type, int64_t size) {
     int64_t need = ((int64_t)offsetof(record, obj) + size + 15) & ~(int64_t)15;
     chunk *c = a->last;
     if (!c || c->cap - c->used < need) {
-        int64_t cap = need > CHUNK_SIZE / 4 ? need : CHUNK_SIZE;
-        c = zell__plat_aligned_alloc(16, (sizeof(chunk) + (size_t)cap + 15) & ~(size_t)15);
-        if (!c) zell__panicf("out of memory (arena chunk of %lld bytes)", (long long)cap);
+        c = take_spare(a, need);
+        if (!c) {
+            int64_t cap = need > CHUNK_SIZE / 4 ? need : CHUNK_SIZE;
+            c = zell__plat_aligned_alloc(16, (sizeof(chunk) + (size_t)cap + 15) & ~(size_t)15);
+            if (!c) zell__panicf("out of memory (arena chunk of %lld bytes)", (long long)cap);
+            c->cap = cap;
+        }
         c->next = NULL;
         c->used = 0;
-        c->cap = cap;
         if (a->last) a->last->next = c; else a->first = c;
         a->last = c;
     }
@@ -113,6 +145,7 @@ int64_t zell_arena_objects(int64_t h) { return h ? get(h)->objects : 0; }
 void zell_arena_free(int64_t h) {
     if (!h) return;
     arena *a = get(h);
+    chunk *kept = NULL;
     /* A drop may allocate in this arena again: repeat until it is empty. */
     while (a->first) {
         chunk *c = a->first;
@@ -125,14 +158,19 @@ void zell_arena_free(int64_t h) {
                 if (r->obj.type && r->obj.type->drop) r->obj.type->drop(&r->obj);
             }
             chunk *next = c->next;
-            zell__plat_aligned_free(c);
+            c->next = kept;    /* records stay readable until reused */
+            kept = c;
             c = next;
         }
     }
+    free_chunks(a->spare);
+    a->spare = kept;
 }
 
 void zell_arena_destroy(int64_t h) {
     if (!h) return;
+    arena *a = get(h);
     zell_arena_free(h);
-    zell_free(get(h));
+    free_chunks(a->spare);
+    zell_free(a);
 }
