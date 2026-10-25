@@ -790,6 +790,11 @@ impl<'a> Sema<'a> {
                         let inner = self.resolve_type(&generics[0]);
                         return self.tt.task(inner);
                     }
+                    // `expr<F>`: an expression tree (sema/exprtree.rs).
+                    if path.segments.len() == 1 && path.segments[0].name == "expr" && generics.len() == 1 {
+                        let inner = self.resolve_type(&generics[0]);
+                        return self.expr_tree_type(inner, t.span);
+                    }
                     return self.resolve_generic_type(path, generics, t.span);
                 }
                 if path.segments.len() == 1 {

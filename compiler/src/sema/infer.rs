@@ -56,6 +56,11 @@ impl<'a> Sema<'a> {
         if !untyped_lambda(a) {
             return None;
         }
+        // `expr<func(T) bool>`: the lambda becomes a tree of that function type.
+        let p = match &p.kind {
+            ast::TypeKind::Named { path, generics } if path.segments.len() == 1 && path.segments[0].name == "expr" && generics.len() == 1 => &generics[0],
+            _ => p,
+        };
         let ast::TypeKind::Func { params, .. } = &p.kind else { return None };
         if params.iter().any(|x| mentions(x, names) && names.iter().zip(binds).any(|(n, b)| b.is_none() && mentions(x, std::slice::from_ref(n)))) {
             return None;
@@ -98,7 +103,10 @@ impl<'a> Sema<'a> {
         match (&p.kind, a) {
             (K::Named { path, generics }, Type::Struct(d)) if !generics.is_empty() => {
                 if let Some((t, args)) = self.gen.inst_structs.get(&d.0) {
-                    if self.gen.templates[*t as usize].name == path.segments.last().unwrap().name && args.len() == generics.len() {
+                    let last = &path.segments.last().unwrap().name;
+                    let tname = &self.gen.templates[*t as usize].name;
+                    // `expr<F>` names the struct `expr.Expr<F>`.
+                    if (tname == last || (last == "expr" && path.segments.len() == 1 && self.expr_tree_fn(actual).is_some())) && args.len() == generics.len() {
                         for (g, x) in generics.iter().zip(args.clone()) {
                             self.unify(g, x, names, binds)?;
                         }

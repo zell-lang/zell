@@ -36,6 +36,7 @@ pub mod cycles;
 pub mod debug_agent;
 // <<< debugger
 mod expr;
+mod exprtree;
 mod generics;
 mod ifaces;
 mod opover;
@@ -1106,6 +1107,7 @@ impl<'a> Sema<'a> {
             is_async: false,
             locals: Vec::new(),
             captures: Vec::new(),
+            value_env: None,
             body: hir::Block::default(),
             attrs: Vec::new(),
             param_attrs: Vec::new(),
@@ -1138,6 +1140,12 @@ impl<'a> Sema<'a> {
 
 impl hir::dump::DeclNames for Sema<'_> {
     fn struct_name(&self, id: u32) -> String {
+        // An expression tree is spelled as written: `expr<func(*User) bool>`.
+        if self.structs.get(id as usize).is_some_and(|s| s.full_name.starts_with("expr.Expr<")) {
+            if let Some((_, args)) = self.gen.inst_structs.get(&id).filter(|(_, a)| a.len() == 1) {
+                return format!("expr<{}>", self.tn(args[0]));
+            }
+        }
         self.structs.get(id as usize).map(|s| self.decl_display(s.namespace, &s.name, &s.full_name)).unwrap_or_default()
     }
     fn interface_name(&self, id: u32) -> String {

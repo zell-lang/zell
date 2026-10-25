@@ -211,6 +211,7 @@ fn referenced_funcs(p: &Program) -> HashSet<u32> {
             ExprKind::FuncRef(id) | ExprKind::Call { callee: Callee::Func(id), .. } | ExprKind::Closure { func: id, .. } => {
                 out.insert(id.0);
             }
+            ExprKind::EnvClosures { funcs, .. } => out.extend(funcs.iter().map(|f| f.0)),
             _ => {}
         });
     }

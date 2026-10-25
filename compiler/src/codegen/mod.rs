@@ -91,6 +91,11 @@
 //! cells, so variables are shared by reference. Named functions used as
 //! values get a thunk `fn(env, args) -> f(args)`. Lifted lambdas take the
 //! env pointer as an extra first parameter.
+//! *Value environments* (expression trees, `ExprKind::EnvClosures`,
+//! `Function::value_env`): the env is an ordinary box of a tuple of the
+//! captured values (`{hdr, (T0, T1, ...)}`, dropped by the tuple's type
+//! info), shared by several closures; upvalue `i` is tuple element `i`
+//! and the box stands in for the cell wherever a cell is pinned.
 //!
 //! **Address-taken locals** (`Local::address_taken`) also live in cells,
 //! so `&x` is a whole-object pointer, unless escape analysis

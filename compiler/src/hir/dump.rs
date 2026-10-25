@@ -412,6 +412,7 @@ impl<'a> Dumper<'a> {
             }
             ExprKind::ToInterface { value } => format!("to_iface({})", self.expr(value)),
             ExprKind::Closure { func, captures } => format!("closure func #{} {captures:?}", func.0),
+            ExprKind::EnvClosures { funcs, env } => format!("env_closures {:?} env {}", funcs.iter().map(|f| f.0).collect::<Vec<_>>(), env.as_ref().map_or("null".to_string(), |e| self.expr(e))),
             ExprKind::Propagate { value, context } => {
                 let c = context.as_ref().map(|c| format!(" ctx {}", self.expr(c))).unwrap_or_default();
                 format!("propagate({}{c})", self.expr(value))

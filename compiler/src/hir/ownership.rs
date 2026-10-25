@@ -376,6 +376,11 @@ impl Walker<'_, '_> {
         (self.f)(e, pos);
         match &e.kind {
             ExprKind::Const(_) | ExprKind::Nil | ExprKind::Zero | ExprKind::AttrConst { .. } | ExprKind::Local(_) | ExprKind::Upvalue(_) | ExprKind::Global(_) | ExprKind::FuncRef(_) | ExprKind::Closure { .. } => {}
+            ExprKind::EnvClosures { env, .. } => {
+                if let Some(x) = env {
+                    self.expr(x, Store);
+                }
+            }
             ExprKind::Field { base, .. } => self.expr(base, Read),
             ExprKind::Deref(x) => self.expr(x, Read),
             ExprKind::AddrOf(x) => match &x.kind {

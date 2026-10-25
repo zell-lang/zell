@@ -218,6 +218,11 @@ impl<'a> Sema<'a> {
                 return mk(e.kind, self.tt.invalid, e.span);
             }
         }
+        if self.expr_tree_fn(target).is_some() && matches!(self.tt.get(src), Type::Func(_)) {
+            let (s, t) = (self.tn(src), self.tn(target));
+            self.err(format!("cannot use {s} as {t}: only a lambda literal becomes an expression tree"), e.span);
+            return mk(e.kind, self.tt.invalid, e.span);
+        }
         self.mismatch(src, target, &ctx, e.span);
         mk(e.kind, self.tt.invalid, e.span)
     }

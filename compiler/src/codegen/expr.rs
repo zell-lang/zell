@@ -409,6 +409,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
             ExprKind::ToInterface { value } => self.to_interface(value, e.ty),
             ExprKind::Closure { func, captures } => self.emit_closure(*func, captures),
+            ExprKind::EnvClosures { funcs, env } => self.emit_env_closures(e.ty, funcs, env.as_deref()),
             ExprKind::Propagate { value, context } => self.propagate(value, context.as_deref(), e.span),
             ExprKind::TryCatch { value, err, handler, result_used } => self.try_catch(e, value, *err, handler, *result_used),
             ExprKind::TryElse { value, fallback } => self.try_else(e.ty, value, fallback),

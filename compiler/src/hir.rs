@@ -382,6 +382,10 @@ pub struct Function {
     pub locals: Vec<Local>,
     /// Capture slots of a lambda; [`ExprKind::Upvalue`] indexes this.
     pub captures: Vec<Capture>,
+    /// A lambda of an expression tree site ([`ExprKind::EnvClosures`]):
+    /// its environment is one heap box holding a tuple of this type, the
+    /// captured *values* (upvalue `i` is element `i`), instead of cells.
+    pub value_env: Option<TypeId>,
     pub body: Block,
     pub attrs: Vec<Attr>,
     /// Attributes of each declared parameter (receiver excluded), in order;
@@ -728,6 +732,12 @@ pub enum ExprKind {
     ToInterface { value: Box<Expr> },
     /// Create a closure of lifted lambda `func`, capturing by reference.
     Closure { func: FuncId, captures: Vec<CaptureSource> },
+    /// Closures of the lifted lambdas `funcs` (each with
+    /// [`Function::value_env`]) sharing one environment: a heap box of the
+    /// value of `env` (a tuple, evaluated now), or NULL when `env` is
+    /// `None`. `ty` is the tuple of the closures' function types. Used by
+    /// expression trees (DESIGN.md "Деревья выражений").
+    EnvClosures { funcs: Vec<FuncId>, env: Option<Box<Expr>> },
     /// `e?` / `e?(ctx)`: `value` has type `T!`, the result type is `T`. On
     /// error: wrap with `context` (a string) if present, record the `?` in
     /// the error trace, then return the error from the current (fallible)

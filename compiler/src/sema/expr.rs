@@ -85,7 +85,10 @@ impl<'a> Sema<'a> {
                 self.err("a range a..b is only allowed in for, as an index, or as a case pattern", span);
                 self.invalid(span)
             }
-            K::Lambda { params, ret, body, is_async } => self.lambda(params, ret.as_deref(), body, *is_async, span, expected),
+            K::Lambda { params, ret, body, is_async } => match expected.and_then(|t| self.expr_tree_fn(t).map(|f| (f, t))) {
+                Some((f, t)) => self.expr_tree(e, f, t),
+                None => self.lambda(params, ret.as_deref(), body, *is_async, span, expected),
+            },
             K::Paren(x) => self.expr(x, expected),
             K::NamedArg { name, .. } => {
                 self.err(format!("named argument {}: is only allowed inside attribute arguments", name.name), span);
@@ -995,7 +998,7 @@ impl<'a> Sema<'a> {
     }
 
     /// Lambda: lifted into a new function; returns the closure value.
-    fn lambda(&mut self, params: &[ast::Param], ret: Option<&ast::TypeExpr>, body: &ast::LambdaBody, is_async: bool, span: Span, expected: Option<TypeId>) -> hir::Expr {
+    pub(crate) fn lambda(&mut self, params: &[ast::Param], ret: Option<&ast::TypeExpr>, body: &ast::LambdaBody, is_async: bool, span: Span, expected: Option<TypeId>) -> hir::Expr {
         let Some(parent) = self.fns.last().and_then(|f| f.func) else {
             self.err("lambdas are not allowed in global initializers", span);
             return self.invalid(span);

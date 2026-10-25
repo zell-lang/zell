@@ -103,7 +103,7 @@ fn summarize(p: &Program, f: &Function) -> FnSummary {
                     impure = true;
                 }
             }
-            ExprKind::Await(_) | ExprKind::TaskAll(_) | ExprKind::Closure { .. } | ExprKind::Upvalue(_) => impure = true,
+            ExprKind::Await(_) | ExprKind::TaskAll(_) | ExprKind::Closure { .. } | ExprKind::EnvClosures { .. } | ExprKind::Upvalue(_) => impure = true,
             // Formatting an error or a struct may run its methods.
             ExprKind::ToString(v) => {
                 if !matches!(p.types.get(v.ty), Type::Bool | Type::Int(_) | Type::Float32 | Type::Float64 | Type::Char | Type::String) {

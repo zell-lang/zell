@@ -408,6 +408,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// Address of upvalue `i` of the current lambda.
     pub(crate) fn upvalue_addr(&mut self, i: u32) -> PointerValue<'ctx> {
+        if let Some(t) = self.fs().hir.and_then(|f| f.value_env) {
+            // Element `i` of the tuple in the box.
+            let env = self.fs().env.expect("codegen: upvalue outside a lambda");
+            let st = self.llty(t).into_struct_type();
+            let off = self.td.offset_of_element(&st, i).unwrap_or(0);
+            return self.byte_gep(env, 16 + off);
+        }
         let cell = self.upvalue_cell(i);
         self.payload(cell)
     }
@@ -418,6 +425,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     fn upvalue_cell(&mut self, i: u32) -> PointerValue<'ctx> {
         let env = self.fs().env.expect("codegen: upvalue outside a lambda");
+        // A value environment (expression trees): the box itself owns the
+        // values, so it stands in for every cell.
+        if self.fs().hir.is_some_and(|f| f.value_env.is_some()) {
+            return env;
+        }
         let p = self.byte_gep(env, 24 + 8 * i as u64);
         self.b.build_load(self.ptr_ty(), p, "upcell").unwrap().into_pointer_value()
     }
@@ -579,6 +591,29 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         };
         let v = self.make_pair(fv.as_global_value().as_pointer_value(), env);
         Ok(Val::owned(v))
+    }
+
+    /// [`hir::ExprKind::EnvClosures`]: the closures of `funcs` (a tuple of
+    /// type `ty`) over one box holding the value of `env`, or over NULL.
+    pub(crate) fn emit_env_closures(&mut self, ty: TypeId, funcs: &[FuncId], env: Option<&hir::Expr>) -> R<Val<'ctx>> {
+        let envp = match env {
+            None => self.ptr_ty().const_null(),
+            Some(x) => {
+                let v = self.expr_owned(x)?;
+                self.new_box(x.ty, v)
+            }
+        };
+        let tt = self.llty(ty).into_struct_type();
+        let mut agg = tt.get_undef();
+        for (i, f) in funcs.iter().enumerate() {
+            if i > 0 && env.is_some() {
+                self.call_rt("zell_retain", &[envp.into()]);
+            }
+            let fv = self.closure_entry(*f)?;
+            let pair = self.make_pair(fv.as_global_value().as_pointer_value(), envp);
+            agg = self.b.build_insert_value(agg, pair, i as u32, "").unwrap().into_struct_value();
+        }
+        Ok(Val::owned(agg.into()))
     }
 
     pub(crate) fn make_pair(&mut self, a: PointerValue<'ctx>, b: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {

@@ -116,6 +116,11 @@ pub fn analyze(p: &Program) -> Cycles {
     let mut convs: Vec<(TypeId, TypeId)> = Vec::new();
     let mut visit = |e: &crate::hir::Expr| match &e.kind {
         ExprKind::Closure { func, .. } if !defer_thunks.contains(func) => closures.push((e.ty, *func)),
+        ExprKind::EnvClosures { funcs, .. } => {
+            if let Type::Tuple(tys) = p.types.get(e.ty) {
+                closures.extend(tys.iter().copied().zip(funcs.iter().copied()));
+            }
+        }
         ExprKind::ToInterface { value } => convs.push((e.ty, value.ty)),
         _ => {}
     };
