@@ -220,3 +220,21 @@ fn debug_without_client_reports_like_children() {
     }
     assert!(!out.contains("never printed"), "{out}");
 }
+
+/// A `*_test.zl` file with a syntax error fails the run with its
+/// diagnostic, instead of being skipped as a file without tests.
+#[test]
+fn syntax_error_in_test_file_is_reported() {
+    let tmp = std::env::temp_dir().join(format!("zell-test-syntax-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("src")).unwrap();
+    std::fs::write(tmp.join("zell.toml"), "[package]\nname = \"broken\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::write(tmp.join("src/lib.zl"), "namespace broken\n\nfunc Add(a int, b int) int {\n    return a + b\n}\n").unwrap();
+    std::fs::write(tmp.join("src/lib_test.zl"), "namespace broken\n\n@test func TestAdd(t *testing.T) {\n    testing.Equal(t, Add(1, 2), 3\n}\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_zell")).arg("test").arg(&tmp).output().expect("cannot run zell");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stderr.contains("lib_test.zl:5"), "no diagnostic in:\n{stdout}{stderr}");
+    assert!(!stdout.contains("no tests found"), "{stdout}");
+}

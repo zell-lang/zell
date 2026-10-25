@@ -169,7 +169,7 @@ documentation's Examples section, tested by
     integration tests. Workaround: test files live in `src/` as
     `*_test.zl`, in a namespace of their own (`validate.tests`) to test
     through exported names only.
-31. ❌ **A syntax error in a `_test.zl` file prints only "no tests found in
+31. ✅ **Fixed (2026-10-25):** cause: the test collector skipped files that did not parse; `zell test` now prints their diagnostics and exits 1 (`compiler/src/testrun.rs`). **A syntax error in a `_test.zl` file prints only "no tests found in
     ./src"**: the runner skips files that do not parse, without the
     diagnostic. Workaround: `zell check` the file to see the error.
 32. ❌ **An `async` method does not satisfy an interface method returning

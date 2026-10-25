@@ -158,13 +158,18 @@ pub fn run(args: &[String]) -> i32 {
     let own_files = files.len();
     let mut tests: BTreeMap<String, Vec<(String, Kind, bool)>> = BTreeMap::new();
     let mut examples: Vec<(String, zell::doc::Example)> = Vec::new();
+    let mut syntax_errors = false;
     for f in &mut files {
         let mut diags = Diagnostics::new();
         let tokens = zell::lexer::lex(&f.text, &mut diags);
-        let Some(file) = zell::parser::parse(tokens, &mut diags) else { continue };
-        if diags.has_errors() {
+        let parsed = zell::parser::parse(tokens, &mut diags);
+        // A file that does not parse is a failed run, not a file without tests.
+        if diags.has_errors() || parsed.is_none() {
+            eprint!("{}", diags.render_all(f));
+            syntax_errors = true;
             continue;
         }
+        let Some(file) = parsed else { continue };
         let ns = file.namespace.to_string();
         if zell::doc::is_test_file(&f.path) {
             for e in zell::doc::examples_of(&file, &f.text, &f.path) {
@@ -209,6 +214,10 @@ pub fn run(args: &[String]) -> i32 {
             }
             *f = SourceFile::new(f.path.clone(), text);
         }
+    }
+    if syntax_errors {
+        eprintln!("error: compilation failed");
+        return 1;
     }
     let total: usize = tests.values().map(|v| v.len()).sum();
     if total == 0 && examples.is_empty() {
