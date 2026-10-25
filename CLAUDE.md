@@ -107,11 +107,12 @@ marked types; callable from library code); `reflect.Error(msg)` — the
 library-level `static_assert`, raised per instantiation when reachable
 after static `if`; `TypeInfo.Package`, `MethodInfo.Params []*ParamInfo`
 (name, index, type, attributes); methods called with `Call<F>()` (typed,
-fixed `F`) or `Invoke(recv, []any)`. Not done: static unrolling of
-`for t in TypesWith<A>()` / `for m in t.Methods` / `for p in m.Params`, and
-a descriptor's type as a type argument (`json.Parse<p.Type>`), which
-together give typed binding without boxing (what the removed `sema/web.rs`
-did); constructor injection via `ParamInfo` of `New`. The in-tree `web`
+fixed `F`) or `Invoke(recv, []any)`. Done 2026-10-25: field-level folding (static `if`/`switch`, reachability, `f.Set`, optional
+attribute fields with `@required`), static unrolling of `for t in TypesWith<A>()` / `t.Methods` /
+`m.Params` with typed `m.CallOn`/`m.Apply`, and descriptors as types (`json.Parse<p.Type>`,
+`var x t`, `m.Args`) — `examples/reflect_binding.zl` binds controllers with no boxing. Not done:
+generic types in the unrolled form, descriptor types inside lambdas, run-time `MethodInfo` for
+async methods, constructor injection via `ParamInfo` of `New`. The in-tree `web`
 framework was removed 2026-10-24 (sources at the git tag `web-in-tree`);
 it returns as the package `zell-lang/web` built on `TypesWith` + `Invoke`,
 and its hot paths decide the unrolling/`p.Type` spec.
