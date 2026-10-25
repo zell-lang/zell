@@ -118,7 +118,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let p = unsafe { self.b.build_in_bounds_gep(at, names, &[self.i64_ty().const_zero(), idx], "") }.unwrap();
                 Val::borrowed(self.b.build_load(self.ptr_ty(), p, "").unwrap())
             }
-            Type::Slice(_) | Type::Array(..) => {
+            Type::Slice(_) | Type::Array(..) | Type::Tuple(_) => {
                 let f = self.tostr_fn(t)?;
                 let p = self.spill(x);
                 Val::owned(self.call_fn(f, &[p.into()]).try_as_basic_value().left().unwrap())
@@ -189,7 +189,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let eq = cg.ptr_eq(ti, g);
                 cg.b.build_conditional_branch(eq, yes, next).unwrap();
                 cg.b.position_at_end(yes);
-                let printable = matches!(cg.ty(t), Type::Int(_) | Type::Float32 | Type::Float64 | Type::Bool | Type::Char | Type::String | Type::Error | Type::Slice(_) | Type::Array(..))
+                let printable = matches!(cg.ty(t), Type::Int(_) | Type::Float32 | Type::Float64 | Type::Bool | Type::Char | Type::String | Type::Error | Type::Slice(_) | Type::Array(..) | Type::Tuple(_))
                     || matches!(cg.ty(t), Type::Enum(d) if cg.prog.enums[d.0 as usize].is_plain);
                 let r = if printable {
                     let lt = cg.llty(t);
@@ -251,6 +251,29 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 cg.b.position_at_end(some);
                 let m = cg.call_rt_v("zell_error_message", &[arg.into()]);
                 cg.b.build_return(Some(&m)).unwrap();
+                return Ok(());
+            }
+            if let Type::Tuple(elems) = &ty {
+                // `(a b c)`: elements separated by one space.
+                let st = cg.llty(t).into_struct_type();
+                let acc = cg.entry_alloca(cg.ptr_ty().into(), "acc", false);
+                let open = cg.str_lit("(");
+                cg.b.build_store(acc, open).unwrap();
+                for (i, et) in elems.iter().enumerate() {
+                    if i > 0 {
+                        let space = cg.str_lit(" ");
+                        cg.append_str(acc, space.into(), false);
+                    }
+                    let ep = cg.b.build_struct_gep(st, arg, i as u32, "").unwrap();
+                    let elt = cg.llty(*et);
+                    let ev = cg.b.build_load(elt, ep, "").unwrap();
+                    let s = cg.stringify(*et, ev)?;
+                    cg.append_str(acc, s.get(), s.owned);
+                }
+                let close = cg.str_lit(")");
+                cg.append_str(acc, close.into(), false);
+                let r = cg.b.build_load(cg.ptr_ty(), acc, "").unwrap();
+                cg.b.build_return(Some(&r)).unwrap();
                 return Ok(());
             }
             let et = cg.elem_of(t).unwrap();

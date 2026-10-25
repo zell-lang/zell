@@ -544,6 +544,7 @@ impl<'a> Sema<'a> {
             // Checked again with the concrete type in each instantiation.
             Type::Param(_) => true,
             Type::Slice(e) | Type::Array(e, _) => self.printable(*e),
+            Type::Tuple(es) => es.iter().all(|e| self.printable(*e)),
             _ => false,
         }
     }

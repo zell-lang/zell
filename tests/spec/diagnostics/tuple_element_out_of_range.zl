@@ -1,0 +1,12 @@
+// error: tuple (int, string) has no element 2
+// status: passing
+namespace spec.diagnostics.tuple_element_out_of_range
+
+import io
+
+func pair() (int, string) { return (3, "x") }
+
+func main() {
+    var t = pair()
+    println(t.2)
+}

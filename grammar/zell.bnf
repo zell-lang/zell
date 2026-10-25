@@ -223,6 +223,9 @@ unary_expr ::= (MINUS | BANG | AMP | STAR | AWAIT) unary_expr | postfix_expr
 postfix_expr ::= primary_expr postfix*
 // keywords are member names after `.` (`tag.default`), as in the lexer's semicolon rule
 postfix ::= DOT name_segment
+          // tuple element `t.0`; `t.0.1` is nested access (the compiler's lexer
+          // reads a number right after `.` as an index; this lexer sees FLOAT `0.1`)
+          | DOT (INT_LITERAL | FLOAT_LITERAL)
           | LPAREN arg_list? RPAREN
           | LBRACKET (range_expr | expr) RBRACKET
           | QUESTION (LPAREN expr RPAREN)?

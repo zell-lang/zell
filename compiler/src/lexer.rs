@@ -347,6 +347,11 @@ impl Lexer<'_, '_> {
         }
 
         self.digits();
+        // Right after a `.` the number is a tuple element index: `t.0.1` is
+        // `(t.0).1`, not `t` followed by the float `0.1`.
+        if self.tokens.last().is_some_and(|t| t.kind == TokenKind::Dot) {
+            return TokenKind::Int(self.src[start..self.pos].chars().filter(|&c| c != '_').collect());
+        }
         let mut is_float = false;
         // `1.5` is a float, but `0..10` is a range and `x.0` stays a field access.
         if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {

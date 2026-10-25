@@ -56,6 +56,7 @@ The `.out` files depend on these rules; the runtime must follow them.
 - `string`: raw contents, no quotes. `char`: the character itself
   (`'a'` prints `a`, unlike Go's rune which prints a number).
 - Slices and arrays: Go style, `[1 2 3]`, nested `[[1 2] [3 4]]`.
+- Tuples: `(3 x)`, elements separated by one space, nested `((1 2) z)`.
 - Plain enum values: the variant name (`Color.Green` prints `Green`).
 - Any value whose static type is `error` (or a struct used through the
   `error` interface): the result of its `Message()`.

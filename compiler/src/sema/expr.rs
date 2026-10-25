@@ -281,6 +281,19 @@ impl<'a> Sema<'a> {
                 }
             }
         }
+        // `t.0`, `t.1`, … (also `t._0`, the reflection name) of a tuple.
+        if let Type::Tuple(elems) = self.tt.get(b.ty).clone() {
+            let digits = name.name.strip_prefix('_').unwrap_or(&name.name);
+            let idx = if !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit()) && (digits == "0" || !digits.starts_with('0')) { digits.parse::<usize>().ok() } else { None };
+            return match idx {
+                Some(i) if i < elems.len() => mk(ExprKind::Field { base: Box::new(b), index: i as u32 }, elems[i], span),
+                _ => {
+                    let t = self.tn(b.ty);
+                    self.err_help(format!("tuple {t} has no element {}", name.name), name.span, format!("tuple elements are .0 to .{}", elems.len().saturating_sub(1)));
+                    self.invalid(span)
+                }
+            };
+        }
         let Type::Struct(d) = *self.tt.get(b.ty) else {
             let t = self.tn(b.ty);
             self.err_help(format!("type {t} has no field {}", name.name), name.span, "field access needs a struct or a pointer to a struct");

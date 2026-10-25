@@ -513,7 +513,7 @@ written by hand), **33** (see 67), **46** (see 78).
     literal of exactly N constant-length elements converts implicitly to
     `[N]T` where that type is expected. A length mismatch is an error
     `array literal has 2 elements, want 3`.
-70. ❌ **ergonomics:** **tuples cannot be printed and have no element
+70. ✅ **Fixed (2026-10-25):** as decided: tuples print as `(3 x)` (nested ones recursively, also through `fmt` and `any`), elements are `t.0`, `t.1`, … and `t._0`; the lexer reads a number right after `.` as an index, so `t.0.1` is nested access (DESIGN.md «Функции», EBNF, `grammar/zell.bnf`). Spec: `basics/tuple_print_and_index`, `diagnostics/tuple_element_out_of_range`. **ergonomics:** **tuples cannot be printed and have no element
     access**: `println(t)` fails, and so do `t.0` and `t._0` (reflection
     names them `_0`, `_1`). Only destructuring works. **Decision:** print
     tuples as `(1 x)` (Go-like, space-separated), and allow `t.0`, `t.1`

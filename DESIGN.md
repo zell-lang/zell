@@ -246,6 +246,11 @@ var (x, y) = Swap(1, 2)
   ожидаемым типом (`return`, присваивание, инициализация с типом,
   аргумент) типизируется поэлементно, так что `nil` получает тип элемента:
   `return (nil, false)` в функции с результатом `(*Order, bool)`.
+  Элемент кортежа — `t.0`, `t.1`, … (также `t._0`, имя из рефлексии);
+  `t.0.1` — вложенный доступ (число сразу после `.` — всегда индекс, не
+  дробь); индекс вне кортежа — ошибка `tuple (int, string) has no element
+  2`. `println((3, "x"))` печатает `(3 x)`, вложенные кортежи — рекурсивно
+  (`((1 2) z)`), `fmt` `{0}`/`%v` — так же.
 - Замыкания: `var f = func(x int) int { return x * 2 }`, короткая форма
   `var f = (x int) => x * 2`.
 - У параметров короткой лямбды тип можно опустить, если он следует из
@@ -3031,7 +3036,7 @@ binop       = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
 unary       = ( "-" | "!" | "&" | "*" | "await" ) unary | tryexpr | postfix ;
 tryexpr     = "try" expr ( "catch" ident block | "else" expr ) ;
 trystmt     = "try" block "catch" ident block ;
-postfix     = primary { "." ident | "(" [ exprs ] ")" | "[" ( expr | range ) "]"
+postfix     = primary { "." ( ident | int ) | "(" [ exprs ] ")" | "[" ( expr | range ) "]"
             | "?" [ "(" expr ")" ] | typeargs } ;
 typeargs    = "<" type { "," type } ">" ;     (* only before ( { . ) ] } , or end of statement *)
 range       = [ expr ] ".." [ expr ] ;

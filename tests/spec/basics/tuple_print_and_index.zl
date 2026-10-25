@@ -1,0 +1,25 @@
+// test: tuples print as `(a b)` (nested ones recursively, also through fmt and any) and their elements are read and written with t.0, t.1 (and t._0); t.0.1 is nested access, not the float 0.1
+// status: passing
+// run-flags: --leak-check
+namespace spec.basics.tuple_print_and_index
+
+import io
+import fmt
+
+func pair() (int, string) { return (3, "x") }
+
+func main() {
+    var t = pair()
+    println(t)
+    println(t.0, t.1, t._0, t._1)
+    t.0 = 4
+    println(t)
+    var n = ((1, 2.5), ("a", 'c'), [1, 2])
+    println(n)
+    println(n.0.1, n.1.0, n.2)
+    println(fmt.Format("<{0}>", t), fmt.Sprintf("%v|%s", n.0, t))
+    var a any = t
+    println(a)
+    var xs [](int, bool) = [(1, true), (2, false)]
+    println(xs, xs[1].1)
+}
