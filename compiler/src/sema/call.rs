@@ -107,6 +107,27 @@ impl<'a> Sema<'a> {
                 let ty = if sig.is_async { self.tt.task(sig.ret) } else { sig.ret };
                 mk(ExprKind::Call { callee: Callee::Func(f), args }, ty, span)
             }
+            // `T.M(x, args)`: method expression called with the receiver first.
+            PathRes::MethodExpr(f, sid) => {
+                let sig = self.sigs[f.0 as usize].clone();
+                let sname = self.structs[sid as usize].name.clone();
+                if args.len() == sig.params.len() {
+                    self.err_help(
+                        format!("{} is not a static method of {sname}", name.name),
+                        name.span,
+                        format!("call it on a value (`x.{0}(...)`), or pass the receiver first: `{sname}.{0}(&x, ...)`", name.name),
+                    );
+                    self.check_args_loose(args);
+                    return self.invalid(span);
+                }
+                let st = self.struct_ty(sid);
+                let mut params = vec![self.tt.pointer(st)];
+                params.extend(sig.params.iter().copied());
+                let fname = format!("{sname}.{}", name.name);
+                let args = self.check_args(&params, args, &fname, span);
+                let ty = if sig.is_async { self.tt.task(sig.ret) } else { sig.ret };
+                mk(ExprKind::Call { callee: Callee::Func(f), args }, ty, span)
+            }
             PathRes::Member(Member::StdFunc(i)) => {
                 let sf = stdlib::FUNCS[i];
                 let (params, ret) = sf.signature(&mut self.tt);

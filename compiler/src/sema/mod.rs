@@ -45,6 +45,7 @@ mod infer;
 mod iterate;
 mod litcheck;
 mod logtmpl;
+mod method_value;
 mod ownership;
 mod reflect;
 mod reflect_ct;
@@ -759,7 +760,10 @@ impl<'a> Sema<'a> {
         f.used.push(!matches!(kind, LocalKind::Var | LocalKind::LoopVar));
         if !temp && name != "_" {
             f.scopes.last_mut().unwrap().push((name.to_string(), ScopeEntry::Local(id)));
-            self.ide_def_local(name, id, span);
+            // `$recv` / `$a0` of synthesized lambdas (method values) are not shown.
+            if !name.starts_with('$') {
+                self.ide_def_local(name, id, span);
+            }
         }
         id
     }

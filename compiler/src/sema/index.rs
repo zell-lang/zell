@@ -389,7 +389,7 @@ impl<'a> Sema<'a> {
             PathRes::Member(m) => self.member_key(m),
             PathRes::Builtin(_) | PathRes::BuiltinType(_) => Some(SymKey::Builtin(seg.name.clone())),
             PathRes::Variant(e, v) => Some(SymKey::Variant(e, v)),
-            PathRes::StaticMethod(f) => Some(SymKey::Func(f.0)),
+            PathRes::StaticMethod(f) | PathRes::MethodExpr(f, _) => Some(SymKey::Func(f.0)),
         };
         if let Some(k) = key {
             self.ide_ref(seg.span, k);

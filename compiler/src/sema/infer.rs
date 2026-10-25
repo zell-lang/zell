@@ -381,6 +381,7 @@ impl<'a> Sema<'a> {
                 let found = self.structs[s.0 as usize].methods.iter().find(|(n, _)| *n == name.name).map(|(_, f)| *f);
                 match found {
                     Some(f) if matches!(self.funcs[f.0 as usize].kind, hir::FuncKind::Method { is_static: true, .. }) => Some(PathRes::StaticMethod(f)),
+                    Some(f) => Some(PathRes::MethodExpr(f, s.0)),
                     _ => match self.gen.methods.get(&(s.0, name.name.clone())) {
                         Some(t) => Some(PathRes::Member(Member::Generic(*t))),
                         None => {

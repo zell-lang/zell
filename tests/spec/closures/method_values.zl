@@ -1,0 +1,126 @@
+// test: method values `x.M` (bound to the receiver, evaluated once) and method expressions `T.M` (receiver first) for struct, pointer, interface, enum, generic-instance and async methods
+// status: passing
+// run-flags: --leak-check
+namespace spec.closures.method_values
+
+import io
+
+struct Counter {
+    name string
+    n int
+
+    func Inc() { this.n += 1 }
+    func Add(k int) int {
+        this.n += k
+        return this.n
+    }
+    func Label(prefix string) string { return prefix + this.name }
+    func Check(limit int) int! {
+        if this.n > limit { return error("over " + strconv.Itoa(limit)) }
+        return this.n
+    }
+    func Reset() void! {
+        if this.n == 0 { return error("already zero") }
+        this.n = 0
+    }
+    async func Later(k int) int {
+        await task.Yield()
+        return this.n + k
+    }
+}
+
+interface Shape {
+    func Area() int
+}
+
+struct Sq {
+    s int
+    func Area() int { return this.s * this.s }
+}
+
+enum Color {
+    Red, Green
+    func Name() string {
+        switch this {
+            case Color.Red: return "red"
+            case Color.Green: return "green"
+        }
+    }
+}
+
+struct Box<T> {
+    v T
+    func Get() T { return this.v }
+}
+
+func apply(f func(int) int, x int) int { return f(x) }
+
+func makeCounter(name string) *Counter { return new Counter{name: name} }
+
+func pick(c *Counter) *Counter {
+    println("pick", c.name)
+    return c
+}
+
+async func main() void! {
+    // A struct variable is bound by address: changes go both ways.
+    var c = Counter{name: "c"}
+    var inc = c.Inc
+    inc()
+    inc()
+    println("c.n", c.n)
+    c.n = 10
+    var add = c.Add
+    println("add", add(5), "c.n", c.n)
+    println("apply", apply(c.Add, 1))
+
+    // A pointer receiver is evaluated once and captured.
+    var p = makeCounter("p")
+    var label = pick(p).Label
+    p = makeCounter("q")
+    println(label("name="), p.name)
+
+    // Fallible methods keep their error.
+    var check = c.Check
+    var v = try check(100) else -1
+    println("check", v)
+    try check(3) catch err { println("error:", err.Message()) }
+    var reset = c.Reset
+    reset()?
+    try reset() catch err { println("error:", err.Message()) }
+
+    // Interface values: the interface (its dynamic value) is captured.
+    var sh Shape = Sq{s: 3}
+    var area = sh.Area
+    sh = Sq{s: 4}
+    println("area", area(), sh.Area())
+
+    // Enum and generic-instance receivers are copied values.
+    var col = Color.Green
+    var nm = col.Name
+    col = Color.Red
+    println(nm(), col.Name())
+    var b = Box<string>{v: "boxed"}
+    var get = b.Get
+    println(get())
+
+    // Async methods give async closures.
+    var later = c.Later
+    println("later", await later(7))
+
+    // Method expressions take the receiver first.
+    var addTo = Counter.Add
+    println("expr", addTo(&c, 2), c.n)
+    var lbl func(*Counter, string) string = Counter.Label
+    println(lbl(p, "->"))
+    println("direct", Counter.Add(&c, 1))
+
+    // Method values in a slice of callbacks.
+    var fs []func() = []
+    var a = makeCounter("a")
+    for _ in 0..3 {
+        fs = append(fs, a.Inc)
+    }
+    for f in fs { f() }
+    println("a.n", a.n)
+}

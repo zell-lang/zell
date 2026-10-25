@@ -1,0 +1,21 @@
+// error: cannot take the method value Inc of a struct field or element
+// status: passing
+namespace spec.diagnostics.method_value_interior
+
+import io
+
+struct Counter {
+    n int
+    func Inc() { this.n += 1 }
+}
+
+struct Holder {
+    c Counter
+}
+
+func main() {
+    var h = new Holder{}
+    var f = h.c.Inc
+    f()
+    println(h.c.n)
+}

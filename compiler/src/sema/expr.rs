@@ -212,6 +212,10 @@ impl<'a> Sema<'a> {
                 let ty = self.func_value_ty(f);
                 mk(ExprKind::FuncRef(f), ty, span)
             }
+            PathRes::MethodExpr(f, sid) => {
+                let id = ast::Ident { name: name.to_string(), span: Span::new(span.end.saturating_sub(name.len() as u32), span.end) };
+                self.method_expr(sid, f, &id, span)
+            }
             PathRes::Member(Member::StdConst(i)) => {
                 let (ns, cname, c) = stdlib::CONSTS[i];
                 let value = match c {
@@ -271,6 +275,11 @@ impl<'a> Sema<'a> {
                 return e;
             }
         }
+        // `x.M` without a call: a method value (method_value.rs).
+        let base = match self.method_value(base, name) {
+            Ok(e) => return e,
+            Err(b) => b,
+        };
         let span = base.span.to(name.span);
         let mut b = self.auto_deref(base);
         // `tag.name` of a compile-time attribute value is a constant.
@@ -320,7 +329,7 @@ impl<'a> Sema<'a> {
             None => {
                 let sname = self.structs[d.0 as usize].name.clone();
                 if self.find_method(d.0, &name.name).is_some() {
-                    self.err(format!("method {sname}.{} must be called (method values are not supported)", name.name), name.span);
+                    self.err(format!("method {sname}.{} must be called", name.name), name.span);
                 } else {
                     let members = self.struct_member_names(d.0);
                     let help = self.did_you_mean(&name.name, &members);
@@ -1043,7 +1052,13 @@ impl<'a> Sema<'a> {
                 let v = match ret_ty {
                     Some(t) => self.expr_to(x, t, Ctx::Return),
                     None => {
-                        let v = self.expr(x, None);
+                        // A lambda returning a lambda: the inner one takes
+                        // its parameter types from the expected result.
+                        let hint = expected.and_then(|t| match self.tt.get(t) {
+                            Type::Func(sig) if sig.params.len() == params.len() && matches!(self.tt.get(sig.ret), Type::Func(_)) => Some(sig.ret),
+                            _ => None,
+                        });
+                        let v = self.expr(x, hint);
                         let v = if matches!(self.tt.get(v.ty), Type::Void) { v } else { self.require_value(v) };
                         self.default_type(v)
                     }

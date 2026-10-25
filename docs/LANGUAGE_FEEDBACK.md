@@ -549,7 +549,7 @@ written by hand), **33** (see 67), **46** (see 78).
     "expected expression, found `var`" on the next line. **Decision:**
     either add Go's `i++` / `i--` statements (not expressions), or report
     `Zell has no ++; write i += 1` and recover.
-76. ❌ **spec gap:** **method values are not supported** ("method C.Inc must
+76. ✅ **Fixed (2026-10-25):** `x.M` without a call is a closure bound to the receiver, evaluated once (a struct variable by address like Go's `(&x).M`, a pointer or interface as is, other values copied; a struct field or element is an error, it would keep an interior pointer), for struct, generic-instance, enum, interface, constraint and async methods; `T.M` is a function taking `*T` first (`Counter.Add(&c, 1)`). Built in sema from two lambdas, so the closure retains the receiver and releases it with itself (DESIGN.md «Структуры и методы», `closures/method_values`, `diagnostics/method_value_interior`); generic methods with their own type parameters still must be called. **spec gap:** **method values are not supported** ("method C.Inc must
     be called"), while plain functions are values (`.Then("limits",
     ValidateOrder)`). Workaround: `() => c.Inc()`. **Decision:** `x.M`
     without a call is a closure that captures `x` (a pointer receiver

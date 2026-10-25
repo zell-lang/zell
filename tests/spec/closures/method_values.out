@@ -1,0 +1,16 @@
+c.n 2
+add 15 c.n 15
+apply 16
+pick p
+name=p q
+check 16
+error: over 3
+error: already zero
+area 9 16
+green red
+boxed
+later 7
+expr 2 2
+->q
+direct 3
+a.n 3

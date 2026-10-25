@@ -13,6 +13,9 @@ pub(crate) enum PathRes {
     Variant(u32, u32),
     /// Static method of a struct.
     StaticMethod(FuncId),
+    /// Method expression `T.M` (method `M` of struct `T`): a function
+    /// taking the receiver `*T` first (method_value.rs).
+    MethodExpr(FuncId, u32),
 }
 
 /// Embedding depth after which promotion lookup gives up (guards cycles).
@@ -690,6 +693,10 @@ impl<'a> Sema<'a> {
                         Some(f) if self.is_static(f) => {
                             self.check_member_visibility(self.structs[s as usize].namespace, &seg.name, seg.span, report);
                             PathRes::StaticMethod(f)
+                        }
+                        Some(f) => {
+                            self.check_member_visibility(self.structs[s as usize].namespace, &seg.name, seg.span, report);
+                            PathRes::MethodExpr(f, s)
                         }
                         None if self.gen.methods.contains_key(&(s, seg.name.clone())) => {
                             self.check_member_visibility(self.structs[s as usize].namespace, &seg.name, seg.span, report);
