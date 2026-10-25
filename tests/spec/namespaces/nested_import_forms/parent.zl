@@ -1,0 +1,9 @@
+// test: import os.signal gives the short names (Name, SIGINT); signal.X needs import os (DESIGN.md import rules)
+// status: passing
+namespace spec.namespaces.nested_import_forms.parent
+
+import os
+
+func ViaParent() string {
+    return signal.Name(signal.SIGTERM)
+}

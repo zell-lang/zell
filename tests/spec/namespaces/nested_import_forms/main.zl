@@ -1,0 +1,11 @@
+// test: import os.signal gives the short names (Name, SIGINT); signal.X needs import os (DESIGN.md import rules)
+// status: passing
+namespace spec.namespaces.nested_import_forms
+
+import io
+import os.signal
+import spec.namespaces.nested_import_forms.parent
+
+func main() {
+    println(Name(SIGINT), parent.ViaParent())
+}

@@ -253,7 +253,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
 48. ✅ **Fixed (2026-10-25):** cause: a qualified head (`geo`) resolved through the own namespace or the roots and never marked the glob import of that namespace as used; `lookup_global` now does. **`import geo` followed only by qualified uses (`geo.Hello()`) is an
     "unused import" error.** Workaround: drop the import (a direct
     dependency is reachable by its full name) or use the names unqualified.
-49. ❌ **`import os.signal` does not make `signal.X` available**; the
+49. 📘 **As specified, not changed (2026-10-25):** DESIGN.md «Правила импорта»: `import net.http` gives `Get(url)`, and "Импорт родительского пространства делает дочерние доступными по последнему сегменту: `import net` → `http.Get(url)`"; `os.signal` behaves exactly so (`net.http` too; `json.X` after `import encoding.json` is the attribute-name exception). Spec test `namespaces/nested_import_forms`. **`import os.signal` does not make `signal.X` available**; the
     namespace is reached as `signal.Name` after `import os`, unlike every
     other sub-namespace. Workaround: `import os`.
 50. ❌ **Assertion failures have no `file:line`** (`got 6000, want 600`), and
