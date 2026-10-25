@@ -187,20 +187,42 @@ of another package's unexported field are open), `Invoke`/`Call<F>` for
 returning thunk and an `IsAsync` field, ABI 17.1), method tables of
 interfaces, and `Implements(iface)`.
 
-## 4. Planned: expression trees
+## 4. Done 2026-10-26: expression trees (run 1)
 
-`expr<func(User) bool>` parameters receive the lambda as a syntax tree
-value (C# `Expression<Func<>>`), so the ORM translates `Where(u => u.Age >
-18)` to SQL in library code and `sema/orm*.rs` can be deleted (FRAMEWORK.md
-step 1-2). Spec: DESIGN.md new section, grammar unchanged (a type form),
-node set and evaluation rules (`Compile()` back to a closure).
+`expr<F>` parameters receive the lambda as a syntax tree value (C#
+`Expression<Func<>>`). Spec: DESIGN.md "Деревья выражений" (grammar
+unchanged: a type form). Implemented:
 
-Status after run 2: unchanged, nothing implemented. The descriptor loops
-do not replace it: they iterate declarations, while the ORM needs the
-*body* of a lambda (`u.Age > 18`) as data. What the unrolled loops do give
-the `data` rewrite is the typed materialisation side (`Fields<t>()` plus
-`f.Set` per column, `var row t`), so expression trees are the only
-compiler piece left for deleting `sema/orm*.rs`.
+- `sema/exprtree.rs`: a lambda checked where `expr<F>` is expected is
+  checked as a lambda of type `F`, validated against the node set (one
+  whitelist table, `TREE_CALLS`), encoded into a constant `expr.Site`
+  (`ExprKind::AttrConst`, read-only data); parameter-free subexpressions
+  become slots (literals: constants; anything else: captured values,
+  evaluated when the tree is built, the lifted lambda rewritten to read
+  them); forbidden forms are errors at the sub-expression.
+- Representation: three closures (the lambda, slot values, node types)
+  over one *value environment* (`Function::value_env`, a tuple in one
+  box; `ExprKind::EnvClosures`): no allocation without captures, one box
+  with them (`compiler/tests/exprtree.rs` checks the IR).
+- `stdlib_src/expr.zl` (package `expr`): `Expr<F>` (`Root`, `Params`,
+  `ParamNames`, `Compile`, `String`), the `Node` payload enum (`Param`,
+  `Field`, `Const`, `Captured`, `Binary`, `Unary`, `Call`, `IsNil`,
+  `Tuple`, `Struct`), `Op`, `TypeOf`, `FieldOf`, `Children`, `Walk`,
+  `Values`, `Format`, and the combinators `And`/`Or`/`AndAll`/`OrAll`/`Not`
+  (generic functions cannot be variadic, so the n-ary forms take a slice).
+- Tests: `tests/spec/expr` (a library-style SQL printer over every node
+  kind, captures in loops, `Compile`, combinators, projections, field
+  descriptors through attributes and `reflect.Fields<T>()`, one error
+  program per forbidden form), `examples/expr_trees.zl`.
+
+Run 2: `data` queries on trees (`Where`, `OrderBy`, `Select`, ...) as
+library code, then delete `sema/orm*.rs`. What it still needs from the
+compiler: inference of `T` from a lambda alone (`Where(u => ...)` on a
+generic free function needs `T` from another argument or the receiver;
+methods of `Set<T>`/`Query<T>` already know it), parameter-free
+indexing (`ids[0]`) and conversions in trees (now errors), and the ORM's
+richer calls (`Trim`, aggregates over navigations, subqueries) as new
+whitelist entries or nodes.
 
 ## 5. Order and sizing
 

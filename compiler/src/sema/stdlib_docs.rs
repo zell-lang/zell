@@ -417,6 +417,7 @@ pub const NAMESPACE_DOCS: &[(&str, &str)] = &[
     ("encoding.base64", "Base64 encoding (RFC 4648), standard and URL-safe alphabets."),
     ("encoding.hex", "Hexadecimal encoding."),
     ("errors", "Error values: wrapping, unwrapping, matching by value (Is) or type (As) and error traces."),
+    ("expr", "Expression trees: lambdas passed as `expr<F>` become data (nodes, captured values, field descriptors) that libraries translate; Compile, And, Or, Not, Walk."),
     ("fmt", "String formatting: `{N}` templates (Format) and Go verbs (Sprintf)."),
     ("fs", "File-system paths and operations: existence, directories, copying, renaming, metadata."),
     ("html", "HTML escaping (see html.template for contextual templates)."),

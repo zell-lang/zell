@@ -168,7 +168,7 @@ impl<'a> super::Sema<'a> {
 /// They are top-level names like package roots, and reserved: user code
 /// and packages cannot declare a namespace under them.
 pub const STD_ROOTS: &[&str] = &[
-    "archive", "arena", "bytes", "cli", "cloud", "cmp", "collections", "compress", "crypto", "data", "database", "debug", "diag", "embed", "encoding", "errors", "fmt", "fs", "hash", "html", "io",
+    "archive", "arena", "bytes", "cli", "cloud", "cmp", "collections", "compress", "crypto", "data", "database", "debug", "diag", "embed", "encoding", "errors", "expr", "fmt", "fs", "hash", "html", "io",
     "log", "maps", "math", "mime", "net", "os", "plugin", "process", "random", "reflect", "regex", "runtime", "slices", "strconv", "strings", "sync", "task", "testing", "text", "thread", "time",
     "unicode", "unsafe", "uuid",
 ];
@@ -287,6 +287,7 @@ pub const NAMESPACES: &[&str] = &[
     "slices",
     "maps",
     "cmp",
+    "expr",
     "bytes",
     "strconv",
     "unicode",

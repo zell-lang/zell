@@ -43,6 +43,7 @@
 | `encoding/binary` | `encoding.binary` | ✅ есть (`BigEndian/LittleEndian.*`, varint, `Encode/Decode/Read/Write<T>` через compile-time рефлексию, `@binary(endian:)`) | `Read<T>`/`Write<T>` структур через compile-time рефлексию, `@binary(endian)` |
 | `time` (типы) | `time` | ✅ есть (`Duration`, `Time` с раскладками Go и strftime, `ParseTime`, `Location` из tzdata + POSIX-правила, `Instant`, `Ticker/Timer` async); имена `Now/Since/Sleep/Parse` заняты старыми int-функциями: `Time.Now()`, `Elapsed`, `SleepFor`, `ParseTime` | типы `Time`, `Duration`, `Instant` монотонный |
 | `unsafe` | `unsafe` (только FFI) | 🟡 частично (`ReadInt/ReadUint/ReadFloat/WriteInt/ReadBytes/WriteBytes/CString/AddrOf/TypeOf/CallFunc`; импорт только с `[capabilities] unsafe = true`, ABI.md §22.5) | минимальный, помечает capability |
+| `expr` | — (C# `System.Linq.Expressions`) | ✅ есть: деревья выражений `expr<F>` (`Expr<F>`: `Root`, `Params`, `ParamNames`, `Compile`, `String`), узлы `Node` (`Param`, `Field`, `Const`, `Captured`, `Binary`, `Unary`, `Call`, `IsNil`, `Tuple`, `Struct`), `Op`, `TypeOf`, `FieldOf` (дескриптор поля с атрибутами), `Children`, `Walk`, `Values`, `Format`, комбинаторы `And`/`Or`/`AndAll`/`OrAll`/`Not`; DESIGN.md «Деревья выражений» | структура узлов — константа в rodata, построение дерева выделяет не больше одного блока захваченных значений |
 | `reflect` | `reflect` | ✅ есть (статические таблицы `TypeInfo`/`FieldInfo`/`MethodInfo`/`ParamInfo`/`VariantInfo`, `TypeOf<T>`, `typeof`, `ValueOf`, `Fields<T>()` с развёртыванием при компиляции, статический `if`, атрибуты как значения, `Call<F>`/`Invoke`, `New`, `TypeInfo.Package`, `MethodInfo.Params`; `TypesWith<A>()` — типы всей программы с атрибутом, константный срез; `Error(msg)` — ошибка компиляции из библиотеки; DESIGN.md «Рефлексия») | быстрее C#: указатели на функции, без boxing в `Call<F>`; таблицы урезаются, если `reflect` не используется |
 | `weak`, `unique` | `weak *T` в языке; `intern` | ✅ есть (weak) / нет | язык |
 
@@ -142,7 +143,7 @@
 
 `collections` (полный набор), `yaml`/`toml`, `regex` с проверкой при
 компиляции, `websocket`, `zstd`/`brotli`, `uuid`, `password` (Argon2),
-`decimal`/`big` с операторами, `log` уровня Serilog, `diag` с OTel и
+`decimal`/`big` с операторами, `expr` (деревья выражений), `log` уровня Serilog, `diag` с OTel и
 Prometheus, `cli` с подкомандами, `arena`, типизированный `template`.
 
 ## План волн

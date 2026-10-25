@@ -24,7 +24,9 @@ Stays in stdlib: `log`, `diag`, and every other root in `STD_ROOTS`
 
 ## Order
 
-1. Expression trees in the compiler, and `db` queries built on them.
+1. Expression trees in the compiler (done 2026-10-26: `expr<F>`, package
+   `expr`, DESIGN.md "Деревья выражений"), and `db` queries built on them
+   (next).
 2. The ORM model on static reflection (`Fields<T>()`, `Attribute<A>()`,
    `TypesWith<A>()`).
 3. Remove `sema/orm*.rs`.

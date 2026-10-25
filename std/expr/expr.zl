@@ -1,0 +1,483 @@
+// expr: expression trees (DESIGN.md "Деревья выражений"). A lambda passed
+// where an `expr<F>` is expected (an argument, a typed variable, a field, a
+// return) becomes an `Expr<F>` value instead of a closure: the compiler
+// checks it as a lambda of type `F`, stores the node structure of the lambda
+// site as a constant (`Site`), and evaluates the captured values once, when
+// the tree is built, into one small block shared with the compiled closure.
+// `Root()` decodes the structure into `Node` values, so a library (an ORM,
+// a filter engine) translates the tree without any compiler hook.
+namespace expr
+
+// Operators of Binary and Unary nodes.
+enum Op {
+    Add
+    Sub
+    Mul
+    Div
+    Rem
+    Eq
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+    And
+    Or
+    Not
+    Neg
+
+    // Source spelling: "+", "==", "&&", "!", "-".
+    func Symbol() string {
+        switch this {
+        case Op.Add: return "+"
+        case Op.Sub: return "-"
+        case Op.Mul: return "*"
+        case Op.Div: return "/"
+        case Op.Rem: return "%"
+        case Op.Eq: return "=="
+        case Op.Ne: return "!="
+        case Op.Lt: return "<"
+        case Op.Le: return "<="
+        case Op.Gt: return ">"
+        case Op.Ge: return ">="
+        case Op.And: return "&&"
+        case Op.Or: return "||"
+        case Op.Not: return "!"
+        }
+        return "-"
+    }
+}
+
+// A field of a Struct node (a struct literal in the lambda body).
+struct FieldInit {
+    Index int
+    Name string
+    Value *Node
+}
+
+// One node of a tree. `t` is the static type of the node's value; `owner`
+// of a Field node is the struct the field belongs to (FieldOf reads its
+// descriptor). Const and Captured carry values, never source text: a
+// translator passes them on as parameters.
+enum Node {
+    // Parameter `index` of the lambda.
+    Param(index int, t *reflect.TypeInfo)
+    // `base.name`: field `index` of struct `owner` (through a pointer too).
+    Field(base *Node, name string, index int, t *reflect.TypeInfo, owner *reflect.TypeInfo)
+    // A literal or named constant.
+    Const(value any, t *reflect.TypeInfo)
+    // A captured value: a variable of the enclosing code (or a field path
+    // of one, `req.MinAge`), evaluated when the tree was built. `index` is
+    // its slot in the lambda site, `name` its source text.
+    Captured(index int, name string, value any, t *reflect.TypeInfo)
+    Binary(op Op, left *Node, right *Node, t *reflect.TypeInfo)
+    Unary(op Op, operand *Node, t *reflect.TypeInfo)
+    // A call of a whitelisted function (`strings.HasPrefix`, `len`, ...).
+    Call(fn string, args []*Node, t *reflect.TypeInfo)
+    // `operand == nil` (`!= nil` when negated).
+    IsNil(operand *Node, negated bool)
+    // `(a, b)`: a tuple result (projections).
+    Tuple(elems []*Node, t *reflect.TypeInfo)
+    // `T{A: x, B: y}`: a struct literal result (projections).
+    Struct(t *reflect.TypeInfo, fields []FieldInit)
+}
+
+// The constant structure of one lambda site (immortal, in read-only data):
+// the nodes in prefix order, their strings, and the parameter count.
+// Every node starts with [tag, type index]; type indices 0..params-1 are
+// the parameter types.
+struct Site {
+    ops []int
+    strs []string
+    params int
+}
+
+// `expr<F>`: an expression tree whose lambda has type `F`.
+struct Expr<F> {
+    site *Site
+    // The compiled lambda, the values of the site (slot -> value) and its
+    // types (index -> descriptor); one shared environment.
+    fns (F, func(int) any, func(int) *reflect.TypeInfo)
+    // Trees built by combinators: their root, parameter names and types.
+    root *Node
+    names []string
+    ptypes []*reflect.TypeInfo
+
+    // The lambda as an ordinary function (in-memory evaluation, tests).
+    func Compile() F {
+        return this.fns.0
+    }
+
+    // The root node (decoded from the site; a new tree on every call).
+    func Root() *Node {
+        if this.site == nil {
+            return this.root
+        }
+        var d = decoder{site: this.site, vals: this.fns.1, types: this.fns.2, pos: 0}
+        return d.node()
+    }
+
+    // Static types of the lambda's parameters.
+    func Params() []*reflect.TypeInfo {
+        if this.site == nil {
+            return this.ptypes
+        }
+        var out []*reflect.TypeInfo = []
+        var types = this.fns.2
+        for i in 0..this.site.params {
+            out = append(out, types(i))
+        }
+        return out
+    }
+
+    // Names of the lambda's parameters.
+    func ParamNames() []string {
+        if this.site == nil {
+            return this.names
+        }
+        var out []string = []
+        for i in 0..this.site.params {
+            out = append(out, this.site.strs[i])
+        }
+        return out
+    }
+
+    // The tree in source form: `u => u.Age > 18 && strings.HasPrefix(u.Name, prefix)`
+    // (captured values by their names).
+    func String() string {
+        var names = this.ParamNames()
+        var head = ""
+        if len(names) == 1 {
+            head = names[0]
+        } else {
+            head = "(" + strings.Join(names, ", ") + ")"
+        }
+        return head + " => " + Format(this.Root(), names)
+    }
+}
+
+struct decoder {
+    site *Site
+    vals func(int) any
+    types func(int) *reflect.TypeInfo
+    pos int
+
+    func next() int {
+        var v = this.site.ops[this.pos]
+        this.pos += 1
+        return v
+    }
+
+    func str() string {
+        return this.site.strs[this.next()]
+    }
+
+    func node() *Node {
+        var tag = this.next()
+        var t = this.types(this.next())
+        switch tag {
+        case 0:
+            return mk(Node.Param(this.next(), t))
+        case 1:
+            var idx = this.next()
+            var name = this.str()
+            var owner = this.types(this.next())
+            var base = this.node()
+            return mk(Node.Field(base, name, idx, t, owner))
+        case 2:
+            return mk(Node.Const(this.vals(this.next()), t))
+        case 3:
+            var slot = this.next()
+            var name = this.str()
+            return mk(Node.Captured(slot, name, this.vals(slot), t))
+        case 4:
+            var op = opOf(this.next())
+            var l = this.node()
+            var r = this.node()
+            return mk(Node.Binary(op, l, r, t))
+        case 5:
+            var op = opOf(this.next())
+            var x = this.node()
+            return mk(Node.Unary(op, x, t))
+        case 6:
+            var name = this.str()
+            var n = this.next()
+            var args []*Node = []
+            for i in 0..n {
+                args = append(args, this.node())
+            }
+            return mk(Node.Call(name, args, t))
+        case 7:
+            var neg = this.next() != 0
+            var x = this.node()
+            return mk(Node.IsNil(x, neg))
+        case 8:
+            var n = this.next()
+            var elems []*Node = []
+            for i in 0..n {
+                elems = append(elems, this.node())
+            }
+            return mk(Node.Tuple(elems, t))
+        case 9:
+            var n = this.next()
+            var fields []FieldInit = []
+            for i in 0..n {
+                var idx = this.next()
+                var name = this.str()
+                var v = this.node()
+                fields = append(fields, FieldInit{Index: idx, Name: name, Value: v})
+            }
+            return mk(Node.Struct(t, fields))
+        }
+        panic("expr: corrupt tree site")
+    }
+}
+
+func mk(n Node) *Node {
+    var b = n
+    return &b
+}
+
+func opOf(i int) Op {
+    switch i {
+    case 0: return Op.Add
+    case 1: return Op.Sub
+    case 2: return Op.Mul
+    case 3: return Op.Div
+    case 4: return Op.Rem
+    case 5: return Op.Eq
+    case 6: return Op.Ne
+    case 7: return Op.Lt
+    case 8: return Op.Le
+    case 9: return Op.Gt
+    case 10: return Op.Ge
+    case 11: return Op.And
+    case 12: return Op.Or
+    case 13: return Op.Not
+    }
+    return Op.Neg
+}
+
+// The static type of the value of node `n`.
+func TypeOf(n *Node) *reflect.TypeInfo {
+    switch *n {
+    case Node.Param(_, t): return t
+    case Node.Field(_, _, _, t, _): return t
+    case Node.Const(_, t): return t
+    case Node.Captured(_, _, _, t): return t
+    case Node.Binary(_, _, _, t): return t
+    case Node.Unary(_, _, t): return t
+    case Node.Call(_, _, t): return t
+    case Node.IsNil(_, _): return reflect.TypeOf<bool>()
+    case Node.Tuple(_, t): return t
+    case Node.Struct(t, _): return t
+    }
+    return nil
+}
+
+// The descriptor of the field a Field node reads (its attributes map it to
+// a column, a JSON name, ...); nil for other nodes.
+func FieldOf(n *Node) *reflect.FieldInfo {
+    switch *n {
+    case Node.Field(_, _, idx, _, owner):
+        return owner.Fields[idx]
+    }
+    return nil
+}
+
+// The children of `n` in evaluation order.
+func Children(n *Node) []*Node {
+    switch *n {
+    case Node.Field(b, _, _, _, _): return [b]
+    case Node.Binary(_, l, r, _): return [l, r]
+    case Node.Unary(_, x, _): return [x]
+    case Node.Call(_, args, _): return args
+    case Node.IsNil(x, _): return [x]
+    case Node.Tuple(elems, _): return elems
+    case Node.Struct(_, fields):
+        var out []*Node = []
+        for f in fields {
+            out = append(out, f.Value)
+        }
+        return out
+    }
+    return []
+}
+
+// Calls `f` for `n` and every node below it, parents first; when `f`
+// returns false the children of that node are skipped.
+func Walk(n *Node, f func(*Node) bool) {
+    if !f(n) {
+        return
+    }
+    for c in Children(n) {
+        Walk(c, f)
+    }
+}
+
+// The captured and constant values of the tree in evaluation order (the
+// parameter list of a translation that emits one placeholder per value).
+func Values(n *Node) []any {
+    var out []any = []
+    Walk(n, (x) => {
+        switch *x {
+        case Node.Const(v, _): out = append(out, v)
+        case Node.Captured(_, _, v, _): out = append(out, v)
+        }
+        return true
+    })
+    return out
+}
+
+// Node `n` in source form; `names` are the parameter names.
+func Format(n *Node, names []string) string {
+    switch *n {
+    case Node.Param(i, _):
+        if i < len(names) {
+            return names[i]
+        }
+        return fmt.Format("p{0}", i)
+    case Node.Field(b, name, _, _, _):
+        return Format(b, names) + "." + name
+    case Node.Const(v, _):
+        return formatValue(v)
+    case Node.Captured(_, name, _, _):
+        return name
+    case Node.Binary(op, l, r, _):
+        return formatOperand(l, names, prec(op), false) + " " + op.Symbol() + " " + formatOperand(r, names, prec(op), true)
+    case Node.Unary(op, x, _):
+        return op.Symbol() + formatOperand(x, names, 6, false)
+    case Node.Call(fname, args, _):
+        var parts []string = []
+        for a in args {
+            parts = append(parts, Format(a, names))
+        }
+        return fname + "(" + strings.Join(parts, ", ") + ")"
+    case Node.IsNil(x, neg):
+        if neg {
+            return formatOperand(x, names, 3, false) + " != nil"
+        }
+        return formatOperand(x, names, 3, false) + " == nil"
+    case Node.Tuple(elems, _):
+        var parts []string = []
+        for e in elems {
+            parts = append(parts, Format(e, names))
+        }
+        return "(" + strings.Join(parts, ", ") + ")"
+    case Node.Struct(t, fields):
+        var parts []string = []
+        for f in fields {
+            parts = append(parts, f.Name + ": " + Format(f.Value, names))
+        }
+        return t.Name + "{" + strings.Join(parts, ", ") + "}"
+    }
+    return "?"
+}
+
+// Binding strength of a binary operator (Go's levels).
+func prec(op Op) int {
+    switch op {
+    case Op.Or: return 1
+    case Op.And: return 2
+    case Op.Eq, Op.Ne, Op.Lt, Op.Le, Op.Gt, Op.Ge: return 3
+    case Op.Add, Op.Sub: return 4
+    }
+    return 5
+}
+
+// `n` as an operand of an operator of strength `p` (on its right side
+// when `right`): parenthesized when it binds weaker.
+func formatOperand(n *Node, names []string, p int, right bool) string {
+    var q = 7
+    switch *n {
+    case Node.Binary(op, _, _, _): q = prec(op)
+    case Node.IsNil(_, _): q = 3
+    }
+    if q < p || (right && q == p) {
+        return "(" + Format(n, names) + ")"
+    }
+    return Format(n, names)
+}
+
+func formatValue(v any) string {
+    switch v {
+    case string s: return "\"" + s + "\""
+    }
+    if v == nil {
+        return "nil"
+    }
+    return fmt.Format("{0}", v)
+}
+
+func combine<T>(op Op, ps []Expr<func(T) bool>) Expr<func(T) bool> {
+    var fs []func(T) bool = []
+    for p in ps {
+        fs = append(fs, p.fns.0)
+    }
+    var isAnd = op == Op.And
+    var f func(T) bool = (x T) => {
+        for g in fs {
+            if g(x) != isAnd {
+                return !isAnd
+            }
+        }
+        return isAnd
+    }
+    var root *Node = nil
+    for p in ps {
+        var r = p.Root()
+        if root == nil {
+            root = r
+        } else {
+            root = mk(Node.Binary(op, root, r, reflect.TypeOf<bool>()))
+        }
+    }
+    if root == nil {
+        root = mk(Node.Const(isAnd, reflect.TypeOf<bool>()))
+    }
+    var names []string = ["x"]
+    var ptypes []*reflect.TypeInfo = [reflect.TypeOf<T>()]
+    if len(ps) > 0 {
+        names = ps[0].ParamNames()
+        ptypes = ps[0].Params()
+    }
+    return Expr<func(T) bool>{site: nil, fns: (f, noValue, noType), root: root, names: names, ptypes: ptypes}
+}
+
+func noValue(i int) any {
+    return nil
+}
+
+func noType(i int) *reflect.TypeInfo {
+    return nil
+}
+
+// `a && b` over predicates of the same parameter type; its Compile()
+// evaluates `a`, then `b` only when needed. (Generic functions cannot be
+// variadic: AndAll takes any number of trees as a slice.)
+func And<T>(a Expr<func(T) bool>, b Expr<func(T) bool>) Expr<func(T) bool> {
+    return combine<T>(Op.And, [a, b])
+}
+
+// `a || b`.
+func Or<T>(a Expr<func(T) bool>, b Expr<func(T) bool>) Expr<func(T) bool> {
+    return combine<T>(Op.Or, [a, b])
+}
+
+// `p1 && p2 && ...` (`true` for none).
+func AndAll<T>(ps []Expr<func(T) bool>) Expr<func(T) bool> {
+    return combine<T>(Op.And, ps)
+}
+
+// `p1 || p2 || ...` (`false` for none).
+func OrAll<T>(ps []Expr<func(T) bool>) Expr<func(T) bool> {
+    return combine<T>(Op.Or, ps)
+}
+
+// `!p`.
+func Not<T>(p Expr<func(T) bool>) Expr<func(T) bool> {
+    var g = p.fns.0
+    var f func(T) bool = (x T) => !g(x)
+    var root = mk(Node.Unary(Op.Not, p.Root(), reflect.TypeOf<bool>()))
+    return Expr<func(T) bool>{site: nil, fns: (f, noValue, noType), root: root, names: p.ParamNames(), ptypes: p.Params()}
+}

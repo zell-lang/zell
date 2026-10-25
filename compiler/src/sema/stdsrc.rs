@@ -89,6 +89,7 @@ pub(crate) const MODULES: &[(&str, &str, &str)] = &[
     ("mime.quotedprintable", "quotedprintable.zl", include_str!("stdlib_src/quotedprintable.zl")),
     ("mime.multipart", "multipart.zl", include_str!("stdlib_src/multipart.zl")),
     ("net.url", "url.zl", include_str!("stdlib_src/url.zl")),
+    ("expr", "expr.zl", include_str!("stdlib_src/expr.zl")),
     ("text.scanner", "scanner.zl", include_str!("stdlib_src/scanner.zl")),
     ("text.table", "table.zl", include_str!("stdlib_src/table.zl")),
     // <<< tier 2 stdlib
