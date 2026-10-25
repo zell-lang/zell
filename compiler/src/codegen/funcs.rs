@@ -25,7 +25,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         if off == 1 {
             self.fs_mut().env = Some(fv.get_nth_param(0).unwrap().into_pointer_value());
         }
-        if f.is_async {
+        if f.is_async && self.is_plain_async(fid.0 as usize) {
+            let neutral = self.plain_async.ctx_neutral.get(fid.0 as usize).copied().unwrap_or(false);
+            self.plain_async_prologue(!neutral);
+        } else if f.is_async {
             self.coro_prologue(f)?;
         }
         // Local slots (zeroed at entry). Stack values with a destructor get
@@ -121,6 +124,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let open = self.fs().open_defers.clone();
         self.run_defers()?;
         self.release_locals();
+        if self.fs().plain.is_some() {
+            self.plain_async_return();
+            return Ok(());
+        }
         if self.fs().coro.is_some() {
             self.coro_return()?;
             // The unwind path of a panic (ABI.md 8.1): the same defers,

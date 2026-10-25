@@ -308,6 +308,51 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         Ok(())
     }
 
+    /// The prologue of a never-suspending async function lowered as a
+    /// plain function (ABI.md 10.3): no frame, no task, no frame chain;
+    /// only the caller's context is saved (+1) to be current again at the
+    /// exit, so whatever the body set stays with it, as `zell_coro_leave`
+    /// does for a coroutine that never suspended. Without `save_ctx` (a
+    /// context-neutral body, [`crate::hir::suspend::PlainAsync`]) nothing
+    /// is saved.
+    pub(crate) fn plain_async_prologue(&mut self, save_ctx: bool) {
+        let body = self.b.get_insert_block().unwrap();
+        let ctx0 = if save_ctx {
+            let init = self.fs().init;
+            self.b.position_at_end(init);
+            let cp = self.coro_tls(0);
+            let ctx0 = self.b.build_load(self.ptr_ty(), cp, "ctx0").unwrap().into_pointer_value();
+            self.call_rt("zell_retain", &[ctx0.into()]);
+            let after = self.b.get_insert_block().unwrap();
+            self.fs().init_b.position_at_end(after);
+            Some(ctx0)
+        } else {
+            None
+        };
+        let res = self.fs().func.get_last_param().unwrap().into_pointer_value();
+        self.fs_mut().plain = Some((ctx0, res));
+        self.b.position_at_end(body);
+    }
+
+    /// The exit of a plain-lowered async function: the caller's context
+    /// again, then a NULL task and the result (moved) into `res`.
+    pub(crate) fn plain_async_return(&mut self) {
+        let (ctx0, res) = self.fs().plain.unwrap();
+        let ret = self.fs().hir.unwrap().ret;
+        if let Some(c) = ctx0 {
+            self.coro_leave_inline(c);
+        }
+        let tp = self.coro_res_field(ret, res, 0);
+        self.b.build_store(tp, self.ptr_ty().const_null()).unwrap();
+        if let Some((slot, t)) = self.fs().ret_slot {
+            let lt = self.llty(t);
+            let v = self.b.build_load(lt, slot, "").unwrap();
+            let vp = self.coro_res_field(ret, res, 1);
+            self.b.build_store(vp, v).unwrap();
+        }
+        self.b.build_return(None).unwrap();
+    }
+
     /// Leaves the coroutine with the result slot: completes the task if the
     /// body suspended, else hands the result to the caller through `res`.
     pub(crate) fn coro_return(&mut self) -> R<()> {
@@ -741,6 +786,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// the usual (blocking) await on the task it returned; inside one the
     /// frame-linked protocol of ABI.md 10.3 ([`Self::await_linked`]).
     fn await_direct_call(&mut self, ty: TypeId, fid: FuncId, args: &[Expr]) -> R<Val<'ctx>> {
+        if self.is_plain_async(fid.0 as usize) {
+            // Never suspends (ABI.md 10.3): `res.task` is NULL, the result
+            // is in `res.value` (+1, moved).
+            let res = self.call_async_direct(fid, args, None)?;
+            return Ok(match self.llty_opt(ty) {
+                Some(lt) => {
+                    let vp = self.coro_res_field(ty, res, 1);
+                    Val::owned(self.b.build_load(lt, vp, "").unwrap())
+                }
+                None => Val::void(),
+            });
+        }
         if let Some(co) = self.fs().coro {
             let res = self.call_async_direct(fid, args, Some(co.hdl))?;
             return Ok(self.await_linked(ty, res));

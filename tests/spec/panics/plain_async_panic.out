@@ -1,0 +1,3 @@
+start
+worker: -1
+error: true

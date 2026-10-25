@@ -163,6 +163,15 @@
 //! `zell_coro_frame_free`. The ramp's `zell_coro_enter` / `zell_coro_leave`
 //! are inlined on the thread-local `zell_coro_tls` `{ ctx, cur,
 //! orphan_seq, orphan_on }` (ABI.md 10.2).
+//! An async function that never suspends ([`hir::suspend::plain_async`]:
+//! it awaits only direct calls of such functions, has no `defer` and owns
+//! no value with a destructor) is a plain function with the same ABI
+//! (ABI.md 10.3 "Never-suspending functions"): no frame, task or chain
+//! node, the caller's context saved and given back unless the body is
+//! context-neutral, NULL into `res.task` and the moved result into
+//! `res.value`; a direct `await` of it reads `res.value` only. It carries
+//! the string attribute `"zell-plain-async"` instead of
+//! `presplitcoroutine`.
 //! An `await` of a task tests its state word inline (+24 == 1, acquire)
 //! and takes the result at +224 when it did not panic (+200 NULL; ABI.md
 //! 10.2 "Task layout").
@@ -481,6 +490,11 @@ pub(crate) struct FnState<'a, 'ctx> {
     /// Zero-initialised slots released at exit (loop sequences).
     pub scoped: Vec<(PointerValue<'ctx>, TypeId)>,
     pub coro: Option<Coro<'ctx>>,
+    /// A never-suspending async function lowered as a plain function
+    /// ([`hir::suspend::plain_async`], ABI.md 10.3): the caller's context
+    /// (+1, given back at the exit; None when the body is context-neutral)
+    /// and the result slot `res`.
+    pub plain: Option<(Option<PointerValue<'ctx>>, PointerValue<'ctx>)>,
     /// Owned temporaries and block scopes, innermost last.
     pub cleanups: Vec<Cleanup<'ctx>>,
     /// Cleanup entries that are *pins* of a `*T` of a cyclic type (a
@@ -591,6 +605,9 @@ pub struct CodeGen<'a, 'ctx> {
     pub(crate) strict_facts: hir::ownership::ParamFacts,
     /// Heap-pure functions ([`hir::borrow::pure_functions`]).
     pub(crate) pure_fns: Vec<bool>,
+    /// Async functions lowered as plain functions
+    /// ([`hir::suspend::plain_async`]).
+    pub(crate) plain_async: hir::suspend::PlainAsync,
     /// Memoised [`rc::RcKind`] per type.
     pub(crate) rc_cache: std::cell::RefCell<HashMap<TypeId, rc::RcKind>>,
     /// Debug-info state when [`Options::debug_info`] is set.
@@ -709,6 +726,7 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
         facts: hir::ownership::param_facts(program),
         strict_facts: hir::ownership::strict_param_facts(program),
         pure_fns: hir::borrow::pure_functions(program),
+        plain_async: hir::suspend::plain_async(program),
         rc_cache: Default::default(),
         dbg: None,
         dbga: None,
@@ -722,6 +740,11 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
         return Err(vec![e]);
     }
     let intrinsics = cg.intrinsics();
+    for k in intrinsics.keys() {
+        if let Some(b) = cg.plain_async.plain.get_mut(k.0 as usize) {
+            *b = false;
+        }
+    }
     for (i, f) in program.funcs.iter().enumerate() {
         let fid = FuncId(i as u32);
         let r = match intrinsics.get(&fid) {
@@ -770,12 +793,22 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
 }
 
 impl<'a, 'ctx> CodeGen<'a, 'ctx> {
+    /// Function `i` is an async function lowered as a plain function.
+    pub(crate) fn is_plain_async(&self, i: usize) -> bool {
+        self.plain_async.plain.get(i).copied().unwrap_or(false)
+    }
+
     /// Declares every function and global.
     fn declare_all(&mut self) -> R<()> {
         for (i, f) in self.prog.funcs.iter().enumerate() {
             let fty = self.fn_llty(f)?;
             let fv = self.module.add_function(&f.symbol, fty, Some(Linkage::Internal));
-            if f.is_async {
+            if f.is_async && self.is_plain_async(i) {
+                // Never suspends (ABI.md 10.3): a plain function with the
+                // coroutine's ABI, marked for `--emit=llvm-ir` readers.
+                let a = self.ctx.create_string_attribute("zell-plain-async", "");
+                fv.add_attribute(inkwell::attributes::AttributeLoc::Function, a);
+            } else if f.is_async {
                 fv.add_attribute(inkwell::attributes::AttributeLoc::Function, self.attr("presplitcoroutine"));
             }
             if self.borrow_ret.get(i).is_some_and(|b| b.is_some()) {
@@ -836,6 +869,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             open_defers: Vec::new(),
             scoped: Vec::new(),
             coro: None,
+            plain: None,
             cleanups: Vec::new(),
             pins: HashMap::new(),
             borrowed: Vec::new(),

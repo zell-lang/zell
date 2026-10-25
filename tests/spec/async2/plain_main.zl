@@ -1,0 +1,36 @@
+// test: an async main that never suspends is compiled as a plain function (ABI.md 10.3) and still runs through zell_task_run_main: its result slot holds a NULL task; a context a lowered function sets stays with it (log.Context.Push without Pop)
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.plain_main
+
+import io
+
+var Name = task.Key<string>()
+
+async func depth(d int) int {
+    if d == 0 {
+        return 0
+    }
+    return await depth(d - 1) + 1
+}
+
+async func label() string {
+    var v = task.Get(Name)
+    if v != nil {
+        return *v
+    }
+    return "none"
+}
+
+// Sets a context it never pops: it stays with this call.
+async func tagged() int {
+    var s = log.Context.Push("req", 1)
+    _ = s
+    return len(log.Context.Properties())
+}
+
+async func main() {
+    println(await depth(100))
+    println(await tagged(), len(log.Context.Properties()))
+    println(await label())
+}

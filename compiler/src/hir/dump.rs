@@ -64,7 +64,8 @@ impl Program {
 
     /// The whole program as indented text.
     pub fn dump(&self) -> String {
-        let mut d = Dumper { p: self, out: String::new(), indent: 0, func: None };
+        let plain = super::suspend::plain_async(self).plain;
+        let mut d = Dumper { p: self, out: String::new(), indent: 0, func: None, plain };
         d.program();
         d.out
     }
@@ -75,6 +76,8 @@ struct Dumper<'a> {
     out: String,
     indent: usize,
     func: Option<&'a Function>,
+    /// [`super::suspend::plain_async`]: marked on the function line.
+    plain: Vec<bool>,
 }
 
 impl<'a> Dumper<'a> {
@@ -170,7 +173,12 @@ impl<'a> Dumper<'a> {
     fn function(&mut self, i: usize, f: &'a Function) {
         self.func = Some(f);
         let params: Vec<String> = f.params.iter().map(|l| self.local(*l)).collect();
-        let asy = if f.is_async { "async " } else { "" };
+        // A never-suspending async function codegen lowers as a plain one.
+        let asy = match (f.is_async, self.plain.get(i).copied().unwrap_or(false)) {
+            (true, true) => "async(plain) ",
+            (true, false) => "async ",
+            _ => "",
+        };
         let line = format!(
             "{}{asy}func #{i} {} [{}] {:?} ({}) {}",
             self.attrs(&f.attrs),
@@ -409,7 +417,7 @@ impl<'a> Dumper<'a> {
                 format!("propagate({}{c})", self.expr(value))
             }
             ExprKind::TryCatch { value, err, handler, result_used } => {
-                let mut sub = Dumper { p: self.p, out: String::new(), indent: 0, func: self.func };
+                let mut sub = Dumper { p: self.p, out: String::new(), indent: 0, func: self.func, plain: Vec::new() };
                 for s in &handler.stmts {
                     sub.stmt(s);
                 }

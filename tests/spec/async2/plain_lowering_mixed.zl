@@ -1,0 +1,64 @@
+// test: the may-suspend analysis (ABI.md 10.3): a mutually recursive pair where one side suspends on some calls is compiled as coroutines on both sides; a generic async function is decided per instantiation (it suspends for string and is a plain function for int); a never-suspending async main still runs to completion
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.plain_lowering_mixed
+
+import io
+
+// Mutual recursion: pong yields when n % 7 == 3, so both may suspend.
+async func ping(n int) int {
+    if n == 0 {
+        return 0
+    }
+    return await pong(n - 1) + 1
+}
+
+async func pong(n int) int {
+    if n % 7 == 3 {
+        await task.Yield()
+    }
+    if n == 0 {
+        return 0
+    }
+    return await ping(n - 1) + 2
+}
+
+// Mutual recursion that never suspends.
+async func even(n int) bool {
+    if n == 0 {
+        return true
+    }
+    return await odd(n - 1)
+}
+
+async func odd(n int) bool {
+    if n == 0 {
+        return false
+    }
+    return await even(n - 1)
+}
+
+// Per instantiation: string suspends, int does not.
+async func step<T>(x T) int {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.String {
+        await task.Yield()
+        return 10
+    }
+    return 1
+}
+
+async func steps<T>(x T, n int) int {
+    var s = 0
+    for _ in 0..n {
+        s += await step(x)
+    }
+    return s
+}
+
+async func main() {
+    println(await ping(20), await pong(20))
+    var t = ping(9)
+    println(await t)
+    println(await even(10), await odd(10), await even(7))
+    println(await steps(1, 5), await steps("a", 5))
+}

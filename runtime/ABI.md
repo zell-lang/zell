@@ -1735,6 +1735,42 @@ over to its awaiter unconditionally.
   shows as its root task only (the frames have none); the frame chain of
   the running job is unchanged (`zell_coro_chain` pushes and pops).
 
+**Never-suspending functions** (a codegen note: the runtime sees no
+difference). The compiler emits an `async func` that provably never
+suspends as a **plain function** with the same external ABI: `void
+@f(params, ptr %res)`, no `presplitcoroutine`, no frame, no
+`zell_coro_enter`, no task and no `zell_coro_chain` node. It ignores the
+awaiter word the caller stored, and every return stores NULL into
+`res.task` and the result (+1, moved) into `res.value`, exactly the
+synchronous return of a coroutine, so every caller shape works unchanged
+(`await f()`, a kept `Task<T>` through `zell_task_completed`, function
+value thunks, `task.Go`/`Spawn`, interface methods returning the task,
+`zell_task_run_main` for an `async main`). The caller's context is saved
+at entry (`tls.ctx`, retained) and made current again at the return like
+`zell_coro_leave`, unless the body is *context-neutral* (every call in it
+is a direct call of an async function or of a synchronous function that
+is context-neutral itself, and it has no extern, closure, interface or
+`String()` call and no `Drop`), when nothing is saved. A direct `await
+f()` of a plain `f` reads `res.value` without testing `res.task`.
+
+The analysis (`compiler/src/hir/suspend.rs`) runs on the monomorphised
+HIR: an async function **may suspend** if its body awaits anything other
+than a direct call of an async function proven never to suspend (task
+externs, a `Task` from a variable, field, `task.All`/`Any`, a closure,
+interface or function value call, or a may-suspend async function);
+starting from "never suspends" for all, it iterates to the greatest
+fixpoint, so recursion that only awaits itself stays plain. Because
+synchronous frames do not run `defer` / `Drop` when a panic unwinds them
+(8.1, DESIGN.md "Паника"), only functions with **no `defer` and no local
+or temporary owning a value with a destructor** (directly or through
+pointers, slices, maps, tasks or fields) are lowered. `zell check
+--dump-hir` prints them as `async(plain) func`, and the LLVM function
+carries the string attribute `"zell-plain-async"`. A panic inside one
+behaves as before (it runs in its caller's task, as a coroutine does
+before its first suspension); optimised builds may inline it, so its
+caller's line can be missing from the backtrace, as for any inlined
+synchronous call (8.2).
+
 `tests/coro_lowering.ll` is a complete, working example. `make test` compiles it
 with `clang -O2` and runs it. It contains four async functions (one awaiting
 `task.Delay`, one awaiting the first, one without suspend points, one

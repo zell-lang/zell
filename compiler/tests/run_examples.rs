@@ -154,6 +154,36 @@ fn emit_llvm_ir_is_valid() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Never-suspending async functions are compiled as plain functions
+/// (ABI.md 10.3): `chain` of await_chain has no coroutine parts, its
+/// yielding twin keeps them; `--dump-hir` marks the lowered ones.
+#[test]
+fn never_suspending_async_is_plain() {
+    let tmp = tmpdir("plain");
+    let ll = tmp.join("ac.ll");
+    let src = repo().join("benchmarks/await_chain/main.zl");
+    let r = Command::new(zell()).arg("build").arg(&src).arg("--emit=llvm-ir").arg("-o").arg(&ll).output().unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let text = std::fs::read_to_string(&ll).unwrap();
+    assert!(!text.contains("@zell_bench__await_chain__chain.resume"), "chain is still a coroutine");
+    assert!(text.contains("@zell_bench__await_chain__chainYield.resume"), "chainYield must stay a coroutine");
+    assert!(text.contains("\"zell-plain-async\""), "no zell-plain-async attribute");
+    let dump = |p: &str| {
+        let r = Command::new(zell()).arg("check").arg("--dump-hir").arg(repo().join(p)).output().unwrap();
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        String::from_utf8_lossy(&r.stdout).into_owned()
+    };
+    let d = dump("benchmarks/await_chain/main.zl");
+    assert!(d.contains("async(plain) func #0 bench.await_chain.chain "), "{d}");
+    assert!(d.contains("async func #1 bench.await_chain.chainYield "), "{d}");
+    let d = dump("tests/spec/async2/plain_lowering_mixed.zl");
+    for (name, plain) in [("ping ", false), ("pong ", false), ("even ", true), ("odd ", true), ("step<int> ", true), ("step<string> ", false), ("steps<int> ", true), ("steps<string> ", false)] {
+        let line = d.lines().find(|l| l.contains(&format!("plain_lowering_mixed.{name}"))).unwrap_or_else(|| panic!("no {name} in {d}"));
+        assert_eq!(line.starts_with("async(plain) "), plain, "{line}");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn emit_obj_and_run_with_args() {
     ensure_runtime();

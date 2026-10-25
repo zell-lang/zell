@@ -1,0 +1,41 @@
+// test: a panic inside async functions compiled as plain functions (they never suspend, ABI.md 10.3) behaves as before: under a coroutine that suspended, the awaiter of its Task<T!> gets task.ErrPanic; in main it ends the process with exit code 2 and the backtrace of the panicking frame
+// status: passing
+// exit: 2
+// env: ZELL_NO_BACKTRACE=
+// stderr: panic: boom
+// stderr: backtrace (most recent call first):
+// stderr:   tests/spec/panics/plain_async_panic.zl:15 explode
+// stderr:   tests/spec/panics/plain_async_panic.zl:39 main
+namespace spec.panics.plain_async_panic
+
+import io
+
+async func explode(n int) int {
+    if n >= 0 {
+        panic("boom")
+    }
+    return n
+}
+
+async func level(d int) int {
+    if d == 0 {
+        return await explode(0)
+    }
+    return await level(d - 1) + 1
+}
+
+async func worker() int! {
+    await task.Yield()
+    return await level(3)
+}
+
+async func main() {
+    println("start")
+    var r = try await worker() else -1
+    println("worker:", r)
+    try await worker() catch err {
+        println("error:", errors.Is(err, task.ErrPanic))
+    }
+    var v = await level(2)
+    println("unreachable", v)
+}

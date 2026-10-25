@@ -1,0 +1,94 @@
+// test: async functions that never suspend are compiled as plain functions (ABI.md 10.3); every call shape keeps working: await f(), a kept task awaited later (twice), task.Go and task.Spawn of a function value, an async function passed as a func() Task<T> value, an interface satisfied by a method returning the task, fallible results with ?, and a recursive chain
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.plain_lowering
+
+import io
+
+// Never suspends: recursion that awaits only itself.
+async func chain(d int, x int) int {
+    if d == 0 {
+        return x & 1023
+    }
+    return await chain(d - 1, x + d) + 1
+}
+
+async func greet(name string) string {
+    return "hello " + name
+}
+
+async func half(n int) int! {
+    if n % 2 != 0 {
+        return error("odd")
+    }
+    return n / 2
+}
+
+// Awaits only never-suspending functions, with ? on a fallible one.
+async func quarter(n int) int! {
+    var h = await half(n)?
+    return await half(h)?
+}
+
+async func nothing() {
+}
+
+// Suspends: awaits a task value.
+async func twice(t Task<int>) int {
+    return await t * 2
+}
+
+interface Getter {
+    func Get(n int) Task<int>
+}
+
+struct Store {
+    base int
+
+    func Get(n int) Task<int> {
+        return add(this.base, n)
+    }
+}
+
+async func add(a int, b int) int {
+    return a + b
+}
+
+async func callValue(f func(int) Task<int>, n int) int {
+    return await f(n)
+}
+
+async func main() {
+    println(await chain(1000, 7))
+    println(await greet("zell"))
+    await nothing()
+    // a kept task of a plain function, awaited twice and passed on
+    var t = add(40, 2)
+    println(await t, await t)
+    println(await twice(t))
+    // fallible results
+    println(try await quarter(8) else -1)
+    println(try await quarter(6) else -1)
+    try await quarter(6) catch err {
+        println("error:", err.Message())
+    }
+    // an interface satisfied by a method returning the task
+    var g Getter = &Store{base: 100}
+    println(await g.Get(5))
+    // function values
+    println(await callValue(add2, 3))
+    var f = chain
+    println(await f(10, 0))
+    var s = await task.Spawn(async func() string {
+        return await greet("spawn")
+    })
+    println(s)
+    task.Go(async func() {
+        println(await chain(3, 1))
+    })
+    await task.Delay(10)
+}
+
+async func add2(n int) int {
+    return n + 2
+}

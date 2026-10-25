@@ -307,6 +307,22 @@ Expected gains are derived from the profile shares and counts above;
   word R5 extends): mutex uncontended 75 -> 37 ms (Go 36, 1.03x),
   contended unchanged (FIFO hand-off, R5).
 
+### C5. Never-suspending async functions as plain functions (codegen)
+- Change: a whole-program may-suspend analysis (`hir/suspend.rs`,
+  greatest fixpoint over direct awaits after monomorphisation) finds the
+  async functions that can never suspend; those without `defer` and
+  without values owning a `Drop` are emitted as plain functions with the
+  coroutine's ABI (ABI.md 10.3 "Never-suspending functions"): no frame,
+  task, chain node or enter/leave; the caller's context is saved only
+  when the body is not context-neutral.
+- Done (2026-10-25). Measured (medians of 3, same session, HEAD -> C5,
+  Go): await_chain sync 96 -> 11 ms (Go 10), yield 14 -> 14 (Go 7);
+  saving the context in `chain` would cost 11 -> 21 ms, hence the
+  context-neutral case. spawn_tasks, channel_pingpong, fanout_fanin,
+  mutex_contention, timers, async_io, select_many unchanged within noise.
+  Lowered: 2 of 68 async functions of `examples/` and 11 of 330 of the
+  stdlib they use (most of them do I/O).
+
 Not pursued: cheaper local pinning (measured 0); fewer biased-RC atomics in
 frames (frames are not refcounted; the hot `zell_release` is task objects,
 removed by C2/R2); a malloc-free global queue (after C1 the global queue
