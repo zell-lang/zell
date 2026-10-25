@@ -591,3 +591,12 @@ written by hand), **33** (see 67), **46** (see 78).
     Suggested decision: in a generic body the form is decided at the template
     check from the declared type (`V` a type parameter means comma-ok,
     always).
+83. ❌ **The open half of 28 grew (2026-10-25):** synchronous frames below a
+    task still skip `defer`/`Drop` on panic, and since ef15437 the same holds
+    for async functions lowered to plain functions (only those without
+    `defer` and `Drop`-owning locals are lowered, but their refcounted
+    locals and the saved context are not released on panic). Release
+    backtraces can also lose an inlined plain-async frame. Suggested
+    decision: implement unwinding of synchronous frames (landing pads or a
+    frame-local cleanup chain like the async one); it also lets the
+    never-suspending lowering drop its `defer`/`Drop` restriction.
