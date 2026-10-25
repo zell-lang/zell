@@ -1433,18 +1433,16 @@ async func demoMisc(book *OrderBook) void! {
     var minmax = map[string](int, int){}
     for o in book {
         for it in o.Items {
-            var cur, seen = minmax[it.Sku]
+            var lo, hi, seen = minmax[it.Sku]
             if !seen {
                 minmax[it.Sku] = (it.Qty, it.Qty)
                 continue
             }
-            var (lo, hi) = cur
             minmax[it.Sku] = (minInt(lo, it.Qty), maxInt(hi, it.Qty))
         }
     }
     for sku in maps.SortedKeys(minmax) {
-        var pair = minmax[sku]
-        var (lo, hi) = pair
+        var (lo, hi) = minmax[sku]
         print(" ", sku, "=", lo, "..", hi)
     }
     println()

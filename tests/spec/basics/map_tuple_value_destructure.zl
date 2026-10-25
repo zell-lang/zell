@@ -1,0 +1,34 @@
+// test: names over m[k] destructure the value when it is a tuple of as many elements; N + 1 names over an N-tuple add ok; two names over any other value type are the comma-ok lookup (DESIGN.md, comma-ok)
+// status: passing
+namespace spec.basics.map_tuple_value_destructure
+
+import io
+
+func main() {
+    var ranges = map[string](int, int){"a": (1, 2)}
+    var (lo, hi) = ranges["a"]
+    println(lo, hi)
+    var (zlo, zhi) = ranges["missing"]
+    println(zlo, zhi)
+    lo, hi = ranges["a"]
+    println(lo + hi)
+    var triples = map[string](int, int, int){"t": (1, 2, 3)}
+    var (t, ok) = triples["t"]
+    var (_, ok2) = triples["u"]
+    var (x, y, z) = t
+    println(x, y, z, ok, ok2)
+    var a, b, has = ranges["a"]
+    var (c, d, has2) = ranges["nope"]
+    println(a, b, has, c, d, has2)
+    var names = map[int](string, string){1: ("ann", "lee")}
+    var first = ""
+    var last = ""
+    var ok3 = false
+    first, last, ok3 = names[1]
+    println(first, last, ok3)
+    first, last, ok3 = names[2]
+    println(first == "", last == "", ok3)
+    var plain = map[string]int{"n": 5}
+    var (n, found) = plain["n"]
+    println(n, found)
+}

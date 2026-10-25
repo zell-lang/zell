@@ -131,7 +131,7 @@ impl<'a> Sema<'a> {
             return;
         };
         let init = self.value(e, None);
-        let init = self.comma_ok(init, v.names.len());
+        let init = self.comma_ok(init, v.names.len(), out);
         let tys = match self.tt.get(init.ty).clone() {
             Type::Tuple(ts) if ts.len() == v.names.len() => ts,
             Type::Invalid => vec![self.tt.invalid; v.names.len()],
@@ -153,15 +153,40 @@ impl<'a> Sema<'a> {
         out.push(Stmt { kind: StmtKind::LetTuple { locals, init }, span: v.span });
     }
 
-    /// A map index destructured into two values is the comma-ok lookup
-    /// (`var (v, ok) = m[k]`, `v, ok = m[k]`): `(V, bool)`, Go semantics.
-    fn comma_ok(&mut self, h: hir::Expr, n: usize) -> hir::Expr {
-        if n != 2 {
+    /// A map index destructured into names (DESIGN.md, comma-ok): when the
+    /// value type V is a tuple of as many elements as names, the names take
+    /// the value apart; two names over any other V are the comma-ok lookup
+    /// `(V, bool)` (Go semantics); N + 1 names over an N-tuple V are its
+    /// elements plus `ok` (the lookup and the value go through temporaries
+    /// pushed to `out`, the result is a flat tuple of them).
+    fn comma_ok(&mut self, h: hir::Expr, n: usize, out: &mut Vec<Stmt>) -> hir::Expr {
+        let elems = match self.tt.get(h.ty) {
+            Type::Tuple(ts) => Some(ts.clone()),
+            _ => None,
+        };
+        let flat = match &elems {
+            Some(ts) if ts.len() == n => return h,
+            Some(ts) => ts.len() + 1 == n,
+            None => false,
+        };
+        if n != 2 && !flat {
             return h;
         }
         let ExprKind::MapGet { map, key } = h.kind else { return h };
-        let ty = self.tt.tuple(vec![h.ty, self.tt.bool_]);
-        mk(ExprKind::Builtin { op: hir::Builtin::MapLookup, args: vec![*map, *key] }, ty, h.span)
+        let (vty, span) = (h.ty, h.span);
+        let ty = self.tt.tuple(vec![vty, self.tt.bool_]);
+        let lookup = mk(ExprKind::Builtin { op: hir::Builtin::MapLookup, args: vec![*map, *key] }, ty, span);
+        let Some(ts) = elems.filter(|_| flat) else { return lookup };
+        let (tv, tok) = (self.temp(vty, span), self.temp(self.tt.bool_, span));
+        out.push(Stmt { kind: StmtKind::LetTuple { locals: vec![Some(tv), Some(tok)], init: lookup }, span });
+        let parts: Vec<LocalId> = ts.iter().map(|t| self.temp(*t, span)).collect();
+        out.push(Stmt { kind: StmtKind::LetTuple { locals: parts.iter().map(|l| Some(*l)).collect(), init: mk(ExprKind::Local(tv), vty, span) }, span });
+        let mut vals: Vec<hir::Expr> = parts.iter().zip(&ts).map(|(l, t)| mk(ExprKind::Local(*l), *t, span)).collect();
+        vals.push(mk(ExprKind::Local(tok), self.tt.bool_, span));
+        let mut all = ts;
+        all.push(self.tt.bool_);
+        let fty = self.tt.tuple(all);
+        mk(ExprKind::Tuple(vals), fty, span)
     }
 
     fn local_const(&mut self, c: &ast::ConstDecl) {
@@ -794,7 +819,7 @@ impl<'a> Sema<'a> {
             }
             _ => {
                 let hv = self.value(value, None);
-                let hv = self.comma_ok(hv, places.len());
+                let hv = self.comma_ok(hv, places.len(), &mut stmts);
                 let tys = match self.tt.get(hv.ty).clone() {
                     Type::Tuple(ts) if ts.len() == places.len() => ts,
                     Type::Invalid => vec![self.tt.invalid; places.len()],

@@ -379,7 +379,7 @@ written by hand), **33** (see 67), **46** (see 78).
     instance method entries. Spec test `generics/generic_enum_methods`;
     `orElse` in `examples/kitchen_sink.zl` is now the method
     `Lookup.OrElse`.
-60. ❌ **bug:** **`var (a, b) = m[k]` with a 2-tuple value type means comma-ok,
+60. ✅ **Fixed (2026-10-25):** **bug:** **`var (a, b) = m[k]` with a 2-tuple value type means comma-ok,
     not destructuring**: with `m map[string](int, int)`, `a` is the tuple and
     `b` is the `bool`, and the error only shows up later ("(int, int) cannot
     be printed").
@@ -392,6 +392,15 @@ written by hand), **33** (see 67), **46** (see 78).
     an N-tuple. It means comma-ok only when N == 2 and V is not a 2-tuple.
     An N-tuple V with N+1 names gives the elements plus `ok`. Write this
     rule in DESIGN.md next to comma-ok.
+    **Cause and fix:** `comma_ok` turned every two-name destructuring of
+    `m[k]` into the `(V, bool)` lookup without looking at V. Now, as
+    decided: names over an N-tuple V with N names destructure the value, N +
+    1 names give the elements plus `ok` (the lookup goes through
+    temporaries), and comma-ok stays for two names over any other V; `var`
+    and assignment alike. Rule in DESIGN.md next to comma-ok. Spec test
+    `basics/map_tuple_value_destructure`; `examples/kitchen_sink.zl` now
+    writes `var lo, hi, seen = minmax[sku]` and `var (lo, hi) = minmax[sku]`
+    without a `pair` temporary.
 61. ❌ **bug (diagnostic):** **`json.Parse` without `import encoding.json`
     names an internal struct**: "Parse is not a static method of struct
     json", and for TOML "…of struct tomlAttr". `strings.`/`fmt.` work
