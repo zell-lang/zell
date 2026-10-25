@@ -613,6 +613,33 @@ TEST(channel_async_and_strings) {
 /* ---- work stealing: one worker floods its local queue (the ring
  * overflows to the global queue), the other workers drain it ---- */
 
+/* Every worker's first refcount update of an unowned object takes an owner
+ * slot (rc.c zell__rc_thread_enable) and publishes the shutdown drain hook:
+ * concurrently on all three workers here (a data race under `make tsan`
+ * while that hook was a plain store). Runs before any other job. */
+static int32_t rce_arrived, rce_done;
+
+static void rc_enable_job(void *arg) {
+    (void)arg;
+    __atomic_add_fetch(&rce_arrived, 1, __ATOMIC_ACQ_REL);
+    int64_t t0 = now_ms();
+    while (__atomic_load_n(&rce_arrived, __ATOMIC_ACQUIRE) < 3 && now_ms() - t0 < 1000) {}
+    zell_string *s = zell_string_new("rc", 2);
+    zell_retain(s);
+    zell_release(s);
+    zell_release(s);
+    __atomic_add_fetch(&rce_done, 1, __ATOMIC_RELEASE);
+}
+
+TEST(rc_enable_concurrent) {
+    for (int i = 0; i < 3; i++) zell_sched_post(rc_enable_job, NULL);
+    int64_t t0 = now_ms();
+    while (__atomic_load_n(&rce_done, __ATOMIC_ACQUIRE) < 3) {
+        assert(now_ms() - t0 < 10000);
+        sched_yield();
+    }
+}
+
 /* Channel waits link their embedded cancel hook after the wait is queued
  * (task_sync.c): the waker reads hook.w meanwhile without the owner's lock,
  * so linking must not write it (a data race under `make tsan` while
@@ -1599,6 +1626,7 @@ int main(int argc, char **argv) {
     zell_slice_release(&args);
 
     RUN(misuse_panics);   /* forks: run before worker threads are busy */
+    RUN(rc_enable_concurrent);   /* before any other job reaches a worker */
     RUN(chan_wait_hook_link);
     RUN(spawn_await);
     RUN(many_spawns_all);

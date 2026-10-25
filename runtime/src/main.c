@@ -38,7 +38,8 @@ void zell_runtime_shutdown(void) {
     if (zell__diag_shutdown_fn) zell__diag_shutdown_fn();
     g_initialized = 0;
     /* objects waiting in refcount merge queues (rc.c) */
-    if (zell__rc_drain_fn) zell__rc_drain_fn();
+    void (*drain)(void) = __atomic_load_n(&zell__rc_drain_fn, __ATOMIC_RELAXED);
+    if (drain) drain();
     zell__frame_cache_flush();   /* this thread's cached coroutine frames (mem.c) */
     zell__leak_report();
 }

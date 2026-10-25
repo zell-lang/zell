@@ -251,7 +251,8 @@ void zell__rc_thread_enable(void) {
         __atomic_store_n(&g_slot_hint, i, __ATOMIC_RELAXED);
         t_slot = i;
         zell_rc_owner = OWNER_TAG(i);
-        zell__rc_drain_fn = zell__rc_drain_all;
+        /* every enabled thread stores the same pointer: relaxed atomics */
+        if (!__atomic_load_n(&zell__rc_drain_fn, __ATOMIC_RELAXED)) __atomic_store_n(&zell__rc_drain_fn, zell__rc_drain_all, __ATOMIC_RELAXED);
         zell__plat_tls_set(g_key, (void *)(intptr_t)i);
         return;
     }
