@@ -1,0 +1,37 @@
+// test: in a generic body two names over m[k] with a type-parameter value type V are always comma-ok, also when V is instantiated as a 2-tuple (DESIGN.md, comma-ok)
+// status: passing
+namespace spec.generics2.map_comma_ok_type_param
+
+import io
+
+func Lookup<K: Comparable, V>(m map[K]V, k K) (V, bool) {
+    var (v, ok) = m[k]
+    return (v, ok)
+}
+
+func Has<K: Comparable, V>(m map[K]V, k K) bool {
+    var ok = false
+    _, ok = m[k]
+    return ok
+}
+
+func Pairs<K: Comparable, A, B>(m map[K](A, B), k K) (A, B) {
+    var (a, b) = m[k]
+    return (a, b)
+}
+
+func main() {
+    var ranges = map[string](int, int){"a": (1, 2)}
+    var (p, ok) = Lookup(ranges, "a")
+    var (lo, hi) = p
+    println(lo, hi, ok)
+    var (q, ok2) = Lookup(ranges, "zz")
+    var (zlo, zhi) = q
+    println(zlo, zhi, ok2)
+    println(Has(ranges, "a"), Has(ranges, "b"))
+    var plain = map[string]int{"n": 5}
+    var (n, ok3) = Lookup(plain, "n")
+    println(n, ok3)
+    var (x, y) = Pairs(ranges, "a")
+    println(x, y)
+}

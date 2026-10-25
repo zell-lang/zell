@@ -181,13 +181,21 @@ impl<'a> Sema<'a> {
     /// the value apart; two names over any other V are the comma-ok lookup
     /// `(V, bool)` (Go semantics); N + 1 names over an N-tuple V are its
     /// elements plus `ok` (the lookup and the value go through temporaries
-    /// pushed to `out`, the result is a flat tuple of them).
+    /// pushed to `out`, the result is a flat tuple of them). In a generic
+    /// body whose declared V is a type parameter two names are comma-ok in
+    /// every instance (decided by the abstract check, `comma_ok_param`).
     fn comma_ok(&mut self, h: hir::Expr, n: usize, out: &mut Vec<Stmt>) -> hir::Expr {
         let elems = match self.tt.get(h.ty) {
             Type::Tuple(ts) => Some(ts.clone()),
             _ => None,
         };
+        let site = (self.cur_file, h.span);
+        if matches!(self.tt.get(h.ty), Type::Param(..)) && matches!(h.kind, ExprKind::MapGet { .. }) {
+            self.gen.comma_ok_param.insert(site);
+        }
+        let param = n == 2 && self.gen.comma_ok_param.contains(&site);
         let flat = match &elems {
+            _ if param => false,
             Some(ts) if ts.len() == n => return h,
             Some(ts) => ts.len() + 1 == n,
             None => false,

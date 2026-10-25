@@ -159,6 +159,11 @@ pub(crate) struct GenState<'a> {
     /// f()` with `func f<T>() T` infers `T` from the function's result type); set by
     /// `call_res`, taken by `generic_call`.
     pub ret_hint: Option<TypeId>,
+    /// Map lookups `(v, ok) = m[k]` of generic bodies whose declared value
+    /// type is a type parameter (file, span of the index), found by the
+    /// abstract check: always comma-ok in every instance (DESIGN.md,
+    /// comma-ok), even when the parameter is instantiated as a tuple.
+    pub comma_ok_param: HashSet<(usize, crate::span::Span)>,
 }
 
 /// Saved analyser context around an instantiation.
