@@ -1,0 +1,51 @@
+// test: an interface value whose async methods suspend (a mutex, a delay) is stored in a struct field and called concurrently from 100 tasks; every call completes and the totals add up; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.iface_async_shared
+
+import io
+
+interface Store {
+    async func Add(n int) int
+    func Total() Task<int>
+}
+
+struct Locked {
+    mu  task.Mutex
+    sum int
+
+    async func Add(n int) int {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        if n % 3 == 0 {
+            await task.Delay(1)
+        }
+        this.sum += n
+        return n * 2
+    }
+
+    async func Total() int {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        return this.sum
+    }
+}
+
+struct Service {
+    store Store
+    async func Handle(n int) int { return await this.store.Add(n) }
+}
+
+async func main() {
+    var svc = new Service{store: new Locked{}}
+    var ts []Task<int> = []
+    for i in 1..101 {
+        ts = append(ts, task.Spawn(() => svc.Handle(i)))
+    }
+    var doubled = 0
+    for t in ts {
+        doubled += await t
+    }
+    println("doubled:", doubled)
+    println("total:", await svc.store.Total())
+}

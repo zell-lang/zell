@@ -61,7 +61,7 @@ impl<'a> Sema<'a> {
                 None => problems.push(format!("missing method {}", m.name)),
                 Some((f, _)) => {
                     let sig = &self.sigs[f.0 as usize];
-                    if sig.params != m.params || sig.ret != m.ret || sig.is_async {
+                    if !self.sig_satisfies(sig, &m) {
                         problems.push(self.method_mismatch(&m, sig));
                     }
                 }
@@ -70,17 +70,32 @@ impl<'a> Sema<'a> {
         problems
     }
 
+    /// Method signature `sig` implements interface method `m`: the same
+    /// parameters and result, or an `async` method whose result `R` is the
+    /// `Task<R>` that `m` returns (DESIGN.md "Интерфейсы": the vtable slot
+    /// returns the call's task).
+    pub(crate) fn sig_satisfies(&self, sig: &Sig, m: &MethodSig) -> bool {
+        if sig.params != m.params {
+            return false;
+        }
+        if sig.is_async {
+            return matches!(self.tt.get(m.ret), Type::Task(inner) if *inner == sig.ret);
+        }
+        sig.ret == m.ret
+    }
+
     /// The problem text for a method whose signature does not match the
-    /// interface method `m`: an `async` method never matches (interface
-    /// methods return `Task<T>` explicitly, DESIGN.md "Асинхронность").
+    /// interface method `m`.
     fn method_mismatch(&self, m: &MethodSig, sig: &Sig) -> String {
         let have = self.sig_string(&sig.params, sig.ret);
         let want = self.sig_string(&m.params, m.ret);
         if sig.is_async {
-            return format!(
-                "method {} is async (calling it yields a task), want {want}: interface methods are not async; implement it as a plain method returning Task<T> that calls an async function",
-                m.name
-            );
+            let hint = if sig.params == m.params && !matches!(self.tt.get(m.ret), Type::Task(_)) {
+                format!(": an async method implements an interface method returning Task<{}>", self.tn(sig.ret))
+            } else {
+                String::new()
+            };
+            return format!("method {} has type async {have}, want {want}{hint}", m.name);
         }
         format!("method {} has type {have}, want {want}", m.name)
     }
@@ -98,7 +113,7 @@ impl<'a> Sema<'a> {
                 None => problems.push(format!("missing method {}", m.name)),
                 Some(f) => {
                     let sig = &self.sigs[f.0 as usize];
-                    if sig.params != m.params || sig.ret != m.ret || sig.is_async {
+                    if !self.sig_satisfies(sig, &m) {
                         problems.push(self.method_mismatch(&m, sig));
                     }
                 }

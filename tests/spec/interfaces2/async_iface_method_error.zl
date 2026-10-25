@@ -1,12 +1,19 @@
-// error: interface method Get cannot be async: declare it as `func Get(int) Task<int!>`
+// error: *Store does not implement Getter: method Get has type func(int) int!, want func(int) Task<int!>
 // status: passing
 namespace spec.interfaces2.async_iface_method_error
 
-// DESIGN.md "Асинхронность": interface methods are never `async`; the
-// asynchronous shape is spelled `func Get(n int) Task<int!>`.
+// DESIGN.md "Интерфейсы": `async func Get(n int) int!` in an interface means
+// `func Get(n int) Task<int!>`; a plain method returning `int!` does not
+// implement it.
 interface Getter {
     async func Get(n int) int!
 }
 
+struct Store {
+    func Get(n int) int! { return n }
+}
+
 func main() {
+    var g Getter = &Store{}
+    _ = g
 }

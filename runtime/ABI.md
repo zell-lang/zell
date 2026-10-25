@@ -1734,7 +1734,9 @@ Rules the compiler must respect:
   `task.All`, a `func() Task<T>` value whose body is async) goes through
   `zell_task_completed` when `res.task` is NULL, so a `Task<T>` seen by Zell
   code is always a real task. An async function used as a value is called
-  through a thunk that does this.
+  through a thunk that does this. So is an `async` method through an interface
+  (its vtable slot, `(data, args) -> Task<T>`, passes a NULL awaiter; DESIGN.md
+  "Интерфейсы"): an `await` of an interface call awaits that task.
 - `await f()?` (`T!` result): read `{value, err}` from the result slot, retain
   `err` (and the value, if needed), release the task, then apply the usual `?`
   lowering; on the synchronous path `{value, err}` comes moved from

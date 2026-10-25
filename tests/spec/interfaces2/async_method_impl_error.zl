@@ -1,4 +1,4 @@
-// error: *Store does not implement Getter: method Get is async (calling it yields a task), want func(int) Task<int!>
+// error: *Store does not implement Getter: method Get has type async func(int) string!, want func(int) Task<int!>
 // status: passing
 namespace spec.interfaces2.async_method_impl_error
 
@@ -6,10 +6,10 @@ interface Getter {
     func Get(n int) Task<int!>
 }
 
-// An `async` method does not satisfy the interface: implement `Get` as a
-// plain method returning the task of an async function.
+// An `async` method implements `Get` only if its result is the task's:
+// here it yields Task<string!>, not Task<int!>.
 struct Store {
-    async func Get(n int) int! { return n }
+    async func Get(n int) string! { return "x" }
 }
 
 func main() {

@@ -1,0 +1,40 @@
+// test: an interface call of an async method waiting on a channel is cancelled with its task: task.Any cancels the loser, the Recv inside the method wakes with task.ErrCancelled, the method's defer runs and the awaiter of the interface call's Task<T!> gets the error; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.iface_async_cancel
+
+import io
+
+interface Source {
+    async func Take() int!
+}
+
+struct Chan {
+    ch task.Channel<int>
+
+    async func Take() int! {
+        defer println("take done")
+        var v = await this.ch.Recv()?
+        return v
+    }
+}
+
+async func quick() int! {
+    await task.Delay(5)
+    return 7
+}
+
+async func main() {
+    var s Source = new Chan{ch: task.Channel<int>(0)}
+    var slow = s.Take()
+    var first = try await task.Any(slow, quick()) catch err {
+        println("any failed:", err.Message())
+        return
+    }
+    println("winner:", first)
+    var r = try await slow catch err {
+        println("cancelled:", errors.Is(err, task.ErrCancelled))
+        return
+    }
+    println("unreachable", r)
+}

@@ -1,0 +1,12 @@
+deferred in d
+ok: 42
+deferred in d
+caught: panic: boom d
+is panic: true
+message: boom d
+deferred in d
+caught: panic: boom d
+is panic: true
+message: boom d
+deferred in d
+kept: boom d

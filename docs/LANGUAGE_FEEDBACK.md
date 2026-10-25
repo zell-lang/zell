@@ -19,7 +19,7 @@ they are the next inputs for DESIGN.md / stdlib / `zell test` work.
    is special-cased), so `@Conf(enum: "a,b")` had to become `oneOf:`.
 4. 📘 **Lower-case attribute structs are private to their package**: user
    libraries must capitalise (`@zconf.Conf`), while std uses `@json`, `@cli.flag`.
-5. ❌ **Still open (verified 2026-10-25; the diagnostic now explains the wrapper):** **`async func` in an interface is accepted but never satisfied**, with a
+5. ✅ **Fixed (2026-10-25):** `async func M() R` in an interface is sugar for `func M() Task<R>`, and an `async` method implements either form (DESIGN.md «Интерфейсы», «Асинхронные методы»; the vtable slot is a thunk returning the call's task). Spec: `async2/iface_async_*`, `panics/iface_async_panic_*`, `interfaces2/async_*_error`. **`async func` in an interface is accepted but never satisfied**, with a
    contradictory message ("method Get has type func(int) int!, want func(int)
    int!"); workaround: `func X() Task<T!>` delegating to a private async method.
 6. ✅ **Fixed (verified 2026-10-25):** **`defer this.mu.Unlock()` on a value `task.Mutex` field is rejected**
@@ -173,7 +173,7 @@ documentation's Examples section, tested by
 31. ✅ **Fixed (2026-10-25):** cause: the test collector skipped files that did not parse; `zell test` now prints their diagnostics and exits 1 (`compiler/src/testrun.rs`). **A syntax error in a `_test.zl` file prints only "no tests found in
     ./src"**: the runner skips files that do not parse, without the
     diagnostic. Workaround: `zell check` the file to see the error.
-32. ❌ **An `async` method does not satisfy an interface method returning
+32. ✅ **Fixed (2026-10-25):** see item 5; the wrappers are gone from `bookshelf-api` (`MemoryRepo`), `testing-guide` (`Memory`, `Fake`), `examples/kitchen_sink.zl` and `examples/s3.zl`. **An `async` method does not satisfy an interface method returning
     `Task<T>`** (see item 5): every implementation is a plain method that
     returns the task of a private `async` function (`MemoryRepo` in
     `bookshelf-api`, `Memory` in `testing-guide`). Worth fixing before the
@@ -615,3 +615,16 @@ written by hand), **33** (see 67), **46** (see 78).
     decision: implement unwinding of synchronous frames (landing pads or a
     frame-local cleanup chain like the async one); it also lets the
     never-suspending lowering drop its `defer`/`Drop` restriction.
+84. ❌ **Follow-up of 5/32 (2026-10-25): an awaited interface call of an
+    `async` method is not frame-linked.** `await r.M()` goes through the
+    vtable thunk, which calls the ramp with a NULL awaiter: a call that
+    suspends makes a task (as `t = f()` would), and one that completes
+    synchronously allocates a completed task (`zell_task_completed`)
+    just to be awaited. A direct call costs neither (ABI.md 10.3, C2).
+    Suggested: a second slot per async method, `(data, args..., ptr res)`
+    (the ramp itself), used by `await iface.M()` with the awaiter's frame
+    as in `await_linked`; the `Task<T>` slot stays for kept tasks.
+85. ❌ **Lint L0007 ignores enum methods used only through an interface**
+    (found 2026-10-25): a lower-case enum method that implements an
+    interface method reports `function f is never used`; struct methods
+    are fine.

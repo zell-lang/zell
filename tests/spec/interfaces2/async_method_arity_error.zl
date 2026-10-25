@@ -1,0 +1,16 @@
+// error: *Store does not implement Getter: method Get has type async func(int, int) int!, want func(int) Task<int!>
+// status: passing
+namespace spec.interfaces2.async_method_arity_error
+
+interface Getter {
+    async func Get(n int) int!
+}
+
+struct Store {
+    async func Get(n int, m int) int! { return n + m }
+}
+
+func main() {
+    var g Getter = &Store{}
+    _ = g
+}

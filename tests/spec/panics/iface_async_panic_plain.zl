@@ -1,0 +1,30 @@
+// test: a panic inside an async method called through an interface method returning Task<T> (no `!`) re-panics in the awaiting task, as for a direct call; here main, so the process ends with exit code 2
+// status: passing
+// exit: 2
+// stderr: panic: panic in awaited task: boom
+namespace spec.panics.iface_async_panic_plain
+
+import io
+
+interface Counter {
+    func Next() Task<int>
+}
+
+struct C {
+    n int
+    async func Next() int {
+        await task.Yield()
+        this.n += 1
+        if this.n > 1 {
+            panic("boom")
+        }
+        return this.n
+    }
+}
+
+async func main() {
+    var c Counter = new C{}
+    println("first:", await c.Next())
+    var v = await c.Next()
+    println("unreachable", v)
+}

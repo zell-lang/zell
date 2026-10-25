@@ -1,0 +1,93 @@
+// test: an async method implements an interface method returning Task<T> (or Task<T!>), and `async func M() R` in an interface is the same as `func M() Task<R>`: suspending and never-suspending bodies, a T! result and its error path, a kept task awaited later (twice), a pointer receiver, an enum method and an interface default method calling the async one (DESIGN.md "Интерфейсы")
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.iface_async_method
+
+import io
+import strconv
+
+interface Repo {
+    func Get(id int) Task<string!>
+    async func Count() int
+    func Name() string
+    func Describe(id int) Task<string> { return this.Detail(id) }
+    func Detail(id int) Task<string>
+}
+
+struct Memory {
+    items []string
+    hits  int
+
+    // Never suspends: the vtable slot returns a completed task.
+    async func Get(id int) string! {
+        this.hits += 1
+        if id < 0 || id >= len(this.items) {
+            return error("no item " + strconv.Itoa(id))
+        }
+        return this.items[id]
+    }
+
+    // Suspends before it returns.
+    async func Count() int {
+        await task.Yield()
+        return len(this.items)
+    }
+
+    func Name() string { return "memory" }
+
+    async func Detail(id int) string {
+        await task.Delay(1)
+        var s = try await this.Get(id) catch err { return "?" + err.Message() }
+        return "item " + s
+    }
+}
+
+enum Mode {
+    Fast
+    Slow
+
+    async func Get(id int) string! {
+        if this == Mode.Slow {
+            await task.Delay(1)
+        }
+        if id == 0 {
+            return error("zero")
+        }
+        return "mode " + strconv.Itoa(id)
+    }
+    async func Count() int { return 2 }
+    func Name() string { return "mode" }
+    async func Detail(id int) string { return "mode item " + strconv.Itoa(id) }
+}
+
+async func show(r Repo) {
+    var a = try await r.Get(1) catch err {
+        println(r.Name(), "error:", err.Message())
+        return
+    }
+    println(r.Name(), "get:", a)
+    try await r.Get(7) catch err { println(r.Name(), "error:", err.Message()) }
+    var t = r.Count()
+    println(r.Name(), "count:", await t, await t)
+    println(r.Name(), await r.Describe(0), await r.Describe(9))
+}
+
+async func main() {
+    var m = new Memory{items: ["a", "b", "c"]}
+    await show(m)
+    println("hits:", m.hits)
+    await show(Mode.Fast)
+    await show(Mode.Slow)
+    var rs []Repo = [m, Mode.Fast, Mode.Slow]
+    var ts []Task<string!> = []
+    for r in rs {
+        ts = append(ts, r.Get(1))
+    }
+    for t in ts {
+        var s = try await t catch err {
+            println("kept error:", err.Message())
+            continue
+        }
+        println("kept:", s)
+    }
+}

@@ -984,9 +984,8 @@ func resolveRef(u URL, location string) string {
 
 // ---- handlers ---------------------------------------------------------------
 
-// Handler serves requests. Handler methods are not async (interfaces
-// cannot declare async methods); they return the task of an async call,
-// e.g. `func Serve(req, res) Task<void!> { return this.serve(req, res) }`.
+// Handler serves requests. An async method implements it:
+// `async func Serve(req, res) void! { ... }`.
 interface Handler {
     // Serve handles one request.
     func Serve(req *net.http.Request, res *net.http.Response) Task<void!>

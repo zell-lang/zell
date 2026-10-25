@@ -1,0 +1,48 @@
+// test: a panic inside an async method called through an interface method returning Task<T!> behaves as for a direct call: the awaiter gets an error wrapping task.ErrPanic, the method's defers run, both when the method suspended first and when it panics before any suspension inside a task that suspended; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.iface_async_panic_fallible
+
+import io
+
+interface Loader {
+    async func Load(n int) int!
+}
+
+struct Disk {
+    name string
+
+    async func Load(n int) int! {
+        defer println("deferred in", this.name)
+        if n > 1 {
+            await task.Yield()
+        }
+        if n > 0 {
+            panic("boom " + this.name)
+        }
+        return 42
+    }
+}
+
+// Has a task of its own (it suspends first), so a panic before the
+// method's first suspension ends this task, not main.
+async func viaTask(l Loader, n int) int! {
+    await task.Yield()
+    return await l.Load(n)?
+}
+
+async func main() {
+    var l Loader = new Disk{name: "d"}
+    println("ok:", try await l.Load(0) else -1)
+    for n in [2, 1] {
+        try await viaTask(l, n) catch err {
+            println("caught:", err.Message())
+            println("is panic:", errors.Is(err, task.ErrPanic))
+            println("message:", task.PanicMessage(err))
+        }
+    }
+    var t = l.Load(2)
+    try await t catch err {
+        println("kept:", task.PanicMessage(err))
+    }
+}

@@ -98,8 +98,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let is_enum = matches!(self.ty(dyn_ty), Type::Enum(_));
         for m in &methods {
             let own = if is_enum { self.enum_method(sid, &m.name).is_some() } else { self.resolve_method(sid, &m.name).is_some() };
+            let fid = if is_enum { self.enum_method(sid, &m.name) } else { self.resolve_method(sid, &m.name).map(|r| r.0) };
             let f = match (own, m.default) {
                 (false, Some(def)) => self.default_thunk(dyn_ty, sid, def)?,
+                _ if fid.is_some_and(|f| self.prog.funcs[f.0 as usize].is_async) => self.async_entry(sid, &m.name, is_enum)?,
                 _ if is_enum => self.enum_entry(sid, &m.name)?,
                 _ => self.method_entry(sid, &m.name)?,
             };
@@ -107,6 +109,60 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         g.set_initializer(&st.const_named_struct(&vals));
         Ok(g.as_pointer_value())
+    }
+
+    /// A method result `ret` (`is_async`: of an `async` method) implements
+    /// an interface method returning `want`: equal, or `want` is `Task<ret>`.
+    fn ret_satisfies(&self, is_async: bool, ret: TypeId, want: TypeId) -> bool {
+        if is_async {
+            return matches!(self.ty(want), Type::Task(inner) if *inner == ret);
+        }
+        ret == want
+    }
+
+    /// The vtable slot `(ptr data, args...) -> Task<R>` of `async` method
+    /// `name` of struct (or enum) `sid`, for an interface method returning
+    /// `Task<R>`: it calls the method's ramp with a local result slot (no
+    /// awaiter) and returns its task, or a completed task holding the
+    /// result when the call never suspended (ABI.md 10.3, the same as a
+    /// kept `Task<T>` of a direct call).
+    fn async_entry(&mut self, sid: u32, name: &str, is_enum: bool) -> R<FunctionValue<'ctx>> {
+        let key = (sid, name.to_string(), is_enum);
+        if let Some(f) = self.async_thunks.get(&key) {
+            return Ok(*f);
+        }
+        let fid = if is_enum { self.enum_method(sid, name) } else { self.resolve_method(sid, name).map(|r| r.0) };
+        let Some(fid) = fid else { return unsupported(format!("async method {name} not found")) };
+        // The ramp `(this, params..., ptr res)`: for a promoted struct method
+        // the receiver-adjusting thunk of the same shape.
+        let target = if is_enum { self.funcs[fid.0 as usize] } else { self.method_entry(sid, name)? };
+        let f = &self.prog.funcs[fid.0 as usize];
+        let ret = f.ret;
+        let ety = f.locals[f.params[0].0 as usize].ty;
+        let mut ps: Vec<BasicMetadataTypeEnum> = vec![self.ptr_ty().into()];
+        for p in f.params.iter().skip(1) {
+            let t = f.locals[p.0 as usize].ty;
+            ps.push(self.llty(t).into());
+        }
+        let fty = self.ptr_ty().fn_type(&ps, false);
+        let n = self.fresh();
+        let thunk = self.module.add_function(&format!("async.thunk.{n}"), fty, Some(Linkage::Internal));
+        self.async_thunks.insert(key, thunk);
+        self.with_helper(thunk, |cg| {
+            let data = thunk.get_nth_param(0).unwrap().into_pointer_value();
+            let recv: BasicMetadataValueEnum = if is_enum {
+                let lt = cg.llty(ety);
+                cg.b.build_load(lt, data, "").unwrap().into()
+            } else {
+                data.into()
+            };
+            let mut args: Vec<BasicMetadataValueEnum> = vec![recv];
+            args.extend(thunk.get_params().iter().skip(1).map(|p| BasicMetadataValueEnum::from(*p)));
+            let t = cg.call_async_thunk(target, ret, args);
+            cg.b.build_return(Some(&t)).unwrap();
+            Ok(())
+        })?;
+        Ok(thunk)
     }
 
     /// Method `name` of enum `eid`.
@@ -245,7 +301,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             Some(fid) => {
                 let f = &self.prog.funcs[fid.0 as usize];
                 let ps: Vec<TypeId> = f.params.iter().skip(1).map(|l| f.locals[l.0 as usize].ty).collect();
-                ps == m.params && f.ret == m.ret && !f.is_async
+                ps == m.params && self.ret_satisfies(f.is_async, f.ret, m.ret)
             }
             None => m.default.is_some(),
         })
@@ -262,7 +318,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             Some((fid, _)) => {
                 let f = &self.prog.funcs[fid.0 as usize];
                 let ps: Vec<TypeId> = f.params.iter().skip(1).map(|l| f.locals[l.0 as usize].ty).collect();
-                ps == m.params && f.ret == m.ret && !f.is_async
+                ps == m.params && self.ret_satisfies(f.is_async, f.ret, m.ret)
             }
             None => m.default.is_some(),
         })

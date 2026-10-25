@@ -60,6 +60,10 @@
 //! `(data, args) -> F({data, vtable of the type for the declaring
 //! interface}, args)`. Enum values are boxed like struct values; their slots
 //! are thunks loading the enum from `data` (enum methods take the value).
+//! The slot of an `async` method (for an interface method returning
+//! `Task<T>`) is a thunk `(data, args) -> ptr task` calling the ramp with a
+//! local `{task, value}` slot and a NULL awaiter: `res.task`, or
+//! `zell_task_completed` over `res.value` when the call never suspended.
 //! `case I x:` on an `any` looks the vtable up with `iface.conv.N(typeid)`
 //! (NULL = no match) and unwraps a stored `*S` when `boxed = 0`; on an
 //! `error` the same lookup takes the user type at +32 (every struct boxed
@@ -182,7 +186,8 @@
 //! Callers awaiting a direct call outside a coroutine read `res.value` when
 //! `res.task` is NULL; callers keeping the task, and thunks of async
 //! functions used as values, pass a NULL awaiter and materialise a done
-//! task with `zell_task_completed`. The C `main` of an
+//! task with `zell_task_completed` (so do the vtable slots of async
+//! methods). The C `main` of an
 //! `async func main` hands the ramp and its `main.res` slot to
 //! `zell_task_run_main(ramp, res)` (ABI.md §10.2, §11), which runs the
 //! ramp as a job on a worker and returns once it did; a non-NULL
@@ -628,6 +633,9 @@ pub struct CodeGen<'a, 'ctx> {
     pub(crate) leak_fields_fn: Option<FunctionValue<'ctx>>,
     pub(crate) thunks: HashMap<FuncId, FunctionValue<'ctx>>,
     pub(crate) method_thunks: HashMap<(u32, String), FunctionValue<'ctx>>,
+    /// Vtable slots of `async` methods (struct or enum id, name, is enum):
+    /// `(data, args...) -> Task<R>` over the ramp (`iface::async_entry`).
+    pub(crate) async_thunks: HashMap<(u32, String, bool), FunctionValue<'ctx>>,
     /// Vtable slots of enum methods (they take the enum value, not a pointer).
     pub(crate) enum_thunks: HashMap<(u32, String), FunctionValue<'ctx>>,
     pub(crate) msg_thunks: HashMap<u32, FunctionValue<'ctx>>,
@@ -757,6 +765,7 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
         leak_fields_fn: None,
         thunks: HashMap::new(),
         method_thunks: HashMap::new(),
+        async_thunks: HashMap::new(),
         enum_thunks: HashMap::new(),
         msg_thunks: HashMap::new(),
         tostr_fns: HashMap::new(),

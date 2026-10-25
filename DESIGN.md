@@ -470,6 +470,45 @@ func Describe(s Shape) {
   оператор: `return` после него не нужен; если во время выполнения не
   совпал ни один `case` (например, nil-интерфейс), программа паникует.
 
+- **Асинхронные методы.** `async`-метод `async func M(args) R` реализует
+  метод интерфейса `func M(args) Task<R>`, а `async func M(args) R!` —
+  `func M(args) Task<R!>`: вызов через интерфейс даёт ту же задачу, что
+  прямой вызов метода. В самом интерфейсе `async func M(args) R` (без
+  тела) — сокращение ровно для `func M(args) Task<R>`: оба написания
+  взаимозаменяемы, их реализуют и `async`-метод, и обычный метод,
+  возвращающий `Task<R>`, а у вызова тип `Task<R>` (`await r.M()`).
+  `async`-метод не реализует метод интерфейса, возвращающий не `Task`
+  (`func M() R`): ошибка `method M has type async func() R, want func()
+  R: an async method implements an interface method returning Task<R>`.
+  Методы по умолчанию `async` не бывают (см. выше).
+
+  ```zell
+  interface Repo {
+      async func Get(id int) string!     // = func Get(id int) Task<string!>
+      func Count() Task<int>
+  }
+
+  struct Memory {
+      items []string
+      async func Get(id int) string! { ... }
+      async func Count() int { return len(this.items) }
+  }
+  ```
+
+  Поведение — как у прямого вызова, сохранённого в `Task<R>`: тело
+  начинает работать синхронно в задаче вызывающего до первой
+  приостановки; паника в нём — `task.ErrPanic` у ожидающего `Task<R!>` и
+  повторная паника у ожидающего `Task<R>`; отмена — через задачу вызова
+  (или текущую задачу вызывающего до первой приостановки).
+  *Реализация:* слот vtable такого метода — переходник `(data, args) ->
+  Task<R>`, который вызывает рампу метода с локальным слотом результата
+  (без ожидающего кадра) и возвращает `res.task`, а если вызов ни разу не
+  приостановился — завершённую задачу из `res.value`
+  (`zell_task_completed`, ABI.md 10.3). Вызов через интерфейс поэтому
+  стоит косвенного вызова плюс, при синхронном завершении, одной
+  завершённой задачи; связанного ожидания (ABI.md 10.3, «Frame-linked
+  await») через интерфейс пока нет.
+
 Наследования классов нет; встраивание структур — композиция без
 виртуальной диспетчеризации. Как выражать паттерны: `docs/PATTERNS.md`.
 
@@ -1308,11 +1347,10 @@ async func main() {
   `Send` просыпаются сразу, но ошибку вернуть не могут — проверка
   `task.CheckCancelled()?`; `Mutex.Lock` не отменяется; `await` чужой задачи
   ждёт её завершения (runtime/ABI.md §10.11).
-- Методы интерфейсов не бывают `async`: асинхронный метод интерфейса
-  объявляется как возвращающий `Task<T>` и реализуется вызовом `async`
-  функции (так устроен `http.Handler`). `async func X()` в интерфейсе —
-  ошибка компиляции с подсказкой `func X() Task<T>`; `async`-метод
-  структуры интерфейс не реализует (его вызов даёт задачу, а не `T`).
+- Асинхронный метод интерфейса — `func X() Task<T>` или сокращение
+  `async func X() T`; его реализует `async`-метод `async func X() T`
+  (или обычный метод, возвращающий `Task<T>`), см. «Интерфейсы»,
+  «Асинхронные методы».
 - Асинхронные лямбды: `async func(n int) int { ... }` и
   `async (n int) => ...`; вызов возвращает `Task<T>`.
 - Реализация в LLVM: через LLVM coroutines (`llvm.coro.*`), каждая `async`
@@ -2464,7 +2502,7 @@ brotli, bzip2, lzw.
     тот же `Handler`. Ошибка обработчика — 500 (`ErrAbortHandler` — разрыв
     без ответа).
     `interface Handler { func Serve(req *Request, res *Response) Task<void!> }`
-    (метод интерфейса не может быть `async`, поэтому он возвращает задачу);
+    (реализуется `async func Serve(req, res) void!`, см. «Интерфейсы»);
     `HandlerFunc{F}`/`Func(f)`; `NewRouter()` с `Get/Post/Put/Delete/Patch/
     Options/Any/Handle(pattern, handler)`, `Mount(pattern, Handler)`,
     параметры пути `{id}` и `*` в конце, HEAD через GET-маршруты, 404/405

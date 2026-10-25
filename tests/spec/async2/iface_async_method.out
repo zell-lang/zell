@@ -1,0 +1,14 @@
+memory get: b
+memory error: no item 7
+memory count: 3 3
+memory item a ?no item 9
+hits: 4
+mode get: mode 1
+mode count: 2 2
+mode mode item 0 mode item 9
+mode get: mode 1
+mode count: 2 2
+mode mode item 0 mode item 9
+kept: b
+kept: mode 1
+kept: mode 1
