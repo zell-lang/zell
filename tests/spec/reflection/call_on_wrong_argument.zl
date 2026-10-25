@@ -1,0 +1,24 @@
+// error: cannot use string as int in argument 1 of Counter.Add
+// status: passing
+namespace spec.reflection.call_on_wrong_argument
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct svc {}
+
+@svc
+struct Counter {
+    func Add(n int) int {
+        return n + 1
+    }
+}
+
+func main() {
+    var c = Counter{}
+    for t in reflect.TypesWith<svc>() {
+        for m in t.Methods {
+            println(m.CallOn(&c, "one"))
+        }
+    }
+}

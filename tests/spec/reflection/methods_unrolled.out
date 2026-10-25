@@ -1,0 +1,8 @@
+Greeter.Hello static: false async: false params: 1
+Greeter.Twice static: false async: false params: 1
+Greeter.Later static: false async: true params: 1
+Greeter.Make static: true async: false params: 0
+Greeter.plain static: false async: false params: 0
+hi -> hello, Ann
+twice -> 42
+later -> later, Bob

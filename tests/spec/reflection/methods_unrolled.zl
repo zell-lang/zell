@@ -1,0 +1,65 @@
+// test: for m in t.Methods inside an unrolled TypesWith loop is unrolled: m.Name, m.Static, m.IsAsync, len(m.Params), m.Attribute<A>() are constants and m.CallOn calls the method directly
+// status: passing
+namespace spec.reflection.methods_unrolled
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct service {}
+
+@attribute(targets: [reflect.Target.Func])
+struct command {
+    name string
+}
+
+@service
+struct Greeter {
+    greeting string
+
+    @command(name: "hi")
+    func Hello(who string) string {
+        return this.greeting + ", " + who
+    }
+
+    @command(name: "twice")
+    func Twice(n int) int {
+        return 2 * n
+    }
+
+    @command(name: "later")
+    async func Later(who string) string {
+        await task.Delay(1)
+        return "later, " + who
+    }
+
+    static func Make() Greeter {
+        return Greeter{greeting: "hello"}
+    }
+
+    func plain() {}
+}
+
+async func main() {
+    for t in reflect.TypesWith<service>() {
+        var g t
+        for m in t.Methods {
+            println(t.Name + "." + m.Name, "static:", m.Static, "async:", m.IsAsync, "params:", len(m.Params))
+            if m.Static && len(m.Params) == 0 {
+                g = m.CallOn()
+            }
+        }
+        for m in t.Methods {
+            var c = m.Attribute<command>()
+            if c == nil {
+                continue
+            }
+            if c.name == "hi" {
+                println(c.name, "->", m.CallOn(&g, "Ann"))
+            } else if c.name == "twice" {
+                println(c.name, "->", m.CallOn(g, 21))
+            } else if m.IsAsync {
+                println(c.name, "->", await m.CallOn(&g, "Bob"))
+            }
+        }
+    }
+}

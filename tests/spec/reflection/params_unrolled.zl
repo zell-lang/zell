@@ -1,0 +1,51 @@
+// test: for p in m.Params is unrolled: p.Name, p.Index, p.Attribute<A>() are constants; var args m.Args, p.Set(&args, v), p.Get(args) and m.Apply(recv, args) bind and call with static types
+// status: passing
+namespace spec.reflection.params_unrolled
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct api {}
+
+@attribute(targets: [reflect.Target.Param])
+struct def {
+    value string
+}
+
+@api
+struct Calc {
+    func Scale(@def(value: "3") x int, @def(value: "2.5") factor float, label string) string {
+        return fmt.Format("{0} {1}", label, float(x) * factor)
+    }
+
+    static func Join(@def(value: "a") a string, @def(value: "b") b string) string {
+        return a + "+" + b
+    }
+}
+
+func main() {
+    var c = Calc{}
+    for t in reflect.TypesWith<api>() {
+        for m in t.Methods {
+            var args m.Args
+            for p in m.Params {
+                var d = p.Attribute<def>()
+                if d == nil {
+                    p.Set(&args, p.Name)
+                } else if p.Type.Kind == reflect.Kind.Int {
+                    p.Set(&args, try strconv.Atoi(d.value) else 0)
+                } else if p.Type.Kind == reflect.Kind.Float {
+                    p.Set(&args, try strconv.ParseFloat(d.value) else 0.0)
+                } else {
+                    p.Set(&args, d.value)
+                }
+                println(" ", m.Name, p.Index, p.Name, p.Type.Name, "=", p.Get(args))
+            }
+            if m.Static {
+                println(m.Name, "->", m.Apply(args))
+            } else {
+                println(m.Name, "->", m.Apply(&c, args))
+            }
+        }
+    }
+}
