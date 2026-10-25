@@ -1,0 +1,21 @@
+// test: a nil dereference backtrace starts at the Zell frame: the runtime's zell_panic* entry points are hidden (DESIGN.md "Паника")
+// status: passing
+// exit: 2
+// env: ZELL_NO_BACKTRACE=
+// stderr: panic: runtime error: invalid memory address or nil pointer dereference
+// stderr: backtrace (most recent call first):
+// stderr: tests/spec/panics/nil_backtrace_frames.zl:20 main
+// no-stderr: zell_panic
+namespace spec.panics.nil_backtrace_frames
+
+import io
+
+struct C {
+    n int
+}
+
+func main() {
+    println("before")
+    var p *C = nil
+    println(p.n)
+}

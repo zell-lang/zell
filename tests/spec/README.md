@@ -78,6 +78,7 @@ the first `.zl` file by name; the other files repeat them for readability.
 | 3+ | `// args: a b` | program arguments, split on whitespace |
 | 3+ | `// run-flags: --leak-check` | run with `zell run <path> <flags> -- <args>` instead of build + exec |
 | 3+ | `// stderr: <text>` | stderr must contain `<text>`; otherwise stderr is not checked |
+| 3+ | `// no-stderr: <text>` | stderr must not contain `<text>`; repeatable |
 | 3+ | `// warning: <text>` | the build's stderr must contain `<text>` (e.g. a W0001 warning); repeatable |
 | 3+ | `// no-warning: <text>` | the build's stderr must not contain `<text>`; repeatable |
 | 3+ | `// env: K=V` | environment variable of the program run (e.g. `ZELL_CYCLES=manual`); repeatable |

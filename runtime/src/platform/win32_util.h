@@ -60,4 +60,12 @@ ZELL_PLAT_HIDDEN void zell__w32_wsapoll_remove(zell__w32_wsapoll *p, int64_t fd)
 ZELL_PLAT_HIDDEN int zell__w32_wsapoll_wait(zell__w32_wsapoll *p, zell__plat_event *evs, int max, int64_t timeout_ms);
 ZELL_PLAT_HIDDEN void zell__w32_wsapoll_wake(zell__w32_wsapoll *p);
 
+/* Walks the stack from `ctx` (a CONTEXT, unwound in place) while it stays
+ * in [lo, hi): the context's PC first, then return addresses; returns the
+ * number stored (prof_win32.c; the CPU sampler and the fault handler). */
+ZELL_PLAT_HIDDEN int zell__w32_walk(void *ctx, uintptr_t lo, uintptr_t hi, uintptr_t *pcs, int max);
+/* Reserves stack for the fault handler of a stack overflow on this thread
+ * (win32.c; called from zell__plat_thread_stack_init). */
+ZELL_PLAT_HIDDEN void zell__w32_fatal_thread_init(void);
+
 #endif

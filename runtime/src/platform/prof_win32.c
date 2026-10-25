@@ -42,6 +42,7 @@ static _Thread_local uintptr_t __attribute__((unused)) t_stack_lo;
 static _Thread_local uintptr_t t_stack_hi;
 
 void zell__plat_thread_stack_init(void) {
+    zell__w32_fatal_thread_init();
     if (t_stack_hi) return;
     ULONG_PTR lo = 0, hi = 0;
     GetCurrentThreadStackLimits(&lo, &hi);
@@ -306,7 +307,13 @@ static int bt_format(uintptr_t pc, char *line, size_t cap) {
         }
     }
     int k;
-    if (!getenv("ZELL_NO_SYMBOLS") && zell__plat_symbolize(pc - 1, sym, sizeof sym, &start) && start <= pc)
+    bool named = !getenv("ZELL_NO_SYMBOLS") && zell__plat_symbolize(pc - 1, sym, sizeof sym, &start) && start <= pc;
+    /* The runtime's panic entry points are not the program's frames. */
+    if (named && (strncmp(sym, "zell_panic", 10) == 0 || strncmp(sym, "zell__panic", 11) == 0)) {
+        free(u);
+        return 0;
+    }
+    if (named)
         k = snprintf(line, cap, "%s(%s+0x%llx) [0x%llx]\n", name, sym, (unsigned long long)(pc - start), (unsigned long long)pc);
     else
         k = snprintf(line, cap, "%s(+0x%llx) [0x%llx]\n", name, (unsigned long long)(pc - (uintptr_t)mod), (unsigned long long)pc);
@@ -339,6 +346,55 @@ void zell__plat_backtrace_buf(char *buf, size_t cap, int skip) {
         len += (size_t)k;
         buf[len] = 0;
     }
+}
+
+void zell__plat_backtrace_pcs(int fd, const uintptr_t *pcs, int n) {
+    for (int i = 0; i < n; i++) {
+        char line[800];
+        int k = bt_format(pcs[i], line, sizeof line);
+        if (k > 0) zell__plat_write_all(fd, line, k < (int)sizeof line ? k : (int)sizeof line - 1);
+    }
+}
+
+int zell__w32_walk(void *ctx_, uintptr_t lo, uintptr_t hi, uintptr_t *pcs, int max) {
+    CONTEXT *ctx = ctx_;
+    int n = 0;
+    if (max <= 0) return 0;
+#if defined(_M_X64) || defined(__x86_64__)
+    pcs[n++] = (uintptr_t)ctx->Rip;
+    while (n < max) {
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx->Rip, &image, NULL);
+        if (fe) {
+            PVOID handler_data = NULL;
+            DWORD64 frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx->Rip, fe, ctx, &handler_data, &frame, NULL);
+        } else {
+            /* a leaf function: the return address is at rsp */
+            if (ctx->Rsp < lo || ctx->Rsp + 8 > hi) break;
+            ctx->Rip = *(const DWORD64 *)(uintptr_t)ctx->Rsp;
+            ctx->Rsp += 8;
+        }
+        if (!ctx->Rip || ctx->Rsp < lo || ctx->Rsp >= hi) break;
+        pcs[n++] = (uintptr_t)ctx->Rip;
+    }
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    pcs[n++] = (uintptr_t)ctx->Pc;
+    while (n < max) {
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx->Pc, &image, NULL);
+        if (!fe) break;
+        PVOID handler_data = NULL;
+        DWORD64 frame = 0;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx->Pc, fe, ctx, &handler_data, &frame, NULL);
+        if (!ctx->Pc || ctx->Sp < lo || ctx->Sp >= hi) break;
+        pcs[n++] = (uintptr_t)ctx->Pc;
+    }
+#else
+    (void)lo; (void)hi;
+    n = 0;
+#endif
+    return n;
 }
 
 /* ---- the CPU sampler -------------------------------------------------------------- */
@@ -436,39 +492,7 @@ static int sample_thread(prof_thread *t, uintptr_t *pcs) {
     memset(&ctx, 0, sizeof ctx);
     ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
     uintptr_t lo = 0, hi = 0;
-    if (GetThreadContext(t->h, &ctx) && stack_bounds(t->h, &lo, &hi)) {
-#if defined(_M_X64) || defined(__x86_64__)
-        pcs[n++] = (uintptr_t)ctx.Rip;
-        while (n < PROF_MAX_FRAMES) {
-            DWORD64 image = 0;
-            PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Rip, &image, NULL);
-            if (fe) {
-                PVOID handler_data = NULL;
-                DWORD64 frame = 0;
-                RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Rip, fe, &ctx, &handler_data, &frame, NULL);
-            } else {
-                /* a leaf function: the return address is at rsp */
-                if (ctx.Rsp < lo || ctx.Rsp + 8 > hi) break;
-                ctx.Rip = *(const DWORD64 *)(uintptr_t)ctx.Rsp;
-                ctx.Rsp += 8;
-            }
-            if (!ctx.Rip || ctx.Rsp < lo || ctx.Rsp >= hi) break;
-            pcs[n++] = (uintptr_t)ctx.Rip;
-        }
-#elif defined(_M_ARM64) || defined(__aarch64__)
-        pcs[n++] = (uintptr_t)ctx.Pc;
-        while (n < PROF_MAX_FRAMES) {
-            DWORD64 image = 0;
-            PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Pc, &image, NULL);
-            if (!fe) break;
-            PVOID handler_data = NULL;
-            DWORD64 frame = 0;
-            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Pc, fe, &ctx, &handler_data, &frame, NULL);
-            if (!ctx.Pc || ctx.Sp < lo || ctx.Sp >= hi) break;
-            pcs[n++] = (uintptr_t)ctx.Pc;
-        }
-#endif
-    }
+    if (GetThreadContext(t->h, &ctx) && stack_bounds(t->h, &lo, &hi)) n = zell__w32_walk(&ctx, lo, hi, pcs, PROF_MAX_FRAMES);
     ResumeThread(t->h);
     return n;
 }

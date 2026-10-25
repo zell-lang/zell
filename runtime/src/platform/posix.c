@@ -187,9 +187,12 @@ void zell__plat_malloc_trim(void) {
 
 /* ---- process, console, environment -------------------------------------- */
 
+static void fatal_init(void);
+
 void zell__plat_runtime_init(int *argc, char ***argv) {
     (void)argc;
     (void)argv;
+    fatal_init();
 }
 
 void zell__plat_stream_write(FILE *f, const char *p, size_t n) {
@@ -320,7 +323,10 @@ static int bt_format(uintptr_t pc, char *line, size_t cap) {
     if (dladdr((void *)pc, &di) && di.dli_fname) mod = di.dli_fname;
     int k;
     /* a return address points after the call: look up pc - 1 */
-    if (!getenv("ZELL_NO_SYMBOLS") && bt_symbolize(pc - 1, sym, sizeof sym, &start) && start <= pc)
+    bool named = !getenv("ZELL_NO_SYMBOLS") && bt_symbolize(pc - 1, sym, sizeof sym, &start) && start <= pc;
+    /* The runtime's panic entry points are not the program's frames. */
+    if (named && (strncmp(sym, "zell_panic", 10) == 0 || strncmp(sym, "zell__panic", 11) == 0)) return 0;
+    if (named)
         k = snprintf(line, cap, "%s(%s+0x%lx)[0x%lx]\n", mod, sym, (unsigned long)(pc - start), (unsigned long)pc);
     else if (di.dli_fbase && *mod)
         k = snprintf(line, cap, "%s(+0x%lx)[0x%lx]\n", mod, (unsigned long)(pc - (uintptr_t)di.dli_fbase), (unsigned long)pc);
@@ -371,6 +377,10 @@ void zell__plat_backtrace_buf(char *buf, size_t cap, int skip) {
 }
 #endif
 
+void zell__plat_backtrace_pcs(int fd, const uintptr_t *pcs, int n) {
+    for (int i = 0; i < n; i++) bt_frame(fd, pcs[i]);
+}
+
 /* ---- CPU profiling: SIGPROF sampler, frame-pointer walk, symbols ------- */
 
 #include <signal.h>
@@ -398,7 +408,10 @@ static zell__plat_prof_fn g_prof_fn;
 static struct sigaction g_prof_old;
 static int g_prof_on;
 
+static void fatal_altstack(void);
+
 void zell__plat_thread_stack_init(void) {
+    fatal_altstack();
     if (t_stack_hi) return;
 #if defined(__linux__)
     pthread_attr_t a;
@@ -719,6 +732,105 @@ void zell__plat_symbolize_done(void) {
     g_nsyms = 0;
     g_syms_loaded = 0;
     g_exe_lo = g_exe_hi = 0;
+}
+
+/* ---- fatal signals (ABI.md 8.3) ------------------------------------------
+ * SIGSEGV/SIGBUS/SIGILL/SIGFPE run fatal_handler on an alternate signal
+ * stack (a stack overflow leaves none), which walks the interrupted
+ * context's frame pointers and reports through zell__fatal_signal. Each
+ * thread that runs Zell code gets its own alternate stack: the main thread
+ * here, workers from zell__plat_thread_stack_init; it is unmapped when the
+ * thread exits. */
+
+#define FATAL_ALTSTACK_SIZE (64 * 1024)
+static const int g_fatal_sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
+static pthread_key_t g_altstack_key;
+static pthread_once_t g_altstack_once = PTHREAD_ONCE_INIT;
+static _Thread_local bool t_altstack;
+
+static void altstack_free(void *p) {
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_flags = SS_DISABLE;
+    sigaltstack(&ss, NULL);
+    munmap(p, FATAL_ALTSTACK_SIZE);
+}
+
+static void altstack_key_init(void) {
+    if (pthread_key_create(&g_altstack_key, altstack_free) != 0) g_altstack_key = (pthread_key_t)-1;
+}
+
+static void fatal_altstack(void) {
+    if (t_altstack) return;
+    t_altstack = true;
+    stack_t old;
+    /* Keep an alternate stack somebody else installed (sanitizers). */
+    if (sigaltstack(NULL, &old) != 0 || !(old.ss_flags & SS_DISABLE)) return;
+    pthread_once(&g_altstack_once, altstack_key_init);
+    if (g_altstack_key == (pthread_key_t)-1) return;
+    void *p = mmap(NULL, FATAL_ALTSTACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return;
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_sp = p;
+    ss.ss_size = FATAL_ALTSTACK_SIZE;
+    if (sigaltstack(&ss, NULL) != 0) {
+        munmap(p, FATAL_ALTSTACK_SIZE);
+        return;
+    }
+    pthread_setspecific(g_altstack_key, p);
+}
+
+static const char *fatal_what(int sig, int code) {
+    switch (sig) {
+    case SIGSEGV: return code == SEGV_ACCERR ? "invalid permissions for mapped object" : "segmentation violation";
+    case SIGBUS: return "bus error";
+    case SIGILL: return "illegal instruction";
+    case SIGFPE: return code == FPE_INTDIV ? "integer divide by zero" : "floating-point exception";
+    default: return "fault";
+    }
+}
+
+static void fatal_handler(int sig, siginfo_t *info, void *uc) {
+    const char *name = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : "SIGFPE";
+    uintptr_t pcs[PROF_MAX_FRAMES];
+    int n = 0;
+    uintptr_t pc, fp, sp, addr = info ? (uintptr_t)info->si_addr : 0;
+    const char *what = fatal_what(sig, info ? info->si_code : 0);
+    if (ctx_regs(uc, &pc, &fp, &sp)) {
+        /* the faulting instruction itself: + 1 so the lookup of pc - 1 hits it */
+        pcs[n++] = pc + 1;
+        zell__plat_thread_stack_init();
+        uintptr_t lo = t_stack_lo, hi = t_stack_hi;
+        /* A fault just below the stack (the guard pages) is an overflow;
+         * the interrupted SP may then be below the recorded bounds too. */
+        if (sig == SIGSEGV && hi && addr < lo + 4096 && addr + (1u << 20) >= lo) what = "stack overflow";
+        if (hi && sp < hi && sp + (1u << 20) >= lo) {
+            uintptr_t prev = sp;
+            while (n < PROF_MAX_FRAMES && fp >= prev && fp >= lo && fp + 2 * sizeof(uintptr_t) <= hi &&
+                   (fp & (sizeof(uintptr_t) - 1)) == 0) {
+                const uintptr_t *f = (const uintptr_t *)fp;
+                uintptr_t ret = f[1];
+                if (ret < 4096) break;
+                pcs[n++] = ret;
+                prev = fp + 1;
+                fp = f[0];
+            }
+        }
+    }
+    zell__fatal_signal(name, what, addr, pcs, n);
+}
+
+static void fatal_init(void) {
+    if (getenv("ZELL_NO_FATAL_HANDLER")) return;
+    fatal_altstack();
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = fatal_handler;
+    /* SA_RESETHAND: a fault inside the handler gets the default action */
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    for (size_t i = 0; i < sizeof g_fatal_sigs / sizeof g_fatal_sigs[0]; i++) sigaction(g_fatal_sigs[i], &sa, NULL);
 }
 
 /* ---- dynamic loading (plugin) ---- */

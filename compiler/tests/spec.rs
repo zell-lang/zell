@@ -14,6 +14,7 @@
 //! | `// args: a b` | program arguments (split on whitespace) |
 //! | `// run-flags: --x` | use `zell run <src> <flags> -- <args>` instead of build + exec |
 //! | `// stderr: <text>` | stderr must contain `<text>` (repeatable; stderr is otherwise not checked) |
+//! | `// no-stderr: <text>` | stderr must not contain `<text>` (repeatable) |
 //! | `// warning: <text>` | the build's stderr must contain `<text>` (repeatable; e.g. a W0001 warning) |
 //! | `// no-warning: <text>` | the build's stderr must not contain `<text>` (repeatable) |
 //! | `// env: K=V` | environment variable of the program run (repeatable; `K=` removes `K`, e.g. `ZELL_NO_BACKTRACE=` to check a panic backtrace) |
@@ -71,6 +72,7 @@ struct Directives {
     args: Vec<String>,
     run_flags: Vec<String>,
     stderr: Vec<String>,
+    no_stderr: Vec<String>,
     warnings: Vec<String>,
     no_warnings: Vec<String>,
     env: Vec<(String, String)>,
@@ -106,6 +108,7 @@ fn parse_directives(file: &Path) -> Result<Directives, String> {
             "args" => d.args = val.split_whitespace().map(String::from).collect(),
             "run-flags" => d.run_flags = val.split_whitespace().map(String::from).collect(),
             "stderr" => d.stderr.push(val.to_string()),
+            "no-stderr" => d.no_stderr.push(val.to_string()),
             "warning" => d.warnings.push(val.to_string()),
             "no-warning" => d.no_warnings.push(val.to_string()),
             "build-flags" => d.build_flags = val.split_whitespace().map(String::from).collect(),
@@ -315,6 +318,11 @@ fn check(case: &Case) -> Result<(), String> {
         for s in &case.dirs.stderr {
             if !out.stderr.contains(s.as_str()) {
                 why.push(format!("stderr does not contain `{s}`"));
+            }
+        }
+        for s in &case.dirs.no_stderr {
+            if out.stderr.contains(s.as_str()) {
+                why.push(format!("stderr contains `{s}`"));
             }
         }
         if why.is_empty() {

@@ -1,0 +1,25 @@
+// test: a real SIGSEGV (a stack overflow, handled on the alternate signal stack) keeps the output printed before it and ends with a fatal error, a Zell backtrace and exit code 2 (DESIGN.md "Паника", ABI.md 8.3)
+// status: passing
+// exit: 2
+// os: linux macos
+// env: ZELL_NO_BACKTRACE=
+// stderr: fatal error: unexpected signal SIGSEGV
+// stderr: stack overflow
+// stderr: backtrace (most recent call first):
+// stderr: tests/spec/panics/fatal_stack_overflow.zl:16 down
+namespace spec.panics.fatal_stack_overflow
+
+import io
+
+func down(n int) int {
+    if n < 0 { return 0 }
+    var r = down(n + 1)
+    return r * r + 1
+}
+
+func main() {
+    for i in 0..3 {
+        println("line", i)
+    }
+    println(down(0))
+}

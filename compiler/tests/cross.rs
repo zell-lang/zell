@@ -252,6 +252,35 @@ fn windows_sqlite_with_dll() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A real fault under Wine (ABI.md 8.3): the vectored exception handler
+/// flushes stdout, prints `fatal error: unexpected signal SIGSEGV` and the
+/// backtrace, exit code 2 (the Linux twin is `fatal_signal.rs`).
+#[test]
+fn windows_fatal_access_violation() {
+    if let Some(why) = windows_unavailable() {
+        eprintln!("skipping: {why}");
+        return;
+    }
+    let dir = tmpdir("winfatal");
+    let pkg = dir.join("fault");
+    std::fs::create_dir_all(pkg.join("src")).unwrap();
+    std::fs::write(pkg.join("zell.toml"), "[package]\nname = \"fault\"\nversion = \"0.1.0\"\nentry = \"src/main.zl\"\n\n[capabilities]\nunsafe = true\n").unwrap();
+    std::fs::write(
+        pkg.join("src/main.zl"),
+        "namespace fault\n\nimport io\nimport unsafe\n\nfunc main() {\n    println(\"before\")\n    println(unsafe.ReadInt(8, 8))\n}\n",
+    )
+    .unwrap();
+    let exe = dir.join("fault.exe");
+    build(&pkg, &exe, &[]).unwrap();
+    let r = wine().env_remove("ZELL_NO_BACKTRACE").arg(&exe).output().unwrap();
+    let (out, err) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    assert_eq!(r.status.code(), Some(2), "stderr: {err}");
+    assert_eq!(out, "before\n");
+    assert!(err.contains("fatal error: unexpected signal SIGSEGV\n"), "{err}");
+    assert!(err.contains("access violation addr=0x8"), "{err}");
+    assert!(err.contains("src/main.zl:8 main"), "{err}");
+}
+
 /// Windows-only platform pieces under Wine: child processes through named
 /// pipes waited on by the IOCP poller (and through relay threads with
 /// WSAPoll), IANA time zones from the registry (same output as Linux's

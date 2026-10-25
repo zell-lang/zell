@@ -1066,7 +1066,9 @@ panic while unwinding another one):
    code found in the line table (8.2) as `  <file>:<line> <function>`,
    anything else as `module(symbol+0xoff)[0xaddr]` (glibc
    `backtrace_symbols_fd` format; `module(+0xoff)[0xaddr]` without symbols;
-   Windows: `module(symbol+0xoff) [0xaddr]`).
+   Windows: `module(symbol+0xoff) [0xaddr]`). The runtime's own panic
+   entry points (`zell_panic*`, `zell__panic*`) are never listed: the
+   first line is the frame that panicked.
 4. The process exits immediately with **exit code 2** (`_Exit`). No `defer`, no
    destructors, no atexit handlers.
 
@@ -1256,6 +1258,39 @@ falls back to symbol+offset frames, as does an address outside the table.
 
 Inlined calls have no frame of their own: in an optimised build a frame
 shows the innermost inlined line only.
+
+### 8.3 Fatal signals and exceptions
+
+A real fault (not a compiled `nil`/bounds check) is not a panic: no task
+containment, no `defer`, the process ends. `zell__plat_runtime_init`
+(called from `zell_runtime_init`) installs the handler unless
+`ZELL_NO_FATAL_HANDLER` is set (then the default action, e.g. a core dump):
+
+- POSIX (`platform/posix.c`): `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` with
+  `SA_SIGINFO | SA_ONSTACK | SA_RESETHAND`, on a 64 KiB alternate signal
+  stack per thread (the main thread at init, other threads from
+  `zell__plat_thread_stack_init`, unmapped at thread exit; an alternate
+  stack someone else installed, e.g. a sanitizer's, is kept). The frames
+  come from the interrupted context's frame-pointer chain.
+- Windows (`platform/win32.c`): a first vectored exception handler for
+  faults whose PC is in the executable (access violation, in-page error,
+  misalignment, illegal/privileged instruction, integer divide by zero;
+  a stack overflow from anywhere), an unhandled-exception filter for the
+  rest (a system DLL may probe memory under its own `__try`), and
+  `SetThreadStackGuarantee(64 KiB)` per thread. Exception codes map to the
+  POSIX names (`SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE`). The frames come
+  from unwinding the exception's `CONTEXT`.
+
+Both report through `zell__fatal_signal` (`panic.c`):
+
+1. `stdout` is flushed.
+2. stderr gets `fatal error: unexpected signal <NAME>\n` and
+   `[signal <NAME>: <what> addr=0x<fault address> pc=0x<pc>]\n` (`what`:
+   `segmentation violation`, `stack overflow`, `access violation`,
+   `bus error`, ...).
+3. Unless `ZELL_NO_BACKTRACE` is set, the backtrace in the format of 8
+   (faulting frame first).
+4. Exit code **2** (`_Exit`). A second fault while reporting exits at once.
 
 ## 9. I/O
 

@@ -380,7 +380,83 @@ __attribute__((constructor)) static void console_init(void) {
     if (g_console[1] || g_console[2]) SetConsoleOutputCP(CP_UTF8);
 }
 
+/* ---- fatal exceptions (ABI.md 8.3) ----------------------------------------
+ * A vectored handler reports faults raised in the executable's own code
+ * (Zell code and the static runtime) through zell__fatal_signal with the
+ * POSIX signal name; a fault elsewhere (a system DLL may probe memory under
+ * its own __try) is left to SEH and reaches the unhandled-exception filter
+ * only if nobody handles it. */
+
+static uintptr_t g_exe_lo, g_exe_hi;
+
+static bool fatal_kind(const EXCEPTION_RECORD *er, const char **name, const char **what, uintptr_t *addr) {
+    *addr = (uintptr_t)er->ExceptionAddress;
+    switch (er->ExceptionCode) {
+    case EXCEPTION_ACCESS_VIOLATION:
+        *name = "SIGSEGV";
+        *what = "access violation";
+        if (er->NumberParameters >= 2) *addr = (uintptr_t)er->ExceptionInformation[1];
+        return true;
+    case EXCEPTION_STACK_OVERFLOW: *name = "SIGSEGV"; *what = "stack overflow"; return true;
+    case EXCEPTION_IN_PAGE_ERROR:
+        *name = "SIGBUS";
+        *what = "in-page error";
+        if (er->NumberParameters >= 2) *addr = (uintptr_t)er->ExceptionInformation[1];
+        return true;
+    case EXCEPTION_DATATYPE_MISALIGNMENT: *name = "SIGBUS"; *what = "misaligned access"; return true;
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_PRIV_INSTRUCTION: *name = "SIGILL"; *what = "illegal instruction"; return true;
+    case EXCEPTION_INT_DIVIDE_BY_ZERO: *name = "SIGFPE"; *what = "integer divide by zero"; return true;
+    default: return false;
+    }
+}
+
+static LONG fatal_report(EXCEPTION_POINTERS *ep) {
+    const char *name, *what;
+    uintptr_t addr;
+    if (!fatal_kind(ep->ExceptionRecord, &name, &what, &addr)) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t pcs[64];
+    CONTEXT ctx = *ep->ContextRecord;
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);
+    int n = zell__w32_walk(&ctx, lo, hi, pcs, 64);
+    /* the faulting instruction itself: + 1 so the lookup of pc - 1 hits it */
+    if (n > 0) pcs[0] += 1;
+    zell__fatal_signal(name, what, addr, pcs, n);
+}
+
+static LONG WINAPI fatal_veh(EXCEPTION_POINTERS *ep) {
+    uintptr_t pc = (uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW && (pc < g_exe_lo || pc >= g_exe_hi))
+        return EXCEPTION_CONTINUE_SEARCH;
+    return fatal_report(ep);
+}
+
+static LONG WINAPI fatal_unhandled(EXCEPTION_POINTERS *ep) { return fatal_report(ep); }
+
+void zell__w32_fatal_thread_init(void) {
+    static _Thread_local bool done;
+    if (done) return;
+    done = true;
+    /* room for the handler (backtrace, symbols) after an overflow */
+    ULONG size = 64 * 1024;
+    SetThreadStackGuarantee(&size);
+}
+
+static void fatal_init(void) {
+    if (getenv("ZELL_NO_FATAL_HANDLER")) return;
+    HMODULE m = GetModuleHandleW(NULL);
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)m;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)m + dos->e_lfanew);
+    g_exe_lo = (uintptr_t)m;
+    g_exe_hi = g_exe_lo + nt->OptionalHeader.SizeOfImage;
+    zell__w32_fatal_thread_init();
+    AddVectoredExceptionHandler(1, fatal_veh);
+    SetUnhandledExceptionFilter(fatal_unhandled);
+}
+
 void zell__plat_runtime_init(int *argc, char ***argv) {
+    fatal_init();
     /* The UTF-8 command line (the C runtime's argv is in the ANSI code page). */
     int n = 0;
     LPWSTR *w = CommandLineToArgvW(GetCommandLineW(), &n);

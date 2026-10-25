@@ -9,6 +9,8 @@
 #include <string.h>
 
 static int g_panicking;
+/* This thread is printing a panic or a fatal signal and will exit. */
+static _Thread_local int t_dying;
 
 /* The panic this thread is unwinding (task panics, ABI.md 8.1). */
 static _Thread_local int t_unwinding;
@@ -28,6 +30,7 @@ static void print_trace_text(const char *trace, int64_t tlen) {
 static ZELL_NORETURN __attribute__((noinline)) void die_final(const char *msg, int64_t len, const char *trace, int64_t tlen, int quiet) {
     /* The debug agent stops here first (exception breakpoint "panic"). */
     if (!quiet && __atomic_load_n(&zell_dbg_on, __ATOMIC_RELAXED) && zell__dbg_panic_fn) zell__dbg_panic_fn(msg, len);
+    t_dying = 1;
     /* A second panic (e.g. inside a destructor run during the first) aborts quietly. */
     if (__atomic_exchange_n(&g_panicking, 1, __ATOMIC_SEQ_CST)) {
         for (;;) zell__plat_sleep_ns((int64_t)1000000000);  /* another thread is printing the first panic and will _exit */
@@ -195,4 +198,29 @@ void zell_panic_bounds(int64_t idx, int64_t len) {
 void zell_panic_slice_bounds(int64_t lo, int64_t hi, int64_t cap) {
     zell__panicf("runtime error: slice bounds out of range [%" PRId64 ":%" PRId64
                   "] with capacity %" PRId64, lo, hi, cap);
+}
+
+/* A fatal signal or exception (platform/posix.c fatal_handler, win32.c
+ * fatal_veh): not a panic (no task containment, no defers), the process
+ * ends. Flushes stdout first so earlier output is not lost, then prints
+ * "fatal error: unexpected signal <name>", the fault details and the
+ * frames `pcs` (the faulting PC first), exit code 2 (ABI.md 8.3). */
+_Noreturn void zell__fatal_signal(const char *name, const char *what, uintptr_t addr, const uintptr_t *pcs, int n) {
+    /* A fault while reporting a fault (or a panic) on this thread. */
+    if (t_dying++) _Exit(2);
+    if (__atomic_exchange_n(&g_panicking, 1, __ATOMIC_SEQ_CST)) {
+        for (;;) zell__plat_sleep_ns((int64_t)1000000000);  /* another thread prints and exits */
+    }
+    zell__io_flush_all();
+    uintptr_t pc = n > 0 ? pcs[0] : 0;
+    fprintf(stderr, "fatal error: unexpected signal %s\n[signal %s: %s addr=0x%" PRIxPTR " pc=0x%" PRIxPTR "]\n",
+            name, name, what, addr, pc);
+    if (n > 0 && !getenv("ZELL_NO_BACKTRACE")) {
+        fputs("\nbacktrace (most recent call first):\n", stderr);
+        fflush(stderr);
+        zell__plat_backtrace_pcs(2, pcs, n);
+    }
+    fflush(stderr);
+    if (__atomic_load_n(&zell_dbg_on, __ATOMIC_RELAXED)) zell_dbg_exit(2);
+    _Exit(2);
 }

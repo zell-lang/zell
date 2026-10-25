@@ -327,7 +327,7 @@ written by hand), **33** (see 67), **46** (see 78).
     (`zell_slice_new_ops`, the tables stay static and immortal); nothing is
     emitted when it is unused. Spec test `reflection/types_with_sort`; the
     `slices.Clone` workaround is gone from `examples/kitchen_sink.zl`.
-58. ❌ **bug:** **a real SIGSEGV (as in 57) prints nothing and loses all
+58. ✅ **Fixed (2026-10-25):** **bug:** **a real SIGSEGV (as in 57) prints nothing and loses all
     buffered stdout**: the ~90 lines the program had already printed were
     gone, with no message and exit code 139. A nil dereference is caught
     and reported properly, but its debug backtrace starts with a raw
@@ -336,6 +336,24 @@ written by hand), **33** (see 67), **46** (see 78).
     that flushes stdout and prints `fatal error: unexpected signal SIGSEGV`
     plus the backtrace (Go prints the same), then exits with status 2.
     Hide `zell_panic_*` frames from backtraces.
+    **Cause and fix:** the runtime had no handler for real faults (only
+    compiled nil/bounds checks panic), so the default action killed the
+    process before stdio flushed; the panic backtrace skipped a fixed number
+    of frames, which left `zell_panic_nil` (it calls `zell__panicf`)
+    visible. Now `zell__plat_runtime_init` installs a
+    SIGSEGV/SIGBUS/SIGILL/SIGFPE handler on a per-thread alternate signal
+    stack (`platform/posix.c`; Windows: a vectored exception handler for
+    faults in the executable plus an unhandled-exception filter in
+    `platform/win32.c`); it flushes stdout, prints `fatal error: unexpected
+    signal SIGSEGV`, the fault line and the backtrace from the faulting
+    context, exit code 2 (`zell__fatal_signal` in `panic.c`, ABI.md 8.3,
+    DESIGN.md «Паника»). Backtraces drop `zell_panic*`/`zell__panic*` frames
+    by name. Tests: spec `panics/fatal_stack_overflow`,
+    `panics/nil_backtrace_frames` (new `// no-stderr:` directive),
+    `compiler/tests/fatal_signal.rs` (unsafe read of address 8 after
+    buffered output) and `cross.rs::windows_fatal_access_violation` under
+    Wine. Wine itself kills a process on stack overflow before any handler
+    runs, so that case is checked on Linux only.
 59. ❌ **bug:** **methods of a generic enum cannot be called**: "cannot call
     method Or on value of type Opt<int> … methods exist only on structs,
     enums and interfaces".

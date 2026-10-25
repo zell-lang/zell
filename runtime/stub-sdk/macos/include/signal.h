@@ -47,6 +47,11 @@ typedef int sig_atomic_t;
 #define SA_NODEFER 0x0010
 #define SA_NOCLDWAIT 0x0020
 #define SA_SIGINFO 0x0040
+#define SS_ONSTACK 0x0001
+#define SS_DISABLE 0x0004
+#define SEGV_MAPERR 1
+#define SEGV_ACCERR 2
+#define FPE_INTDIV 7
 #define SIG_BLOCK 1
 #define SIG_UNBLOCK 2
 #define SIG_SETMASK 3

@@ -275,6 +275,10 @@ ZELL_PLAT_HIDDEN void zell__plat_backtrace(int fd, int skip);
 /* The same frames as text into buf (NUL-terminated, truncated to cap): a
  * contained task panic keeps its trace (ABI.md 8.1). */
 ZELL_PLAT_HIDDEN void zell__plat_backtrace_buf(char *buf, size_t cap, int skip);
+/* Writes the frames `pcs` (return addresses; a faulting PC is passed + 1)
+ * to fd in the same format. Runtime-internal panic entry points
+ * (`zell_panic*`, `zell__panic*`) are left out of every backtrace. */
+ZELL_PLAT_HIDDEN void zell__plat_backtrace_pcs(int fd, const uintptr_t *pcs, int n);
 /* The line table (ABI.md 8.2; lines.c): source file, line and Zell
  * function (NULL if unknown) of code address `pc` (a return address minus
  * one); false if the address has no line, the program registered no table
@@ -282,6 +286,12 @@ ZELL_PLAT_HIDDEN void zell__plat_backtrace_buf(char *buf, size_t cap, int skip);
 ZELL_PLAT_HIDDEN bool zell__lines_find(uintptr_t pc, const char **file, uint32_t *line, const char **func);
 /* `file` as printed: relative to the working directory when under it. */
 ZELL_PLAT_HIDDEN const char *zell__lines_shown(const char *file);
+
+/* Reports a fatal signal / exception and exits with code 2 (ABI.md 8.3):
+ * flushes stdout, prints "fatal error: unexpected signal <name>", the
+ * fault (`what`, address) and the frames `pcs` (faulting PC first, others
+ * return addresses). Called from the platform's fault handler. */
+ZELL_PLAT_HIDDEN _Noreturn void zell__fatal_signal(const char *name, const char *what, uintptr_t addr, const uintptr_t *pcs, int n);
 
 /* ---- CPU profiling (posix.c; diag, runtime/src/profile.c) ---------
  * A process-wide CPU-time timer (SIGPROF on POSIX) calls `fn` from the
@@ -417,10 +427,14 @@ static inline int zell__plat_poller_link(zell__plat_poller *hub, zell__plat_poll
 
 /* ---- process, console, environment (posix.c / win32.c) ---------------- */
 
-/* Once, from zell_runtime_init before anything else: on Windows replaces
- * *argv by the UTF-8 command line (CommandLineToArgvW), puts stdout/stderr
- * in binary mode (println writes \n) and switches an attached console to
- * UTF-8 with ANSI escape processing. No-op on POSIX. */
+/* Once, from zell_runtime_init before anything else: installs the fatal
+ * fault handler (SIGSEGV/SIGBUS/SIGILL/SIGFPE on an alternate signal stack
+ * on POSIX, a vectored exception handler plus an unhandled-exception filter
+ * on Windows; both report through zell__fatal_signal, ABI.md 8.3). On
+ * Windows it also replaces *argv by the UTF-8 command line
+ * (CommandLineToArgvW); the constructor in win32.c puts stdout/stderr in
+ * binary mode (println writes \n) and switches an attached console to
+ * UTF-8 with ANSI escape processing. */
 ZELL_PLAT_HIDDEN void zell__plat_runtime_init(int *argc, char ***argv);
 /* Writes n bytes to a stdio stream: fwrite, except that on a Windows
  * console the UTF-8 text goes through WriteConsoleW (a sequence split
