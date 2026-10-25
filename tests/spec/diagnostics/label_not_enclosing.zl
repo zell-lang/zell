@@ -1,0 +1,19 @@
+// error: invalid continue label done
+// status: passing
+namespace spec.diagnostics.label_not_enclosing
+
+import io
+
+func main() {
+    done:
+    for i in 0..3 {
+        if i == 2 {
+            break done
+        }
+    }
+    for j in 0..3 {
+        if j == 1 {
+            continue done
+        }
+    }
+}

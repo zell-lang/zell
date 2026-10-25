@@ -1,0 +1,27 @@
+body a0 b00
+drop b00
+drop b01
+drop a0
+body a1 b10
+drop b10
+drop b11
+drop a1
+after keep
+drop keep
+body a0 b00
+drop b00
+drop b01
+drop a0
+body a1 b10
+drop b10
+drop b11
+drop a1
+after keep
+drop keep
+caught: panic: boom
+async body async a0 0
+drop async a0
+drop async a1
+async after async keep
+drop async keep
+caught: panic: async boom

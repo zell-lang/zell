@@ -508,22 +508,6 @@ func tierDiscount(t Tier) int {
     }
 }
 
-// Finds the first pair of orders that share a sku: a nested search.
-func firstSharedSku(orders []Order) (int, int, Sku, bool) {
-    for i, a in orders {
-        for j in i + 1..len(orders) {
-            for x in a.Items {
-                for y in orders[j].Items {
-                    if x.Sku == y.Sku {
-                        return (a.Id, orders[j].Id, x.Sku, true)
-                    }
-                }
-            }
-        }
-    }
-    return (0, 0, "", false)
-}
-
 func counterFactory() (func() int, func() int) {
     var n = 0
     var inc = func() int {
@@ -1447,7 +1431,21 @@ async func demoMisc(book *OrderBook) void! {
     for o in book {
         orders = append(orders, *o)
     }
-    var (x, y, sku, shared) = firstSharedSku(orders)
+    // The first pair of orders that share a sku: a nested search left with a labeled break.
+    var (x, y, sku, shared) = (0, 0, "", false)
+    search:
+    for i, a in orders {
+        for j in i + 1..len(orders) {
+            for p in a.Items {
+                for q in orders[j].Items {
+                    if p.Sku == q.Sku {
+                        (x, y, sku, shared) = (a.Id, orders[j].Id, p.Sku, true)
+                        break search
+                    }
+                }
+            }
+        }
+    }
     println("  shared sku", x, y, sku, shared)
 
     println(" ", Show([1, 2, 3]), "|", Show(Money{Amount: 5, Currency: "EUR"}), "|", Show(42))

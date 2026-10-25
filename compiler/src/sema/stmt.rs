@@ -9,7 +9,13 @@ impl<'a> Sema<'a> {
     /// A block with its own scope.
     pub(crate) fn block(&mut self, b: &ast::Block) -> hir::Block {
         self.push_scope();
+        // A label pending for the enclosing `for`/`switch` is not for the
+        // loops of a block in its header (`for x in try f() catch { ... }`).
+        let pending = self.fns.last_mut().and_then(|f| f.pending_label.take());
         let stmts = self.stmt_list(&b.stmts);
+        if let Some(f) = self.fns.last_mut() {
+            f.pending_label = pending;
+        }
         self.pop_scope();
         hir::Block { stmts, span: b.span }
     }
@@ -76,14 +82,36 @@ impl<'a> Sema<'a> {
                 let r = self.return_value(es, span);
                 push(out, StmtKind::Return(r));
             }
-            ast::StmtKind::Break => match self.break_target() {
+            ast::StmtKind::Break(Some(name)) => {
+                if let Some(l) = self.named_target(name, false) {
+                    push(out, StmtKind::Break(l))
+                }
+            }
+            ast::StmtKind::Continue(Some(name)) => {
+                if let Some(l) = self.named_target(name, true) {
+                    push(out, StmtKind::Continue(l))
+                }
+            }
+            ast::StmtKind::Break(None) => match self.break_target() {
                 Some(l) => push(out, StmtKind::Break(l)),
                 None => self.err("break outside of a loop or switch", span),
             },
-            ast::StmtKind::Continue => match self.continue_target() {
+            ast::StmtKind::Continue(None) => match self.continue_target() {
                 Some(l) => push(out, StmtKind::Continue(l)),
                 None => self.err("continue outside of a loop", span),
             },
+            ast::StmtKind::Labeled { label, stmt } => {
+                let f = self.fcx();
+                if f.declared_labels.contains(&label.name) {
+                    self.err(format!("label {} already defined", label.name), label.span);
+                } else {
+                    f.declared_labels.push(label.name.clone());
+                    f.pending_label = Some((label.name.clone(), label.span));
+                }
+                self.stmt(stmt, out);
+                // Not taken: a static `switch` folded to one branch.
+                self.fcx().pending_label = None;
+            }
             ast::StmtKind::Defer(e) => self.defer_stmt(e, span, out),
             ast::StmtKind::Expr(e) => {
                 let k = self.expr_stmt(e);
@@ -1084,6 +1112,7 @@ pub(crate) fn open_defers_ok(stmts: &[ast::Stmt]) -> bool {
                 !in_loop && *n <= hir::MAX_OPEN_DEFERS
             }
             ast::StmtKind::For(f) => count(&f.body.stmts, true, n),
+            ast::StmtKind::Labeled { stmt, .. } => count(std::slice::from_ref(&**stmt), in_loop, n),
             ast::StmtKind::If(i) => if_ok(i, in_loop, n),
             ast::StmtKind::Switch(sw) => sw.cases.iter().all(|c| count(&c.body, in_loop, n)) && sw.default.as_ref().is_none_or(|d| count(d, in_loop, n)),
             ast::StmtKind::Block(b) => count(&b.stmts, in_loop, n),

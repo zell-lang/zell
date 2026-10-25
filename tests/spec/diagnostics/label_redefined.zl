@@ -1,0 +1,16 @@
+// error: label twice already defined
+// status: passing
+namespace spec.diagnostics.label_redefined
+
+import io
+
+func main() {
+    twice:
+    for i in 0..3 {
+        break twice
+    }
+    twice:
+    for j in 0..3 {
+        break twice
+    }
+}

@@ -784,7 +784,8 @@ fn stmt_needs(s: &ast::Stmt, roots: &mut Vec<String>) -> bool {
         ast::StmtKind::Assign { target, value, .. } => expr_needs(target, roots) || expr_needs(value, roots),
         ast::StmtKind::Block(x) => block_needs(x, roots),
         ast::StmtKind::TryBlock { body, handler, .. } => block_needs(body, roots) || block_needs(handler, roots),
-        ast::StmtKind::Break | ast::StmtKind::Continue | ast::StmtKind::Error => false,
+        ast::StmtKind::Labeled { stmt, .. } => stmt_needs(stmt, roots),
+        ast::StmtKind::Break(_) | ast::StmtKind::Continue(_) | ast::StmtKind::Error => false,
     }
 }
 

@@ -1,0 +1,69 @@
+// test: `break outer` out of nested loops releases the inner loops' values once; a later panic in the same synchronous frame (and in an async frame after an await in the loop) unwinds only what is still live; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.labeled_break_unwind
+
+import io
+
+struct Guard {
+    name string
+
+    func Drop() {
+        println("drop", this.name)
+    }
+}
+
+func run(fail bool) {
+    var keep = Guard{name: "keep"}
+    outer:
+    for i in 0..3 {
+        var a = Guard{name: "a" + strconv.Itoa(i)}
+        for j in 0..3 {
+            var b = new Guard{name: "b" + strconv.Itoa(i) + strconv.Itoa(j)}
+            if i == 1 && j == 1 {
+                break outer
+            }
+            if j == 1 {
+                continue outer
+            }
+            println("body", a.name, b.name)
+        }
+    }
+    println("after", keep.name)
+    if fail {
+        panic("boom")
+    }
+}
+
+async func runAsync() void! {
+    var keep = Guard{name: "async keep"}
+    outer:
+    for i in 0..3 {
+        var a = Guard{name: "async a" + strconv.Itoa(i)}
+        for j in 0..3 {
+            await task.Yield()
+            if i == 1 && j == 0 {
+                break outer
+            }
+            println("async body", a.name, j)
+            continue outer
+        }
+    }
+    println("async after", keep.name)
+    panic("async boom")
+}
+
+async func work() void! {
+    await task.Yield()
+    run(true)
+}
+
+async func main() {
+    run(false)
+    try await work() catch err {
+        println("caught:", err.Message())
+    }
+    try await runAsync() catch err {
+        println("caught:", err.Message())
+    }
+}

@@ -1,0 +1,17 @@
+// error: invalid continue label sw: it labels a switch
+// status: passing
+namespace spec.diagnostics.label_continue_switch
+
+import io
+
+func main() {
+    for i in 0..3 {
+        sw:
+        switch i {
+            case 1:
+                continue sw
+            default:
+                println(i)
+        }
+    }
+}

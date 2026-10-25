@@ -1,0 +1,112 @@
+// test: labeled break/continue (Go labels) leave or continue the named for/switch; owned loop variables and defers are released on the way out
+// status: passing
+// run-flags: --leak-check
+namespace spec.control.labeled_break_continue
+
+import io
+
+struct Item {
+    Name string
+    func Drop() { println("drop", this.Name) }
+}
+
+func find(grid [][]string, want string) (int, int) {
+    var (r, c) = (-1, -1)
+outer:
+    for i, row in grid {
+        for j, cell in row {
+            if cell == want {
+                (r, c) = (i, j)
+                break outer
+            }
+        }
+    }
+    return (r, c)
+}
+
+func firstShared(a []string, b []string) string {
+    var found = ""
+    search:
+    for x in a {
+        for y in b {
+            switch {
+                case x == y:
+                    found = x
+                    break search
+                default:
+            }
+        }
+    }
+    return found
+}
+
+func skipRows() {
+    rows:
+    for i in 0..4 {
+        for j in 0..4 {
+            if j > i {
+                continue rows
+            }
+            if i == 3 {
+                break rows
+            }
+            print(fmt.Format("{0}{1} ", i, j))
+        }
+    }
+    println()
+}
+
+func owned() {
+    var names = ["a", "b", "c"]
+    loop:
+    for n in names {
+        var it = new Item{Name: n + "1"}
+        for m in ["x", "y"] {
+            var inner = new Item{Name: n + m}
+            if n == "b" {
+                break loop
+            }
+            if m == "x" {
+                continue loop
+            }
+            println("unreachable", inner.Name, it.Name)
+        }
+    }
+    println("after loop")
+}
+
+func labeledSwitch(n int) string {
+    var out = ""
+    sw:
+    switch n {
+        case 1, 2:
+            for k in 0..10 {
+                if k == n {
+                    break sw
+                }
+                out += "k"
+            }
+            out += "!"
+        default:
+            out = "other"
+    }
+    return out
+}
+
+func main() {
+    var grid = [["a", "b"], ["c", "d"], ["e", "f"]]
+    var (r, c) = find(grid, "d")
+    println(r, c)
+    var (r2, c2) = find(grid, "z")
+    println(r2, c2)
+    println(firstShared(["p", "q", "r"], ["z", "r", "q"]))
+    skipRows()
+    owned()
+    println(labeledSwitch(2), labeledSwitch(5))
+    var i = 0
+    forever: for {
+        i += 1
+        if i == 3 { break forever }
+    }
+    println(i)
+}

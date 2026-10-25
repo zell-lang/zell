@@ -1,0 +1,10 @@
+// error: label here must be followed by a for or switch statement
+// status: passing
+namespace spec.diagnostics.label_not_on_loop
+
+import io
+
+func main() {
+    here:
+    println("no loop")
+}

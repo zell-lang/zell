@@ -540,7 +540,7 @@ written by hand), **33** (see 67), **46** (see 78).
     `try`'s type, which becomes its value (Kotlin). No ternary; instead,
     report "Zell has no ?: operator; use if/else" when `?` is followed by
     an expression and `:`.
-74. ❌ **spec gap:** **no labeled `break`/`continue`**. DESIGN.md «switch»
+74. ✅ **Fixed (2026-10-25):** Go labels: `name:` before a `for` or `switch` (own line or same line; no `;` after `:`), `break name` / `continue name`; errors for an undefined label, a label not on an enclosing statement, `continue` to a switch, a misplaced, repeated or unused label; leaving by label releases the left scopes like `break` (DESIGN.md «Управление потоком», `control/labeled_break_continue`, `panics/labeled_break_unwind`, `diagnostics/label_*`); `kitchen_sink.zl` searches with `break search` instead of `firstSharedSku`. **spec gap:** **no labeled `break`/`continue`**. DESIGN.md «switch»
     lists it as an open question, and `break` inside `case` cannot leave
     the loop. A nested search returns from a helper (`firstSharedSku`)
     instead. **Decision:** Go labels, `name:` on the line before `for`, plus

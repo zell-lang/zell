@@ -1,0 +1,12 @@
+// error: label unused defined and not used
+// status: passing
+namespace spec.diagnostics.label_unused
+
+import io
+
+func main() {
+    unused:
+    for i in 0..3 {
+        println(i)
+    }
+}

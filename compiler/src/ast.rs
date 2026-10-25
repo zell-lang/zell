@@ -283,8 +283,13 @@ pub enum StmtKind {
     For(ForStmt),
     Switch(SwitchStmt),
     Return(Vec<Expr>),
-    Break,
-    Continue,
+    /// `break` or `break label`.
+    Break(Option<Ident>),
+    /// `continue` or `continue label`.
+    Continue(Option<Ident>),
+    /// `label:` before a `for` or `switch` (Go labels; DESIGN.md
+    /// «Управление потоком»).
+    Labeled { label: Ident, stmt: Box<Stmt> },
     Defer(Expr),
     Expr(Expr),
     Assign { target: Expr, op: AssignOp, value: Expr },
@@ -474,6 +479,7 @@ impl Stmt {
             StmtKind::Block(b) => b.has_errors(),
             StmtKind::If(i) => i.cond.is_recovered() || i.then.has_errors() || i.else_.as_deref().is_some_and(else_has),
             StmtKind::For(f) => f.body.has_errors(),
+            StmtKind::Labeled { stmt, .. } => stmt.has_errors(),
             StmtKind::Switch(s) => {
                 s.cases.iter().any(|c| c.body.iter().any(|s| s.has_errors())) || s.default.iter().flatten().any(|s| s.has_errors())
             }

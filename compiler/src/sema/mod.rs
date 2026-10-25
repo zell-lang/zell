@@ -263,6 +263,17 @@ pub(crate) struct FnCtx {
     pub capture_keys: Vec<(usize, LocalId)>,
     pub labels: Vec<(Label, LabelKind)>,
     pub next_label: u32,
+    /// Open user labels (`outer: for ...`): the label, its name and span,
+    /// and whether a `break`/`continue` used it.
+    pub named_labels: Vec<(Label, String, Span, bool)>,
+    /// The label written before the statement being lowered; taken by the
+    /// next [`Sema::push_label`] (the `for`/`switch` it names).
+    pub pending_label: Option<(String, Span)>,
+    /// Every label declared in the body so far.
+    pub declared_labels: Vec<String>,
+    /// `break L` / `continue L` naming no enclosing label: reported at the
+    /// end of the body ("not defined" or "invalid").
+    pub bad_jumps: Vec<(String, Span, &'static str)>,
     /// Number of enclosing block `try` bodies (a `?` inside one jumps to
     /// its `catch`, so it is allowed in any function).
     pub try_depth: u32,
@@ -294,6 +305,10 @@ impl FnCtx {
             capture_keys: Vec::new(),
             labels: Vec::new(),
             next_label: 0,
+            named_labels: Vec::new(),
+            pending_label: None,
+            declared_labels: Vec::new(),
+            bad_jumps: Vec::new(),
             try_depth: 0,
             recovering: false,
             open_defers: false,
@@ -883,11 +898,54 @@ impl<'a> Sema<'a> {
         let l = Label(f.next_label);
         f.next_label += 1;
         f.labels.push((l, kind));
+        if let Some((name, span)) = f.pending_label.take() {
+            f.named_labels.push((l, name, span, false));
+        }
         l
     }
 
     pub fn pop_label(&mut self) {
-        self.fcx().labels.pop();
+        let f = self.fcx();
+        let Some((l, _)) = f.labels.pop() else { return };
+        if f.named_labels.last().is_some_and(|n| n.0 == l) {
+            let (_, name, span, used) = f.named_labels.pop().unwrap();
+            if !used {
+                self.err(format!("label {name} defined and not used"), span);
+            }
+        }
+    }
+
+    /// The target of `break name` / `continue name` (Go labels): the
+    /// enclosing statement labeled `name`.
+    pub fn named_target(&mut self, name: &ast::Ident, is_continue: bool) -> Option<Label> {
+        let f = self.fcx();
+        let Some(i) = f.named_labels.iter().rposition(|n| n.1 == name.name) else {
+            let what = if is_continue { "continue" } else { "break" };
+            f.bad_jumps.push((name.name.clone(), name.span, what));
+            return None;
+        };
+        f.named_labels[i].3 = true;
+        let l = f.named_labels[i].0;
+        if is_continue && f.labels.iter().any(|x| x.0 == l && x.1 == LabelKind::Switch) {
+            self.err(format!("invalid continue label {}: it labels a switch, not a loop", name.name), name.span);
+            return None;
+        }
+        Some(l)
+    }
+
+    /// Reports the `break`/`continue` labels of the finished body that name
+    /// no enclosing statement.
+    pub fn report_bad_jumps(&mut self) {
+        let f = self.fcx();
+        let bad = std::mem::take(&mut f.bad_jumps);
+        let declared = f.declared_labels.clone();
+        for (name, span, what) in bad {
+            if declared.contains(&name) {
+                self.err(format!("invalid {what} label {name}: it does not label an enclosing for or switch"), span);
+            } else {
+                self.err(format!("{what} label not defined: {name}"), span);
+            }
+        }
     }
 
     /// Innermost break target / loop.
@@ -1007,6 +1065,7 @@ impl<'a> Sema<'a> {
     pub fn fn_body(&mut self, body: &ast::Block, ret: TypeId, name_span: Span) -> hir::Block {
         self.fcx().open_defers = stmt::open_defers_ok(&body.stmts);
         let block = self.block(body);
+        self.report_bad_jumps();
         let needs_return = !matches!(self.tt.get(ret), Type::Void | Type::Invalid)
             && !matches!(self.tt.fallible_inner(ret).map(|t| self.tt.get(t)), Some(Type::Void));
         if needs_return && !body.has_errors() && !stmt::terminates(&block.stmts, false) {

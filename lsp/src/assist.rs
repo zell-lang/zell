@@ -119,7 +119,8 @@ impl<'a> Walker<'a, '_> {
                 self.block(body);
                 self.block(handler);
             }
-            StmtKind::Break | StmtKind::Continue | StmtKind::Error => {}
+            StmtKind::Labeled { stmt, .. } => self.stmt(stmt),
+            StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Error => {}
         }
     }
 

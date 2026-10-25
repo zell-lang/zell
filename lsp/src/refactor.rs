@@ -301,7 +301,7 @@ fn extract_fn(a: &Analysis, file: usize, ast: &ast::File, text: &str, sel: Span)
     for s in &stmts {
         Walker {
             on_stmt: &mut |s| {
-                if matches!(s.kind, StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue) {
+                if matches!(s.kind, StmtKind::Return(_) | StmtKind::Break(_) | StmtKind::Continue(_)) {
                     jumps = true;
                 }
             },

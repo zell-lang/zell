@@ -159,8 +159,12 @@ tuple_type ::= LPAREN type (COMMA type)+ RPAREN
 // ---------------------------------------------------------------------------
 
 block ::= LBRACE statement* RBRACE
-statement ::= (var_decl | const_decl | if_stmt | for_stmt | switch_stmt | try_stmt | return_stmt
+statement ::= (labeled_stmt | var_decl | const_decl | if_stmt | for_stmt | switch_stmt | try_stmt | return_stmt
              | break_stmt | continue_stmt | defer_stmt | block | assign_stmt | expr_stmt) eos?
+
+// Go labels: `outer:` on its own line (no `;` after `:`) or before the
+// statement; only a for or a switch can be labeled.
+labeled_stmt ::= IDENTIFIER COLON (for_stmt | switch_stmt)
 
 if_stmt ::= IF expr block (ELSE (if_stmt | block))?
 
@@ -184,8 +188,9 @@ type_bind_pattern ::= type IDENTIFIER &(COLON | COMMA)
 try_stmt ::= TRY block CATCH var_name block
 
 return_stmt ::= RETURN (expr (COMMA expr)*)?
-break_stmt ::= BREAK
-continue_stmt ::= CONTINUE
+// the label is on the same line (a `;` follows a bare `break`)
+break_stmt ::= BREAK IDENTIFIER?
+continue_stmt ::= CONTINUE IDENTIFIER?
 defer_stmt ::= DEFER expr
 // `a, b = b, a` (all right-hand values are evaluated first) and
 // `(q, r) = f()` (tuple result, `_` discards) assign to existing places.

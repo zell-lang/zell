@@ -736,8 +736,9 @@ impl<'a> Fmt<'a> {
                     concat(vec![text("return "), self.expr_list(es)])
                 }
             }
-            StmtKind::Break => text("break"),
-            StmtKind::Continue => text("continue"),
+            StmtKind::Break(l) => text(l.as_ref().map_or("break".to_string(), |l| format!("break {}", l.name))),
+            StmtKind::Continue(l) => text(l.as_ref().map_or("continue".to_string(), |l| format!("continue {}", l.name))),
+            StmtKind::Labeled { label, stmt } => concat(vec![text(format!("{}:", label.name)), Doc::Hard, self.stmt(stmt)]),
             StmtKind::Defer(e) => concat(vec![text("defer "), self.expr(e)]),
             StmtKind::Expr(e) => self.expr(e),
             StmtKind::Assign { target, op, value } => concat(vec![self.expr(target), text(format!(" {} ", assignop(*op))), self.expr(value)]),
@@ -1265,7 +1266,7 @@ impl<'a> Fmt<'a> {
 
 /// Statements that may share a line with their block's braces.
 fn single_line_stmt(s: &Stmt) -> bool {
-    !matches!(s.kind, StmtKind::If(_) | StmtKind::For(_) | StmtKind::Switch(_) | StmtKind::Block(_) | StmtKind::TryBlock { .. } | StmtKind::Var(_) | StmtKind::Const(_))
+    !matches!(s.kind, StmtKind::If(_) | StmtKind::For(_) | StmtKind::Switch(_) | StmtKind::Block(_) | StmtKind::TryBlock { .. } | StmtKind::Var(_) | StmtKind::Const(_) | StmtKind::Labeled { .. })
 }
 
 fn col1_multiline(rows: &[Row]) -> bool {

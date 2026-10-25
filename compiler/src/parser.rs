@@ -1012,6 +1012,14 @@ impl Parser<'_> {
         stmts
     }
 
+    /// The optional label of `break` / `continue` (on the same line).
+    fn jump_label(&mut self) -> PResult<Option<Ident>> {
+        if matches!(self.peek(), TokenKind::Ident(_)) {
+            return Ok(Some(self.ident()?));
+        }
+        Ok(None)
+    }
+
     fn stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
         let kind = match self.peek() {
@@ -1026,11 +1034,22 @@ impl Parser<'_> {
             }
             TokenKind::Break => {
                 self.bump();
-                StmtKind::Break
+                StmtKind::Break(self.jump_label()?)
             }
             TokenKind::Continue => {
                 self.bump();
-                StmtKind::Continue
+                StmtKind::Continue(self.jump_label()?)
+            }
+            TokenKind::Ident(_) if self.peek_n(1) == &TokenKind::Colon => {
+                let label = self.ident()?;
+                self.bump();
+                while self.eat(&TokenKind::Semi) {}
+                if !matches!(self.peek(), TokenKind::For | TokenKind::Switch) {
+                    let sp = self.span();
+                    return Err(self.error_at(sp, format!("label {} must be followed by a for or switch statement", label.name)));
+                }
+                let stmt = self.stmt()?;
+                StmtKind::Labeled { label, stmt: Box::new(stmt) }
             }
             TokenKind::Defer => {
                 self.bump();

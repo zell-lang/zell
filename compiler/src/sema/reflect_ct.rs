@@ -531,7 +531,8 @@ fn stmt_mutates(s: &ast::Stmt, name: &str) -> bool {
         ast::StmtKind::Assign { target, value, .. } => target_is(target, name) || e(target) || e(value),
         ast::StmtKind::Block(x) => b(x),
         ast::StmtKind::TryBlock { body, handler, .. } => b(body) || b(handler),
-        ast::StmtKind::Break | ast::StmtKind::Continue | ast::StmtKind::Error => false,
+        ast::StmtKind::Labeled { stmt, .. } => stmt_mutates(stmt, name),
+        ast::StmtKind::Break(_) | ast::StmtKind::Continue(_) | ast::StmtKind::Error => false,
     }
 }
 

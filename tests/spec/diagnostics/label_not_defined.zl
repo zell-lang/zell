@@ -1,0 +1,13 @@
+// error: break label not defined: outer
+// status: passing
+namespace spec.diagnostics.label_not_defined
+
+import io
+
+func main() {
+    for i in 0..3 {
+        if i == 1 {
+            break outer
+        }
+    }
+}

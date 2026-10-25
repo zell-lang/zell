@@ -729,8 +729,8 @@ fn simple_statements() {
     assert!(matches!(&s[0].kind, StmtKind::Return(v) if v.is_empty()));
     assert!(matches!(&s[1].kind, StmtKind::Return(v) if v.len() == 1));
     assert!(matches!(&s[2].kind, StmtKind::Return(v) if v.len() == 2));
-    assert!(matches!(s[3].kind, StmtKind::Break));
-    assert!(matches!(s[4].kind, StmtKind::Continue));
+    assert!(matches!(s[3].kind, StmtKind::Break(None)));
+    assert!(matches!(s[4].kind, StmtKind::Continue(None)));
     assert!(matches!(&s[5].kind, StmtKind::Defer(e) if show(e) == "f.Close()"));
     assert!(matches!(&s[6].kind, StmtKind::Assign { op: AssignOp::Assign, .. }));
     assert!(matches!(&s[7].kind, StmtKind::Assign { op: AssignOp::Add, target, .. } if show(target) == "this.X"));
