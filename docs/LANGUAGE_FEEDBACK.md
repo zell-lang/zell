@@ -297,3 +297,216 @@ the next `Send`; arenas crash in `zell_retain` past ~12 000 objects).
     `WithTimeout(60, () => ch.Send(x))` on a buffered channel runs at once.
     Documentation gap: the async guide should show "delay an action" as
     `await task.Delay(ms)` in a spawned function and name the difference.
+
+## Kitchen-sink program (2026-10-25)
+
+Found while writing `examples/kitchen_sink.zl` (about 1500 lines, one file:
+an order service with config parsing in JSON, TOML and YAML, validation
+through attributes, generic pipelines, async workers, an LRU cache,
+reports). Each item has a minimal repro. The workaround is what the program
+uses now. Open items this program confirmed again: **5/32** (`async func`
+in an interface; `Notifier` returns `Task<int>` from a private async
+function), **12** (`math.Min/Max` take only floats; `minInt`/`maxInt`
+written by hand), **33** (see 67), **46** (see 78).
+
+57. ❌ **bug:** **writing into the slice from `reflect.TypesWith<A>()` crashes
+    the process (SIGSEGV)**. The slice points at the read-only static table,
+    so `slices.SortBy` crashes, and so does a plain `ts[0] = ts[1]`.
+    ```zell
+    var ts = reflect.TypesWith<job>()
+    slices.SortBy(ts, (t *reflect.TypeInfo) => t.Attribute<job>().order)  // exit 139
+    ```
+    Workaround: `slices.Clone(reflect.TypesWith<handler>())`. **Decision:**
+    `TypesWith` returns a fresh heap slice. The table can stay static, and
+    the copy costs one allocation per call. The other choice is a slice
+    flagged as read-only, so writes panic with `cannot modify a reflection
+    table`. Add a spec test that sorts the result.
+58. ❌ **bug:** **a real SIGSEGV (as in 57) prints nothing and loses all
+    buffered stdout**: the ~90 lines the program had already printed were
+    gone, with no message and exit code 139. A nil dereference is caught
+    and reported properly, but its debug backtrace starts with a raw
+    `…/prog(zell_panic_nil+0x12)[0x4684c2]` line before `r_nil.zl:9 main`.
+    **Decision:** add a SIGSEGV/SIGBUS handler in `runtime/src/platform/`
+    that flushes stdout and prints `fatal error: unexpected signal SIGSEGV`
+    plus the backtrace (Go prints the same), then exits with status 2.
+    Hide `zell_panic_*` frames from backtraces.
+59. ❌ **bug:** **methods of a generic enum cannot be called**: "cannot call
+    method Or on value of type Opt<int> … methods exist only on structs,
+    enums and interfaces".
+    ```zell
+    enum Opt<T> {
+        Some(v T)
+        None
+        func Or(d T) T { switch this { case Opt.Some(v): return v
+                                       case Opt.None: return d } }
+    }
+    println(Opt<int>.Some(3).Or(0))
+    ```
+    Workaround: a free generic function `orElse<T>(l Lookup<T>, fallback T)`.
+    **Decision:** methods of a generic enum get the same instantiation path
+    as methods of a generic struct. The tour says enums take type
+    parameters and methods.
+60. ❌ **bug:** **`var (a, b) = m[k]` with a 2-tuple value type means comma-ok,
+    not destructuring**: with `m map[string](int, int)`, `a` is the tuple and
+    `b` is the `bool`, and the error only shows up later ("(int, int) cannot
+    be printed").
+    ```zell
+    var m = map[string](int, int){"a": (1, 2)}
+    var (lo, hi) = m["a"]          // lo: (int, int), hi: bool
+    ```
+    Workaround: `var pair = m[k]; var (lo, hi) = pair`. **Decision:** a
+    destructuring with N names over `m[k]` destructures the value when V is
+    an N-tuple. It means comma-ok only when N == 2 and V is not a 2-tuple.
+    An N-tuple V with N+1 names gives the elements plus `ok`. Write this
+    rule in DESIGN.md next to comma-ok.
+61. ❌ **bug (diagnostic):** **`json.Parse` without `import encoding.json`
+    names an internal struct**: "Parse is not a static method of struct
+    json", and for TOML "…of struct tomlAttr". `strings.`/`fmt.` work
+    without an import, so a user expects `json.` to work too. **Decision:**
+    when `X.Name` resolves to an attribute struct and a std namespace
+    `….X` exports `Name`, report `json here is the @json attribute; add
+    "import encoding.json" to call json.Parse`. Never print the `tomlAttr`
+    / `yamlAttr` names. (Item 10 fixed the case with the import.)
+62. ❌ **bug (diagnostic) / inconsistency:** **a map literal through a type
+    alias does not parse** (`type Inventory = map[Sku]int;
+    Inventory{"apple": 10}` gives "expected identifier, found string
+    literal"), and the parser then reports every following statement of the
+    function as "expected declaration". Struct literals work through an
+    alias (`P{X: 1}`), and the tour says aliases work in literals.
+    Workaround: `map[Sku]int{…}`. **Decision:** `Alias{k: v}` over a map
+    alias is a map literal. The parser can accept `name { expr : expr }`
+    and let sema decide whether it is a struct or a map. Recover at the
+    closing `}` so one bad literal does not report the rest of the
+    function.
+63. ❌ **bug (diagnostic):** **follow-up errors mention `<invalid>`**: "value
+    of type (<invalid>) cannot be printed", "cannot use func(int) <invalid>
+    as func(int) void!", "cannot return (<invalid>, bool) …". **Decision:**
+    an expression whose type contains `<invalid>` produces no further
+    diagnostics.
+64. ❌ **inconsistency:** **`println` and `fmt.Format` ignore a `String()
+    string` method** ("value of type Money cannot be printed") even though
+    `fmt.Stringer` exists (DESIGN.md mentions `implements fmt.Stringer`).
+    Workaround: `.String()` written at every call site (about 15 times in the
+    program). **Decision:** like Go, `println`, `print`, `fmt.Format` `{N}`
+    and `fmt.Sprintf` `%v`/`%s` call `String()` on structs and enums that
+    have it (static dispatch, monomorphized). Write it in DESIGN.md and
+    `examples/README.md` output rules.
+65. ❌ **inconsistency:** **`strings.Trim(s)` is Go's `TrimSpace`**, while
+    `TrimLeft(s, cutset)` / `TrimRight(s, cutset)` take a cutset, and there
+    is no `TrimSpace`. A Go user's `strings.Trim(s, ",")` fails with
+    "expected 1, got 2". **Decision:** add `TrimSpace(s)` and make
+    `Trim(s, cutset)` take a cutset as in Go. If that breaks too much,
+    keep `Trim(s)` and add `TrimSpace` plus `TrimChars(s, cutset)`.
+66. ❌ **spec gap:** **every attribute field without a default is a
+    required argument**: `@rule(min: 1)` on a 5-field attribute gives four
+    "missing argument" errors. DESIGN.md «Атрибуты» only says that applied
+    attributes use "the arguments and the field defaults". Workaround: `= 0`
+    / `= ""` / `= false` on every field. **Decision:** like C# named
+    arguments, an omitted argument takes the field's default, or else its
+    zero value. A field that must be given is marked
+    (`@required name string`) if that is ever needed.
+67. ❌ **ergonomics (extends 33):** **the body of a compile-time
+    `reflect.Fields<T>()` loop is unrolled per field, but nothing in it
+    branches on the field's type**: (a) `switch f.Get(v) { case string s:
+    … }` is rejected with "type pattern string needs an interface or error
+    subject, found string", once per field and case; (b) `if f.Type.Kind
+    == reflect.Kind.String { f.Get(v) == "" }` is still checked for `int`
+    fields; (c) there is no `f.Set(&v, x)`, so `@rule(default:)` cannot be
+    applied.
+    ```zell
+    for f in reflect.Fields<T>() {
+        switch f.Get(v) { case string s: … case int n: … }   // rejected
+    }
+    ```
+    Workaround: `var value any = f.Get(v)` and a run-time type switch (it
+    boxes). Defaults are only listed, never applied. **Decision:** inside an
+    unrolled `Fields<T>` body, (a) a type switch on a value of known
+    static type folds to the one matching case (a mismatched case is dead,
+    not an error); (b) conditions on `f.Type.Kind`, `f.Type ==
+    reflect.TypeOf<X>()` and `f.Attribute<A>() != nil` are static `if`
+    conditions; (c) add `f.Set(target *T, value)` with the field's static
+    type.
+68. ❌ **spec gap:** **there is no way to pass a slice to a variadic
+    parameter**, so `task.All` cannot wait on a number of tasks known only
+    at run time ("task.All arguments must be tasks, found []Task<int>"),
+    and `append(xs, ys...)` does not parse.
+    Workaround: `for t in pending { out = append(out, await t) }`, which
+    loses the fail-fast cancellation of `All`, and `slices.Concat`.
+    **Decision:** add Go's spread `f(xs...)` for variadic parameters, and
+    have `task.All` of a `[]Task<T>` give `Task<[]T>` (`[]T!` when T is
+    fallible, with the first error cancelling the rest).
+69. ❌ **ergonomics:** **fixed arrays have no literal**: `var a [3]string =
+    ["a", "b", "c"]` is "cannot assign []string to variable of type
+    [3]string", and the Go form `[3]string{…}` does not parse. Workaround:
+    one assignment per element (the `labels` array). **Decision:** a slice
+    literal of exactly N constant-length elements converts implicitly to
+    `[N]T` where that type is expected. A length mismatch is an error
+    `array literal has 2 elements, want 3`.
+70. ❌ **ergonomics:** **tuples cannot be printed and have no element
+    access**: `println(t)` fails, and so do `t.0` and `t._0` (reflection
+    names them `_0`, `_1`). Only destructuring works. **Decision:** print
+    tuples as `(1 x)` (Go-like, space-separated), and allow `t.0`, `t.1`
+    as in Rust/Swift.
+71. ❌ **ergonomics:** **`char` has no arithmetic**: `c - 'a'` ("operator -
+    is not defined on char") and `'a' + 2` both fail, so a Caesar shift is
+    `char(int('a') + (int(r) - int('a') + k) % 26)`. **Decision:** like Go
+    runes, `char - char` gives `int`, and `char ± int` gives `char`
+    (checked for a valid code point in debug builds). Comparisons already
+    work.
+72. ❌ **ergonomics:** **`nil` in a tuple `return` is "use of untyped nil"**
+    even though the result type `(*Order, bool)` is known. Workaround: `var
+    none *Order = nil; return (none, false)` (in the iterator `Next`).
+    **Decision:** a tuple literal in a `return`, an assignment or an
+    argument position takes its expected type element by element, so `nil`
+    gets typed.
+73. ❌ **ergonomics:** **there is no value-producing error or conditional
+    expression**. A `catch` block cannot end with a value (`catch err {
+    println(err); 0 }` gives "expression is evaluated but not used"), and
+    `a ? b : c` gives "expected `,` or `)`" because `?` parses as
+    propagation. Workaround: `var x = default; try { x = f()? } catch err
+    { log }` (twice in `demoAsync`), and `if` statements instead of the
+    ternary. **Decision:** a `catch` block may end with an expression of the
+    `try`'s type, which becomes its value (Kotlin). No ternary; instead,
+    report "Zell has no ?: operator; use if/else" when `?` is followed by
+    an expression and `:`.
+74. ❌ **spec gap:** **no labeled `break`/`continue`**. DESIGN.md «switch»
+    lists it as an open question, and `break` inside `case` cannot leave
+    the loop. A nested search returns from a helper (`firstSharedSku`)
+    instead. **Decision:** Go labels, `name:` on the line before `for`, plus
+    `break name` / `continue name`. This also answers the `case` question.
+75. ❌ **ergonomics:** **`i++` gives "expected expression, found `+`"**, then
+    "expected expression, found `var`" on the next line. **Decision:**
+    either add Go's `i++` / `i--` statements (not expressions), or report
+    `Zell has no ++; write i += 1` and recover.
+76. ❌ **spec gap:** **method values are not supported** ("method C.Inc must
+    be called"), while plain functions are values (`.Then("limits",
+    ValidateOrder)`). Workaround: `() => c.Inc()`. **Decision:** `x.M`
+    without a call is a closure that captures `x` (a pointer receiver
+    keeps the object alive, as Go does), and `T.M` is a function whose
+    first parameter is the receiver.
+77. ❌ **ergonomics (diagnostic):** **an attribute after the field (Go tag
+    position)** gives "expected end of line, found `@`". **Decision:** keep
+    the C# position, and report `attributes go before the field: @json(…)
+    OrderId int`.
+78. ❌ **ergonomics (variant of 46):** **an expression-bodied lambda cannot
+    pass a `T!` through**: `(x *Order) => ValidateOrder(x)` where
+    `func(*Order) void!` is expected gives "result of type void! must be
+    handled" and "cannot use func(*Order) <invalid>". Workaround: pass the
+    function itself, or use a block body with `?`. **Decision:** the
+    expression body of a lambda whose expected result is `T!` may be a `T!`
+    (it is the lambda's result, not an ignored value). This does not
+    change the `return f()` rule of 46.
+79. ❌ **ergonomics:** **a custom iterator cannot yield pointers to its
+    elements** (`Next() (*Order, bool)` returning `&this.book.orders[i]`
+    is "cannot keep interior pointer"), so a collection cannot offer
+    `for o in book { o.Status = … }`. Workaround: store `[]*Order`.
+    **Decision:** keep the rule, and document "iterate by index or store
+    pointers" in memory.md. Or let `for` over a slice field bind `&x` as
+    a loop-local interior pointer (`for &o in this.orders`).
+80. ❌ **compile time/size note:** `zell build` of the 1500-line file takes
+    1.3 s with a 595 MB peak RSS (debug; `hello.zl`: 0.36 s, 86 MB), and
+    `--release` takes 4.2 s / 310 MB. The binary is 4.4 MB debug and 978 KB
+    release (`hello`: 46 KB release). The debug build uses about twice the
+    memory of the release build, which is worth profiling before files get
+    larger. No decision needed: record it in `benchmarks/README.md` if it
+    is tracked.

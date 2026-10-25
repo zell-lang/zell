@@ -1,0 +1,1509 @@
+// Kitchen sink: an in-memory order processing service.
+// It exercises the whole language in one file; the problems met while writing
+// it are items 57-80 of docs/LANGUAGE_FEEDBACK.md (workarounds are marked there).
+namespace shop.kitchen
+
+import io
+import encoding.json
+import encoding.toml
+import encoding.yaml
+
+// ---------------------------------------------------------------- constants
+
+const ServiceName = "kitchen-shop"
+const MaxItemsPerOrder = 8
+const TaxPercent = 20
+const ErrOutOfStock = error("out of stock")
+const ErrUnknownSku = error("unknown sku")
+
+// ---------------------------------------------------------------- aliases
+
+type Sku = string
+type Cents = int
+type Stage = func(*Order) void!
+type Inventory = map[Sku]int
+
+// ---------------------------------------------------------------- attributes
+
+@attribute(targets: [reflect.Target.Field])
+struct rule {
+    required bool = false
+    min      int = 0
+    max      int = 0
+    enum     string = ""
+    default  string = ""
+}
+
+@attribute(targets: [reflect.Target.Struct])
+struct handler {
+    name  string
+    order int = 0
+}
+
+// ---------------------------------------------------------------- config
+
+struct WorkerConfig {
+    Count     int
+    QueueSize int
+    TimeoutMs int
+}
+
+struct Config {
+    Name      string
+    Currency  string
+    Workers   WorkerConfig
+    Discounts map[string]int
+    Regions   []string
+}
+
+const configJson = `{
+  "Name": "kitchen",
+  "Currency": "EUR",
+  "Workers": {"Count": 3, "QueueSize": 4, "TimeoutMs": 50},
+  "Discounts": {"SPRING": 10, "VIP": 25},
+  "Regions": ["eu", "us", "asia"]
+}`
+
+const configToml = `
+Name = "kitchen-toml"
+Currency = "USD"
+Regions = ["us"]
+
+[Workers]
+Count = 2
+QueueSize = 2
+TimeoutMs = 20
+
+[Discounts]
+WELCOME = 5
+`
+
+const configYaml = `
+Name: kitchen-yaml
+Currency: GBP
+Workers:
+  Count: 1
+  QueueSize: 1
+  TimeoutMs: 10
+Discounts:
+  STAFF: 50
+Regions:
+  - uk
+`
+
+func loadConfig(format string) Config! {
+    switch format {
+        case "json": return json.Parse<Config>(configJson)?("json config")
+        case "toml": return toml.Parse<Config>(configToml)?("toml config")
+        case "yaml": return yaml.Parse<Config>(configYaml)?("yaml config")
+    }
+    return error("unknown config format " + strconv.Quote(format))
+}
+
+// ---------------------------------------------------------------- money
+
+struct Money {
+    Amount Cents
+    Currency string
+
+    func Add(o Money) Money {
+        return Money{Amount: this.Amount + o.Amount, Currency: this.Currency}
+    }
+    func Sub(o Money) Money {
+        return Money{Amount: this.Amount - o.Amount, Currency: this.Currency}
+    }
+    func Mul(k int) Money {
+        return Money{Amount: this.Amount * k, Currency: this.Currency}
+    }
+    func Div(k int) Money {
+        return Money{Amount: this.Amount / k, Currency: this.Currency}
+    }
+    func Compare(o Money) int {
+        return this.Amount - o.Amount
+    }
+    func Equals(o Money) bool {
+        return this.Amount == o.Amount && this.Currency == o.Currency
+    }
+    func String() string {
+        var sign = ""
+        var a = this.Amount
+        if a < 0 {
+            sign = "-"
+            a = -a
+        }
+        return fmt.Sprintf("%s%d.%02d %s", sign, a / 100, a % 100, this.Currency)
+    }
+    static func Zero(currency string) Money {
+        return Money{Currency: currency}
+    }
+}
+
+// ---------------------------------------------------------------- domain
+
+enum Tier { Basic, Silver, Gold }
+
+enum Status {
+    New
+    Paid(amount Money)
+    Shipped(carrier string, tracking int)
+    Cancelled(reason string)
+
+    func Label() string {
+        switch this {
+            case Status.New: return "new"
+            case Status.Paid(m): return "paid " + m.String()
+            case Status.Shipped(c, t): return fmt.Format("shipped via {0} #{1}", c, t)
+            case Status.Cancelled(r): return "cancelled: " + r
+        }
+    }
+}
+
+struct Audit {
+    CreatedBy string
+    Version   int
+
+    func Touch(who string) {
+        this.CreatedBy = who
+        this.Version += 1
+    }
+}
+
+struct Customer {
+    Id     int
+    Name   string
+    Tier   Tier
+    Orders []*Order
+
+    func Key() string {
+        return strings.ToLower(this.Name)
+    }
+}
+
+struct LineItem {
+    @rule(required: true) Sku Sku
+    @rule(min: 1, max: 99) Qty int
+    PriceCents Cents
+}
+
+struct Order {
+    Audit
+    @rule(min: 1) Id int
+    @rule(required: true) Region string
+    @rule(enum: "card,cash,invoice", default: "card") Payment string
+    Coupon   string
+    Items    []LineItem
+    Status   Status
+    Customer weak *Customer
+    Total    Money
+
+    func ItemCount() int {
+        var n = 0
+        for it in this.Items {
+            n += it.Qty
+        }
+        return n
+    }
+
+    static func Parse(line string) Order! {
+        // id;region;payment;coupon;sku:qty:price,sku:qty:price
+        var parts = strings.Split(line, ";")
+        if len(parts) != 5 {
+            return ParseError{Line: line, Reason: fmt.Format("want 5 fields, got {0}", len(parts))}
+        }
+        var id = strings.ToInt(parts[0])?("order id")
+        var o = Order{Id: id, Region: parts[1], Payment: parts[2], Coupon: parts[3]}
+        for spec in strings.Split(parts[4], ",") {
+            var f = strings.Split(spec, ":")
+            if len(f) != 3 {
+                return ParseError{Line: line, Reason: "bad item " + strconv.Quote(spec)}
+            }
+            var qty = strings.ToInt(f[1])?("qty of " + f[0])
+            var price = strings.ToInt(f[2])?("price of " + f[0])
+            o.Items = append(o.Items, LineItem{Sku: f[0], Qty: qty, PriceCents: price})
+        }
+        return o
+    }
+}
+
+// ---------------------------------------------------------------- errors
+
+struct ParseError {
+    Line   string
+    Reason string
+    func Message() string {
+        return "parse " + strconv.Quote(this.Line) + ": " + this.Reason
+    }
+}
+
+struct ValidationError {
+    Field  string
+    Reason string
+    func Message() string {
+        return this.Field + " " + this.Reason
+    }
+}
+
+struct StockError {
+    Sku   Sku
+    Want  int
+    Have  int
+    cause error
+    func Message() string {
+        return fmt.Format("sku {0}: want {1}", this.Sku, this.Want)
+    }
+    func Unwrap() error {
+        return this.cause
+    }
+}
+
+// ---------------------------------------------------------------- generics
+
+interface Keyed {
+    func Key() string
+}
+
+func MaxBy<T, K: Ordered>(xs []T, key func(T) K) (T, bool) {
+    var best T
+    if len(xs) == 0 {
+        return (best, false)
+    }
+    best = xs[0]
+    for x in xs[1..] {
+        if key(x) > key(best) {
+            best = x
+        }
+    }
+    return (best, true)
+}
+
+func Filter<T>(xs []T, keep func(T) bool) []T {
+    var out []T = []
+    for x in xs {
+        if keep(x) {
+            out = append(out, x)
+        }
+    }
+    return out
+}
+
+func Reduce<T, A>(xs []T, init A, f func(A, T) A) A {
+    var acc = init
+    for x in xs {
+        acc = f(acc, x)
+    }
+    return acc
+}
+
+func GroupBy<T, K: Comparable>(xs []T, key func(T) K) map[K][]T {
+    var out = map[K][]T{}
+    for x in xs {
+        var k = key(x)
+        out[k] = append(out[k], x)
+    }
+    return out
+}
+
+func IndexByKey<T: Keyed>(xs []T) map[string]T {
+    var out = map[string]T{}
+    for x in xs {
+        out[x.Key()] = x
+    }
+    return out
+}
+
+struct Pair<A, B> {
+    First  A
+    Second B
+
+    func Swap() Pair<B, A> {
+        return Pair<B, A>{First: this.Second, Second: this.First}
+    }
+}
+
+// A pipeline of fallible stages over one value.
+struct Pipeline<T> {
+    stages []func(*T) void!
+    names  []string
+
+    func Then(name string, f func(*T) void!) *Pipeline<T> {
+        this.stages = append(this.stages, f)
+        this.names = append(this.names, name)
+        return this
+    }
+
+    func Run(v *T) void! {
+        for i, st in this.stages {
+            st(v)?(this.names[i])
+        }
+    }
+}
+
+// ---------------------------------------------------------------- cache
+
+struct cacheEntry<K, V> {
+    key  K
+    val  V
+    prev weak *cacheEntry<K, V>
+    next *cacheEntry<K, V>
+}
+
+// A small LRU written by hand; collections.LRU is used for comparison.
+struct Cache<K: Comparable, V> {
+    cap   int
+    items map[K]*cacheEntry<K, V>
+    head  *cacheEntry<K, V>
+    tail  weak *cacheEntry<K, V>
+    hits  int
+    miss  int
+
+    static func New(cap int) *Cache<K, V> {
+        return new Cache<K, V>{cap: cap, items: map[K]*cacheEntry<K, V>{}}
+    }
+
+    func unlink(e *cacheEntry<K, V>) {
+        var p = e.prev
+        if p != nil {
+            p.next = e.next
+        } else {
+            this.head = e.next
+        }
+        if e.next != nil {
+            e.next.prev = p
+        } else {
+            this.tail = p
+        }
+        e.prev = nil
+        e.next = nil
+    }
+
+    func pushFront(e *cacheEntry<K, V>) {
+        e.next = this.head
+        if this.head != nil {
+            this.head.prev = e
+        }
+        this.head = e
+        if this.tail == nil {
+            this.tail = e
+        }
+    }
+
+    func Get(k K) (V, bool) {
+        var e, ok = this.items[k]
+        if !ok {
+            this.miss += 1
+            var zero V
+            return (zero, false)
+        }
+        this.hits += 1
+        this.unlink(e)
+        this.pushFront(e)
+        return (e.val, true)
+    }
+
+    func Put(k K, v V) {
+        var e, ok = this.items[k]
+        if ok {
+            e.val = v
+            this.unlink(e)
+            this.pushFront(e)
+            return
+        }
+        if len(this.items) >= this.cap {
+            var last = this.tail
+            if last != nil {
+                this.unlink(last)
+                delete(this.items, last.key)
+            }
+        }
+        var ne = new cacheEntry<K, V>{key: k, val: v}
+        this.items[k] = ne
+        this.pushFront(ne)
+    }
+
+    func Keys() []K {
+        var out []K = []
+        var e = this.head
+        for e != nil {
+            out = append(out, e.key)
+            e = e.next
+        }
+        return out
+    }
+}
+
+// ---------------------------------------------------------------- iterators
+
+struct OrderBook {
+    orders []*Order
+
+    func Iter() bookIter {
+        return bookIter{book: this, i: 0}
+    }
+
+    func Add(o *Order) {
+        this.orders = append(this.orders, o)
+    }
+
+    func Len() int {
+        return len(this.orders)
+    }
+}
+
+struct bookIter {
+    book *OrderBook
+    i    int
+
+    func Next() (*Order, bool) {
+        if this.i >= len(this.book.orders) {
+            var none *Order = nil
+            return (none, false)
+        }
+        var o = this.book.orders[this.i]
+        this.i += 1
+        return (o, true)
+    }
+}
+
+// Fibonacci-style id generator: a custom iterator with two loop variables.
+struct idRange {
+    from int
+    to   int
+    step int
+
+    func Next() (int, string, bool) {
+        if this.from >= this.to {
+            return (0, "", false)
+        }
+        var v = this.from
+        this.from += this.step
+        return (v, fmt.Format("ORD-{0}", v), true)
+    }
+}
+
+// ---------------------------------------------------------------- control flow
+
+func classifyQty(q int) string {
+    switch q {
+        case 0: return "none"
+        case 1, 2: return "few"
+        case 3..10: return "some"
+        case q > 50: return "bulk"
+        default: return "many"
+    }
+}
+
+func tierFor(spent Cents) Tier {
+    switch {
+        case spent >= 5000: return Tier.Gold
+        case spent >= 1000: return Tier.Silver
+    }
+    return Tier.Basic
+}
+
+func tierDiscount(t Tier) int {
+    switch t {
+        case Tier.Basic: return 0
+        case Tier.Silver: return 5
+        case Tier.Gold: return 10
+    }
+}
+
+// Finds the first pair of orders that share a sku: a nested search.
+func firstSharedSku(orders []Order) (int, int, Sku, bool) {
+    for i, a in orders {
+        for j in i + 1..len(orders) {
+            for x in a.Items {
+                for y in orders[j].Items {
+                    if x.Sku == y.Sku {
+                        return (a.Id, orders[j].Id, x.Sku, true)
+                    }
+                }
+            }
+        }
+    }
+    return (0, 0, "", false)
+}
+
+func counterFactory() (func() int, func() int) {
+    var n = 0
+    var inc = func() int {
+        n += 1
+        return n
+    }
+    var get = () => n
+    return (inc, get)
+}
+
+func withTrace(log *[]string, name string) {
+    *log = append(*log, "enter " + name)
+    defer func() {
+        *log = append(*log, "leave " + name)
+    }()
+    for i in 0..3 {
+        defer func() {
+            *log = append(*log, fmt.Format("defer {0}", i))
+        }()
+    }
+}
+
+func demoGenericsAndFlow() {
+    println("== generics and control flow")
+    var nums = [5, 3, 9, 1, 7]
+    var (best, ok) = MaxBy(nums, (x int) => x)
+    println("max", best, ok)
+    var words = ["kiwi", "apple", "fig", "banana"]
+    var (longest, _) = MaxBy(words, (w string) => len(w))
+    println("longest", longest)
+    println("even", Filter(nums, (x int) => x % 2 == 0), "odd", Filter(nums, (x) => x % 2 == 1))
+    var sum = Reduce(nums, 0, (a int, x int) => a + x)
+    var csv = Reduce(words, "", (a string, w string) => strings.TrimLeft(a + "," + w, ","))
+    println("sum", sum, "csv", csv)
+    var byLen = GroupBy(words, (w string) => len(w))
+    for k in maps.SortedKeys(byLen) {
+        println("  len", k, byLen[k])
+    }
+    var p = Pair<string, int>{First: "x", Second: 1}
+    var q = p.Swap()
+    println("pair", q.First, q.Second)
+    for q in [0, 2, 5, 60, 20] {
+        print(classifyQty(q), " ")
+    }
+    println()
+    println("tiers", tierFor(200), tierFor(1200), tierFor(9000), tierDiscount(Tier.Gold))
+    var (inc, get) = counterFactory()
+    inc()
+    inc()
+    println("counter", get(), inc())
+    var log []string = []
+    withTrace(&log, "f")
+    println(strings.Join(log, " | "))
+    var ids []string = []
+    for v, label in (idRange{from: 100, to: 130, step: 10}) {
+        ids = append(ids, label + "=" + strconv.Itoa(v))
+    }
+    println(ids)
+    var c = Cache<string, int>.New(2)
+    c.Put("a", 1)
+    c.Put("b", 2)
+    var _, hit = c.Get("a")
+    c.Put("c", 3)
+    var _, gone = c.Get("b")
+    println("cache", c.Keys(), hit, gone, c.hits, c.miss)
+    var lru = collections.LRU<string, int>.New(2)
+    lru.Set("a", 1)
+    lru.Set("b", 2)
+    lru.Get("a")
+    lru.Set("c", 3)
+    println("lru", lru.Keys(), lru.Has("b"), lru.Evictions())
+}
+// ---------------------------------------------------------------- async
+
+struct Stats {
+    mu        task.Mutex
+    processed int
+    failed    int
+    revenue   Cents
+    results   []string
+
+    async func Record(line string, cents Cents, ok bool) {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        if ok {
+            this.processed += 1
+            this.revenue += cents
+        } else {
+            this.failed += 1
+        }
+        this.results = append(this.results, line)
+    }
+}
+
+struct Warehouse {
+    mu    task.Mutex
+    stock Inventory
+    price map[Sku]Cents
+
+    async func Reserve(sku Sku, qty int) void! {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        var have, ok = this.stock[sku]
+        if !ok {
+            return errors.Wrap(ErrUnknownSku, sku)
+        }
+        if have < qty {
+            return StockError{Sku: sku, Want: qty, Have: have, cause: ErrOutOfStock}
+        }
+        this.stock[sku] = have - qty
+    }
+}
+
+async func priceOrder(w *Warehouse, o *Order, currency string) Money! {
+    var total = Money.Zero(currency)
+    for it in o.Items {
+        var p, known = w.price[it.Sku]
+        if !known {
+            return errors.Wrap(ErrUnknownSku, it.Sku)
+        }
+        if it.PriceCents != p {
+            return ValidationError{Field: "price of " + it.Sku, Reason: fmt.Format("is {0}, catalog says {1}", it.PriceCents, p)}
+        }
+        await w.Reserve(it.Sku, it.Qty)?("reserve")
+        total += Money{Amount: p, Currency: currency} * it.Qty
+    }
+    return total
+}
+
+async func worker(jobs task.Channel<*Order>, w *Warehouse, st *Stats, wg *task.WaitGroup, currency string) {
+    defer wg.Done()
+    for o in jobs {
+        var total = try await priceOrder(w, o, currency) catch err {
+            var kind = "error"
+            if errors.Is(err, ErrOutOfStock) {
+                kind = "stock"
+            } else if errors.Is(err, ErrUnknownSku) {
+                kind = "sku"
+            }
+            var se StockError
+            if errors.As(err, &se) {
+                kind += fmt.Format("(want {0})", se.Want)
+            }
+            o.Status = Status.Cancelled(kind)
+            await st.Record(fmt.Format("order {0}: {1}: {2}", o.Id, kind, err), 0, false)
+            continue
+        }
+        o.Total = total
+        o.Status = Status.Paid(total)
+        await st.Record(fmt.Format("order {0}: {1}", o.Id, total.String()), total.Amount, true)
+        await task.Yield()
+    }
+}
+
+async func runWorkers(cfg Config, orders []*Order, w *Warehouse) *Stats {
+    var jobs = task.Channel<*Order>(cfg.Workers.QueueSize)
+    var st = new Stats{}
+    var wg = new task.WaitGroup{}
+    for _ in 0..cfg.Workers.Count {
+        wg.Add(1)
+        _ = worker(jobs, w, st, wg, cfg.Currency)
+    }
+    for o in orders {
+        await jobs.Send(o)
+    }
+    jobs.Close()
+    await wg.Wait()
+    slices.Sort(st.results)
+    return st
+}
+
+async func slowQuote(name string, ms int) string {
+    await task.Delay(ms)
+    return name
+}
+
+async func carrierQuote(carrier string, ms int) int! {
+    for _ in 0..ms {
+        await task.Delay(1)
+        task.CheckCancelled()?
+    }
+    return len(carrier) * 100
+}
+
+async func fragile(n int) int! {
+    await task.Yield()
+    var table = [10, 20, 30]
+    return table[n]
+}
+
+async func streamTotals(src task.Channel<int>) string {
+    var sum = 0
+    var n = 0
+    for {
+        var v = try await src.Recv() catch err {
+            if errors.Is(err, task.ErrCancelled) {
+                return fmt.Format("cancelled after {0} values, sum {1}", n, sum)
+            }
+            return fmt.Format("closed after {0} values, sum {1}", n, sum)
+        }
+        sum += v
+        n += 1
+    }
+}
+
+async func demoAsync(cfg Config, book *OrderBook) void! {
+    println("== async")
+    var w = new Warehouse{
+        stock: map[Sku]int{"apple": 10, "pear": 3, "plum": 0, "fig": 5},
+        price: map[Sku]Cents{"apple": 120, "pear": 99, "plum": 250, "fig": 75},
+    }
+    var orders []*Order = []
+    for o in book {
+        orders = append(orders, o)
+    }
+    var st = await runWorkers(cfg, orders, w)
+    for line in st.results {
+        println("  " + line)
+    }
+    println("processed", st.processed, "failed", st.failed, "revenue", Money{Amount: st.revenue, Currency: cfg.Currency}.String())
+    println("stock left", w.stock["apple"], w.stock["pear"], w.stock["fig"])
+
+    var (a, b, c) = await task.All(slowQuote("dhl", 3), slowQuote("ups", 1), slowQuote("fedex", 2))
+    println("all", a, b, c)
+    println("any", await task.Any(slowQuote("slow", 200), slowQuote("fast", 1)))
+
+    var quick = try await task.WithTimeout(cfg.Workers.TimeoutMs, () => carrierQuote("post", 2)) else -1
+    var slow = -2
+    try {
+        slow = await task.WithTimeout(5, () => carrierQuote("freight", 1000))?
+    } catch err {
+        println("timeout:", errors.Is(err, task.ErrCancelled))
+    }
+    println("quotes", quick, slow)
+
+    var v = 0
+    try {
+        v = await fragile(7)?
+    } catch err {
+        println("panicked:", errors.Is(err, task.ErrPanic), task.PanicMessage(err))
+    }
+    println("fragile", v, await fragile(1)?)
+
+    var src = task.Channel<int>(8)
+    var h = task.NewCancel()
+    var reader = task.SpawnWith(h.Context, () => streamTotals(src))
+    for i in 1..4 {
+        await src.Send(i * 10)
+    }
+    await task.Delay(10)
+    h.Cancel()
+    println(await reader)
+}
+// ---------------------------------------------------------------- memory
+
+struct AuditLog {
+    name    string
+    entries []string
+
+    func Write(s string) {
+        this.entries = append(this.entries, s)
+    }
+
+    func Drop() {
+        println(fmt.Format("  audit log {0} closed with {1} entries", this.name, len(this.entries)))
+    }
+}
+
+func openLog(name string) AuditLog {
+    return AuditLog{name: name}
+}
+
+func useLogs() {
+    var outer = openLog("outer")
+    outer.Write("start")
+    {
+        var inner = openLog("inner")
+        inner.Write("a")
+        inner.Write("b")
+    }
+    var shared = new AuditLog{name: "shared"}
+    var alias = shared
+    alias.Write("via alias")
+    shared = nil
+    println("  shared still has", len(alias.entries), "entry")
+    alias = nil
+    outer.Write("end")
+}
+
+// Two sessions pointing at each other: a cycle only the collector frees.
+@allowCycle
+struct Session {
+    Id   int
+    Peer *Session
+
+    func Drop() {
+        println("  drop session", this.Id)
+    }
+}
+
+func makePair() {
+    var a = new Session{Id: 1}
+    var b = new Session{Id: 2, Peer: a}
+    a.Peer = b
+}
+
+struct Token {
+    Text string
+    Pos  int
+}
+
+func tokenize(a arena.Arena, s string) []*Token {
+    var out []*Token = []
+    for i, w in strings.Fields(s) {
+        var t = a.New<Token>()
+        t.Text = a.String(w)
+        t.Pos = i
+        out = append(out, t)
+    }
+    return out
+}
+
+func bump(p Audit) Audit {
+    p.Version += 5
+    return p
+}
+
+func bumpPtr(p *Audit) {
+    p.Version += 10
+}
+
+func demoMemory() {
+    println("== memory")
+    useLogs()
+    var alice = new Customer{Id: 1, Name: "alice", Tier: Tier.Silver}
+    var o = new Order{Id: 99, Region: "eu", Customer: alice}
+    alice.Orders = append(alice.Orders, o)
+    var owner = o.Customer
+    println("  order", o.Id, "belongs to", owner.Name)
+    alice = nil
+    owner = nil
+    var gone = o.Customer
+    println("  after release, customer is nil:", gone == nil)
+    makePair()
+    println("  collected", runtime.CollectCycles())
+    var ar = arena.New()
+    defer ar.Free()
+    var toks = tokenize(ar, "price = qty * unit")
+    println("  tokens", len(toks), toks[2].Text, toks[4].Pos)
+    var v = Audit{CreatedBy: "x", Version: 1}
+    var copied = bump(v)
+    bumpPtr(&v)
+    println("  value", v.Version, "copy", copied.Version)
+}
+
+// ---------------------------------------------------------------- reflection
+
+func Validate<T>(v T) []ValidationError {
+    if reflect.TypeOf<T>().Kind != reflect.Kind.Struct {
+        reflect.Error("Validate needs a struct, got " + reflect.TypeOf<T>().Name)
+    }
+    var out []ValidationError = []
+    for f in reflect.Fields<T>() {
+        var r = f.Attribute<rule>()
+        if r == nil {
+            continue
+        }
+        var value any = f.Get(v)
+        switch value {
+            case string s:
+                if r.required && s == "" {
+                    out = append(out, ValidationError{Field: f.Name, Reason: "is required"})
+                }
+                if r.enum != "" && s != "" && !slices.Contains(strings.Split(r.enum, ","), s) {
+                    out = append(out, ValidationError{Field: f.Name, Reason: "must be one of " + r.enum})
+                }
+            case int n:
+                if r.min != 0 && n < r.min {
+                    out = append(out, ValidationError{Field: f.Name, Reason: fmt.Format("must be >= {0}", r.min)})
+                }
+                if r.max != 0 && n > r.max {
+                    out = append(out, ValidationError{Field: f.Name, Reason: fmt.Format("must be <= {0}", r.max)})
+                }
+        }
+    }
+    return out
+}
+
+func ValidateOrder(o *Order) void! {
+    var errs = Validate(*o)
+    for it in o.Items {
+        errs = slices.Concat(errs, Validate(it))
+    }
+    if len(o.Items) > MaxItemsPerOrder {
+        errs = append(errs, ValidationError{Field: "Items", Reason: "too many"})
+    }
+    if len(errs) > 0 {
+        return errs[0]
+    }
+}
+
+func Describe<T>() string {
+    var t = reflect.TypeOf<T>()
+    var names []string = []
+    for f in t.Fields {
+        names = append(names, f.Name + ":" + f.Type.Name)
+    }
+    return t.Name + "{" + strings.Join(names, ", ") + "}"
+}
+
+interface Report {
+    func Title() string
+    func Render(orders []*Order) string
+}
+
+@handler(name: "count", order: 1)
+struct CountReport {
+    func Title() string {
+        return "Order count"
+    }
+    func Render(orders []*Order) string {
+        return strconv.Itoa(len(orders))
+    }
+}
+
+@handler(name: "regions", order: 2)
+struct RegionReport {
+    func Title() string {
+        return "Regions"
+    }
+    func Render(orders []*Order) string {
+        var counts = map[string]int{}
+        for o in orders {
+            counts[o.Region] += 1
+        }
+        var parts []string = []
+        for k in maps.SortedKeys(counts) {
+            parts = append(parts, fmt.Format("{0}={1}", k, counts[k]))
+        }
+        return strings.Join(parts, " ")
+    }
+}
+
+@handler(name: "paid", order: 3)
+struct PaidReport {
+    func Title() string {
+        return "Paid"
+    }
+    func Render(orders []*Order) string {
+        var n = 0
+        for o in orders {
+            switch o.Status {
+                case Status.Paid(_): n += 1
+                default:
+            }
+        }
+        return fmt.Format("{0} of {1}", n, len(orders))
+    }
+}
+
+func runReports(orders []*Order) void! {
+    var found = slices.Clone(reflect.TypesWith<handler>())
+    slices.SortBy(found, (t *reflect.TypeInfo) => t.Attribute<handler>().order)
+    for t in found {
+        var h = t.Attribute<handler>()
+        var recv = t.New()
+        var title = t.Method("Title").Invoke(recv, [])?
+        var body = t.Method("Render").Invoke(recv, [orders])?
+        println(fmt.Format("  [{0,-8}] {1,-12}: {2}", h.name, title, body))
+    }
+}
+
+func demoReflection(book *OrderBook) {
+    println("== reflection")
+    println(" ", Describe<LineItem>())
+    println(" ", Describe<Money>())
+    for o in book {
+        try ValidateOrder(o) catch err {
+            println("  order", o.Id, "invalid:", err)
+        }
+    }
+    var bad = Order{Id: 0, Payment: "barter", Items: [LineItem{Sku: "", Qty: 120}]}
+    try ValidateOrder(&bad) catch err {
+        var ve ValidationError
+        println("  bad order:", err, "| typed:", errors.As(err, &ve), ve.Field)
+    }
+    println("  all problems:", len(Validate(bad)))
+    try runReports(book.orders) catch err {
+        println("  reports failed:", err)
+    }
+}
+// ---------------------------------------------------------------- pricing
+
+interface Discount {
+    func Name() string
+    func Apply(total Money, o *Order) Money
+
+    func Describe() string {
+        return "discount " + this.Name()
+    }
+}
+
+struct CouponDiscount implements Discount {
+    Codes map[string]int
+
+    func Name() string {
+        return "coupon"
+    }
+    func Apply(total Money, o *Order) Money {
+        var pct, ok = this.Codes[o.Coupon]
+        if !ok {
+            return total
+        }
+        return total - total * pct / 100
+    }
+}
+
+struct TierDiscount implements Discount {
+    func Name() string {
+        return "tier"
+    }
+    func Apply(total Money, o *Order) Money {
+        var c = o.Customer
+        if c == nil {
+            return total
+        }
+        return total.Sub(Money{Amount: total.Amount * tierDiscount(c.Tier) / 100, Currency: total.Currency})
+    }
+}
+
+struct Invoice {
+    @json(name: "order_id") OrderId int
+    @json(name: "customer") Customer string
+    @json(name: "lines") Lines []string
+    @json(name: "net_cents") Net int
+    @json(name: "tax_cents") Tax int
+    @json(name: "gross_cents") Gross int
+    @json(name: "notes", omitEmpty: true) Notes string
+}
+
+func checkRegion(o *Order) void! {
+    switch o.Region {
+        case "eu", "us": return
+        case "asia": return error("region asia is not served yet")
+    }
+    return ValidationError{Field: "Region", Reason: "unknown " + strconv.Quote(o.Region)}
+}
+
+func checkPayment(o *Order) void! {
+    if o.Payment == "invoice" && o.ItemCount() < 2 {
+        return error("invoice payment needs at least 2 items")
+    }
+}
+
+func buildInvoice(o *Order, discounts []Discount) Invoice! {
+    var p = Pipeline<Order>{}
+    p
+        .Then("region", checkRegion)
+        .Then("payment", checkPayment)
+        .Then("limits", ValidateOrder)
+    p.Run(o)?("invoice " + strconv.Itoa(o.Id))
+
+    var net = o.Total
+    for d in discounts {
+        net = d.Apply(net, o)
+    }
+    var tax = net.Amount * TaxPercent / 100
+    var lines = slices.Map(o.Items, (it LineItem) => fmt.Sprintf("%-6s x%d @ %d", it.Sku, it.Qty, it.PriceCents))
+    var who = "guest"
+    var c = o.Customer
+    if c != nil {
+        who = c.Name
+    }
+    return Invoice{OrderId: o.Id, Customer: who, Lines: lines, Net: net.Amount, Tax: tax, Gross: net.Amount + tax}
+}
+
+// ---------------------------------------------------------------- error traces
+
+func readStock(sku Sku) int! {
+    return error("no stock record for " + sku)
+}
+
+func restock(sku Sku) int! {
+    var n = readStock(sku)?("restock")
+    return n + 10
+}
+
+func nightlyJob() void! {
+    restock("plum")?("nightly")
+}
+
+// ---------------------------------------------------------------- report
+
+func formatTable(header []string, rows [][]string) string {
+    var widths = slices.Map(header, (h string) => len(h))
+    for row in rows {
+        for i, cell in row {
+            if len(cell) > widths[i] {
+                widths[i] = len(cell)
+            }
+        }
+    }
+    var b = strings.Builder{}
+    var line = (cells []string) => {
+        for i, cell in cells {
+            if i > 0 {
+                b.Write(" | ")
+            }
+            if i == 0 {
+                b.Write(strings.PadRight(cell, widths[i], " "))
+            } else {
+                b.Write(strings.PadLeft(cell, widths[i], " "))
+            }
+        }
+        b.Write("\n")
+    }
+    line(header)
+    var sep []string = []
+    for w in widths {
+        sep = append(sep, strings.Repeat("-", w))
+    }
+    line(sep)
+    for row in rows {
+        line(row)
+    }
+    return b.String()
+}
+
+func demoReport(cfg Config, customers []*Customer, book *OrderBook) {
+    println("== report")
+    var discounts []Discount = [CouponDiscount{Codes: cfg.Discounts}, TierDiscount{}]
+    println(" ", discounts[0].Describe(), "/", discounts[1].Describe())
+    var invoices []Invoice = []
+    var rows [][]string = []
+    for o in book {
+        var c = customers[o.Id % len(customers)]
+        o.Customer = c
+        c.Orders = append(c.Orders, o)
+        switch o.Status {
+            case Status.Paid(_):
+            default:
+                rows = append(rows, [strconv.Itoa(o.Id), o.Region, "-", "-", o.Status.Label()])
+                continue
+        }
+        var inv = try buildInvoice(o, discounts) catch err {
+            rows = append(rows, [strconv.Itoa(o.Id), o.Region, "-", "-", err.Message()])
+            continue
+        }
+        invoices = append(invoices, inv)
+        rows = append(rows, [strconv.Itoa(o.Id), o.Region, strconv.Itoa(inv.Net), strconv.Itoa(inv.Gross), "ok"])
+        o.Status = Status.Shipped("dhl", 1000 + o.Id)
+    }
+    print(formatTable(["order", "region", "net", "gross", "status"], rows))
+    for inv in invoices {
+        println(json.Format(inv))
+    }
+    if len(invoices) > 0 {
+        println(json.FormatIndent(invoices[0], "", "  "))
+    }
+    var back = try json.Parse<Invoice>(`{"order_id": 5, "customer": "zoe", "lines": [], "net_cents": 100, "tax_cents": 20, "gross_cents": 120}`) catch err {
+        println("parse failed:", err)
+        return
+    }
+    println(" ", back.OrderId, back.Customer, back.Gross, len(back.Lines))
+    try json.Parse<Invoice>(`{"order_id": "five"}`) catch err {
+        println("  bad invoice:", err)
+    }
+
+    println(fmt.Format("  {0,-10}|{1,8}|{2,-6}|", "customer", "orders", "tier"))
+    for c in customers {
+        println(fmt.Format("  {0,-10}|{1,8}|{2,-6}|", c.Name, len(c.Orders), c.Tier))
+    }
+    var spent = map[string]Money{}
+    for c in customers {
+        var total = Money.Zero(cfg.Currency)
+        for o in c.Orders {
+            total += o.Total
+        }
+        spent[c.Name] = total
+    }
+    var byKey = IndexByKey(customers)
+    println("  index", maps.SortedKeys(byKey), byKey["carol"].Tier)
+    var (top, _) = MaxBy(customers, (c *Customer) => spent[c.Name])
+    println("  top customer", top.Name, spent[top.Name].String())
+    for name, m in spent {
+        _ = name
+        _ = m
+    }
+    println(fmt.Sprintf("  %-8s %6.2f%% %05d %x %q %t %c", "ratio", 12.3456, 42, 255, "q", true, 'z'))
+
+    try nightlyJob() catch err {
+        println("  nightly:", err)
+        for f in errors.Frames(err) {
+            println("   ", f.Func, f.Context)
+        }
+    }
+    for f in errors.Frames(error("plain")) {
+        println("    plain frame", f.Func)
+    }
+}
+// ---------------------------------------------------------------- events
+
+sealed interface Event {
+    func At() int
+}
+
+struct Created {
+    OrderId int
+    Tick    int
+    func At() int {
+        return this.Tick
+    }
+}
+
+struct Shipped {
+    OrderId int
+    Carrier string
+    Tick    int
+    func At() int {
+        return this.Tick
+    }
+}
+
+struct Refunded {
+    OrderId int
+    Amount  Money
+    Tick    int
+    func At() int {
+        return this.Tick
+    }
+}
+
+func describeEvent(e Event) string {
+    switch e {
+        case Created c: return fmt.Format("t{0} created #{1}", c.Tick, c.OrderId)
+        case Shipped s: return fmt.Format("t{0} shipped #{1} via {2}", s.Tick, s.OrderId, s.Carrier)
+        case Refunded r: return fmt.Format("t{0} refunded #{1} {2}", r.Tick, r.OrderId, r.Amount.String())
+    }
+}
+
+enum Lookup<T> {
+    Found(value T)
+    Missing(key string)
+}
+
+func orElse<T>(l Lookup<T>, fallback T) T {
+    switch l {
+        case Lookup.Found(v): return v
+        case Lookup.Missing(_): return fallback
+    }
+}
+
+func minInt(a int, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+func maxInt(a int, b int) int {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+func find<T>(m map[string]T, key string) Lookup<T> {
+    var v, ok = m[key]
+    if ok {
+        return Lookup<T>.Found(v)
+    }
+    return Lookup<T>.Missing(key)
+}
+
+// ---------------------------------------------------------------- text
+
+func slug(s string) string {
+    var b = strings.Builder{}
+    var dash = false
+    for r in strings.ToLower(s) {
+        var isAlnum = (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+        if isAlnum {
+            b.WriteRune(r)
+            dash = false
+        } else if !dash && b.Len() > 0 {
+            b.WriteRune('-')
+            dash = true
+        }
+    }
+    return strings.TrimRight(b.String(), "-")
+}
+
+func caesar(s string, shift int) string {
+    var out []char = []
+    for r in s {
+        if r >= 'a' && r <= 'z' {
+            var off = (int(r) - int('a') + shift) % 26
+            out = append(out, char(int('a') + off))
+        } else {
+            out = append(out, r)
+        }
+    }
+    return strings.FromRunes(out)
+}
+
+func Show<T>(v T) string {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Slice {
+        return fmt.Format("slice of {0}: {1}", reflect.TypeOf<T>().Elem.Name, json.Format(v))
+    } else if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
+        return reflect.TypeOf<T>().Name + " " + json.Format(v)
+    } else {
+        return fmt.Format("{0}", v)
+    }
+}
+
+var RequestId = task.Key<string>()
+
+interface Notifier {
+    func Notify(msg string) Task<int>
+}
+
+struct MailNotifier {
+    prefix string
+    func Notify(msg string) Task<int> {
+        return sendMail(this.prefix + msg)
+    }
+}
+
+async func sendMail(text string) int {
+    await task.Yield()
+    return len(text)
+}
+
+func fieldDefaults<T>() []string {
+    var out []string = []
+    for f in reflect.TypeOf<T>().Fields {
+        var r = f.Attribute<rule>()
+        if r != nil && r.default != "" {
+            out = append(out, f.Name + "=" + r.default)
+        }
+    }
+    return out
+}
+
+async func audited(step string) string {
+    await task.Yield()
+    var id = task.Get(RequestId)
+    if id == nil {
+        return step + " (no request)"
+    }
+    return step + " for " + *id
+}
+
+async func cube(n int) int {
+    await task.Delay(n)
+    return n * n * n
+}
+
+async func demoMisc(book *OrderBook) void! {
+    println("== misc")
+    var events []Event = [
+        Created{OrderId: 1, Tick: 1},
+        Shipped{OrderId: 1, Carrier: "dhl", Tick: 4},
+        Refunded{OrderId: 2, Amount: Money{Amount: 300, Currency: "EUR"}, Tick: 2},
+    ]
+    slices.SortBy(events, (e Event) => e.At())
+    for e in events {
+        println(" ", describeEvent(e))
+    }
+    var prices = map[string]int{"apple": 120, "fig": 75}
+    println(" ", orElse(find(prices, "fig"), -1), orElse(find(prices, "kiwi"), -1))
+    switch find(prices, "kiwi") {
+        case Lookup.Found(v): println("  found", v)
+        case Lookup.Missing(k): println("  missing", k)
+    }
+
+    println(" ", slug("  Big Order: Apples & Pears!! "), caesar("zell order", 3))
+    var in = "contextual in"
+    for w in strings.Fields(in) {
+        print(" ", strings.ToUpper(w))
+    }
+    println()
+
+    var hist [4]int
+    var labels [4]string
+    labels[0] = "1"
+    labels[1] = "2-3"
+    labels[2] = "4-9"
+    labels[3] = "10+"
+    for o in book {
+        for it in o.Items {
+            switch it.Qty {
+                case 1: hist[0] += 1
+                case 2..4: hist[1] += 1
+                case 4..10: hist[2] += 1
+                default: hist[3] += 1
+            }
+        }
+    }
+    var copyHist = hist
+    copyHist[0] = 100
+    for i in 0..len(hist) {
+        print(fmt.Format("  {0,4}:{1}", labels[i], hist[i]))
+    }
+    println(" | copy", copyHist[0], "orig", hist[0])
+
+    var minmax = map[string](int, int){}
+    for o in book {
+        for it in o.Items {
+            var cur, seen = minmax[it.Sku]
+            if !seen {
+                minmax[it.Sku] = (it.Qty, it.Qty)
+                continue
+            }
+            var (lo, hi) = cur
+            minmax[it.Sku] = (minInt(lo, it.Qty), maxInt(hi, it.Qty))
+        }
+    }
+    for sku in maps.SortedKeys(minmax) {
+        var pair = minmax[sku]
+        var (lo, hi) = pair
+        print(" ", sku, "=", lo, "..", hi)
+    }
+    println()
+
+    var orders []Order = []
+    for o in book {
+        orders = append(orders, *o)
+    }
+    var (x, y, sku, shared) = firstSharedSku(orders)
+    println("  shared sku", x, y, sku, shared)
+
+    println(" ", Show([1, 2, 3]), "|", Show(Money{Amount: 5, Currency: "EUR"}), "|", Show(42))
+
+    println(" ", await task.With(RequestId, "req-7", () => audited("pricing")), "/", await audited("cleanup"))
+
+    var pending []Task<int> = []
+    for n in [3, 1, 2] {
+        pending = append(pending, cube(n))
+    }
+    var cubes []int = []
+    for t in pending {
+        cubes = append(cubes, await t)
+    }
+    println("  cubes", cubes)
+
+    var n Notifier = MailNotifier{prefix: "[shop] "}
+    println("  notified", await n.Notify("order shipped"), "bytes; defaults", fieldDefaults<Order>())
+
+    var spawned = task.Spawn(() => cube(4))
+    println("  spawned", await spawned)
+
+    for o in book {
+        print(" ", o.Id, ":", o.Status.Label(), ";")
+    }
+    println()
+}
+const ordersText = `1;eu;card;;apple:2:120,pear:1:99
+2;us;cash;VIP;fig:4:75
+3;eu;card;;plum:1:250
+4;asia;invoice;;kiwi:1:10
+5;eu;card;SPRING;pear:9:99
+6;us;card;;apple:3:121`
+
+async func main() void! {
+    demoGenericsAndFlow()
+    var cfg = loadConfig("json")?
+    var book = new OrderBook{}
+    for line in strings.Split(ordersText, "\n") {
+        var o = Order.Parse(line)?
+        book.Add(&o)
+    }
+    await demoAsync(cfg, book)?
+    demoMemory()
+    demoReflection(book)
+    var customers = [
+        new Customer{Id: 1, Name: "alice", Tier: Tier.Gold},
+        new Customer{Id: 2, Name: "bob", Tier: Tier.Basic},
+        new Customer{Id: 3, Name: "carol", Tier: Tier.Silver},
+    ]
+    demoReport(cfg, customers, book)
+    await demoMisc(book)?
+}

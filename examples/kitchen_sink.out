@@ -1,0 +1,108 @@
+== generics and control flow
+max 9 true
+longest banana
+even [] odd [5 3 9 1 7]
+sum 25 csv kiwi,apple,fig,banana
+  len 3 [fig]
+  len 4 [kiwi]
+  len 5 [apple]
+  len 6 [banana]
+pair 1 x
+none few some bulk many 
+tiers Basic Silver Gold 10
+counter 2 3
+enter f | defer 2 | defer 1 | defer 0 | leave f
+[ORD-100=100 ORD-110=110 ORD-120=120]
+cache [c a] true false 1 1
+lru [c a] false 1
+== async
+  order 1: 3.39 EUR
+  order 2: 3.00 EUR
+  order 3: stock(want 1): reserve: sku plum: want 1
+  order 4: sku: kiwi: unknown sku
+  order 5: stock(want 9): reserve: sku pear: want 9
+  order 6: error: price of apple is 121, catalog says 120
+processed 2 failed 4 revenue 6.39 EUR
+stock left 8 2 1
+all dhl ups fedex
+any fast
+timeout: true
+quotes 400 -2
+panicked: true runtime error: index out of range [7] with length 3
+fragile 0 20
+cancelled after 3 values, sum 60
+== memory
+  audit log inner closed with 2 entries
+  shared still has 1 entry
+  audit log shared closed with 1 entries
+  audit log outer closed with 2 entries
+  order 99 belongs to alice
+  after release, customer is nil: true
+  drop session 2
+  drop session 1
+  collected 2
+  tokens 5 qty 4
+  value 11 copy 6
+== reflection
+  LineItem{Sku:string, Qty:int, PriceCents:int}
+  Money{Amount:int, Currency:string}
+  bad order: Id must be >= 1 | typed: true Id
+  all problems: 3
+  [count   ] Order count : 6
+  [regions ] Regions     : asia=1 eu=3 us=2
+  [paid    ] Paid        : 2 of 6
+== report
+  discount coupon / discount tier
+order | region | net | gross |                   status
+----- | ------ | --- | ----- | ------------------------
+1     |     eu | 339 |   406 |                       ok
+2     |     us | 214 |   256 |                       ok
+3     |     eu |   - |     - | cancelled: stock(want 1)
+4     |   asia |   - |     - |           cancelled: sku
+5     |     eu |   - |     - | cancelled: stock(want 9)
+6     |     us |   - |     - |         cancelled: error
+{"order_id":1,"customer":"bob","lines":["apple  x2 @ 120","pear   x1 @ 99"],"net_cents":339,"tax_cents":67,"gross_cents":406}
+{"order_id":2,"customer":"carol","lines":["fig    x4 @ 75"],"net_cents":214,"tax_cents":42,"gross_cents":256}
+{
+  "order_id": 1,
+  "customer": "bob",
+  "lines": [
+    "apple  x2 @ 120",
+    "pear   x1 @ 99"
+  ],
+  "net_cents": 339,
+  "tax_cents": 67,
+  "gross_cents": 406
+}
+  5 zoe 120 0
+  bad invoice: order_id: expected int, found string
+  customer  |  orders|tier  |
+  alice     |       2|Gold  |
+  bob       |       2|Basic |
+  carol     |       2|Silver|
+  index [alice bob carol] Silver
+  top customer bob 3.39 EUR
+  ratio     12.35% 00042 ff "q" true z
+  nightly: nightly: restock: no stock record for plum
+    readStock 
+    restock restock
+    nightlyJob nightly
+    demoReport 
+    plain frame demoReport
+== misc
+  t1 created #1
+  t2 refunded #2 3.00 EUR
+  t4 shipped #1 via dhl
+  75 -1
+  missing kiwi
+  big-order-apples-pears choo rughu
+ CONTEXTUAL IN
+     1:3   2-3:2   4-9:2   10+:0 | copy 100 orig 3
+ apple=2..3 fig=4..4 kiwi=1..1 pear=1..9 plum=1..1
+  shared sku 1 5 pear true
+  slice of int: [1,2,3] | Money {"Amount":5,"Currency":"EUR"} | 42
+  pricing for req-7 / cleanup (no request)
+  cubes [27 1 8]
+  notified 20 bytes; defaults [Payment=card]
+  spawned 64
+ 1:shipped via dhl #1001; 2:shipped via dhl #1002; 3:cancelled: stock(want 1); 4:cancelled: sku; 5:cancelled: stock(want 9); 6:cancelled: error;
