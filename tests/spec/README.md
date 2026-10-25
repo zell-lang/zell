@@ -374,6 +374,15 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     **`reflect.Error(msg)`** fails the build with `error: <msg>` and a note
     `raised by <function>` (an instance is named `Describe<bool>`). —
     `reflection/types_with_*`, `reflection/reflect_error_*`
+    **Unrolled descriptor loops** (DESIGN.md "Развёртывание типов, методов
+    и параметров"): `for t in reflect.TypesWith<A>()` is unrolled only when
+    its body needs `t` at compile time (a type position, `CallOn`/`Apply`/
+    `Get`/`Set`, `reflect.Error`), else it is a run-time loop; `t.Methods`
+    of a copy lists async methods too (the run-time table does not);
+    `p.Set` reports a wrong value as `argument p.Index + 1` of the method. —
+    `reflection/types_with_unrolled*`, `methods_unrolled`, `params_unrolled`,
+    `descriptor_type_*`, `call_on_wrong_argument`, `apply_wrong_args_type`,
+    `types_with_runtime_loop`, `reflect_error_unrolled`
 
 ### Standard library
 

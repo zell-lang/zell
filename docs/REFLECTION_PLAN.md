@@ -1,6 +1,6 @@
 # Reflection: what is compile-time today, what is planned
 
-Status as of 2026-10-25. Spec: DESIGN.md "Рефлексия";
+Status as of 2026-10-25 (run 2). Spec: DESIGN.md "Рефлексия";
 the framework motivation is docs/FRAMEWORK.md "План: тонкое ядро,
 фреймворк в пакетах".
 
@@ -78,10 +78,10 @@ What a `zell-lang/web` package can do with it today: collect controllers
 action with bound arguments (`m.Invoke(recv, args)`, arguments as `[]any`
 built from the request using `p.Type`), call fixed-signature hooks
 typed (`m.Call<F>()`), and reject bad declarations at compile time from
-generic helpers (`reflect.Error`). Not yet: unrolling `for t in
-TypesWith<A>()` at compile time (so binding would be typed, no boxing) and
-using `p.Type` as a type argument (`json.Parse<p.Type>`), DI by
-constructor parameters of structs (fields can be used: `Fields`).
+generic helpers (`reflect.Error`). Since run 2 (below) binding is typed
+without boxing (unrolled `TypesWith`/`Methods`/`Params`, `p.Type` as a
+type argument); still open: DI by constructor parameters of structs
+(fields can be used: `Fields`).
 
 ### Done 2026-10-25: compile-time conditions (finishing run 1)
 
@@ -111,14 +111,55 @@ LANGUAGE_FEEDBACK 33, 53, 66, 67; spec in DESIGN.md "Статическая
   `FieldInfo`/`TypeInfo` and makes no attribute lookup);
   `docs/examples/validate` rejects misplaced rules at compile time.
 
+### Done 2026-10-25: descriptor loops and descriptor types (run 2)
+
+Spec: DESIGN.md "Развёртывание типов, методов и параметров"; code in
+`compiler/src/sema/reflect_unroll.rs`.
+
+- `for t in reflect.TypesWith<A>()` is unrolled per type (in `TypesWith`
+  order, in any function) when the body needs a compile-time descriptor:
+  `t` (or a descriptor reached from it) in a type position, a
+  `CallOn`/`Apply`/`Get`/`Set` call on one, or a `reflect.Error` call.
+  Otherwise it stays the run-time loop over the slice. Generic types
+  marked `A` are an error in the unrolled form (their instances are known
+  only at the end of the analysis).
+- Inside a copy, `for m in t.Methods` (every struct method, async ones
+  included) and `for p in m.Params` unroll too. Constants: `t.Name/
+  FullName/Package/Kind`, `t.Attribute<B>()`, `m.Name/Static/IsAsync`,
+  `len(m.Params)`, `m.Attribute<B>()`, `m.Result.Kind`, `p.Name/Index`,
+  `p.Attribute<B>()`, `p.Type.Kind/Name`; the static `if`/`switch`,
+  `reflect.Error` and reachability rules of run 1 apply to them.
+- Descriptor types: `t`, `f.Type`, `p.Type`, `m.Result`, `m.Args` (a
+  struct with a field per parameter) where a type is expected (`var x T`,
+  `F<T>()`, `T{}`, `new T{}`); the grammar is unchanged. A run-time
+  descriptor in a type position is an error.
+- Typed calls: `m.CallOn(recv, args...)` (argument types checked like an
+  ordinary call) and `m.Apply(recv, args)` with `p.Set(&args, v)` /
+  `p.Get(args)` are direct calls of the method.
+- Diagnostics of code that does not depend on the descriptor are reported
+  once; a local is unused only if unused in every copy.
+- Proof: `examples/reflect_binding.zl` (a typed `@controller`/`@get`/
+  `@query`/`@body` binder, an async action and `T!` error paths);
+  `compiler/tests/reflection.rs` `unrolled_binder_calls_actions_directly`
+  (the HIR and IR of `Dispatch` call each action, `strconv.Atoi` and
+  `json.Parse<User>` directly; no `Invoke`, `[]any` or table reads; the
+  controllers get no tables). Spec tests `tests/spec/reflection/
+  types_with_unrolled`, `methods_unrolled`, `params_unrolled`,
+  `descriptor_type_args`, `types_with_runtime_loop` and five `// error:`
+  programs.
+
 ### Remaining steps
 
-1. Static unrolling of `for t in reflect.TypesWith<A>()` like
-   `Fields<T>()` (`t` a compile-time type, `t.Methods` unrolled too).
-2. A compile-time type as a type argument (`Parse<p.Type>(text)`) inside
-   such loops.
-3. The `web_app` example of tag `web-in-tree` rewritten in
-   `zell-lang/web` with identical output.
+1. The `web_app` example of tag `web-in-tree` rewritten in
+   `zell-lang/web` on the unrolled loops, with identical output; its
+   profile decides what else needs folding.
+2. Descriptor types inside lambdas of an unrolled copy (a lambda sees the
+   descriptor as an upvalue today, so `(x t) => ...` does not resolve).
+3. Constructor injection: `m.Args` of a static `New` gives the parameter
+   list; a DI container still has to map parameter types to providers
+   (needs a compile-time map from type to factory, not specified).
+4. Generic types in the unrolled `TypesWith` form (needs the loop to be
+   expanded after the instance set is closed, e.g. a second pass).
 
 ## 3. Run-time reflection: spec is written, implementation partial
 
@@ -137,6 +178,15 @@ Before implementing, write the missing cases as `// status: pending` spec
 tests so the gap is explicit, and fix the descriptor layout in
 runtime/ABI.md so generated code and the runtime share it.
 
+What remains after run 2 (2026-10-25): the compile-time path now covers
+typed binding, so run-time reflection is only needed where types are not
+known statically: `typeof(x)` of an `any` followed by field get/set by
+index (`reflect.Value` exists; `Field(i)` by index and `Set` on a value
+of another package's unexported field are open), `Invoke`/`Call<F>` for
+**async** methods (they are not in `TypeInfo.Methods`; needs a `Task`
+returning thunk and an `IsAsync` field, ABI 17.1), method tables of
+interfaces, and `Implements(iface)`.
+
 ## 4. Planned: expression trees
 
 `expr<func(User) bool>` parameters receive the lambda as a syntax tree
@@ -145,10 +195,18 @@ value (C# `Expression<Func<>>`), so the ORM translates `Where(u => u.Age >
 step 1-2). Spec: DESIGN.md new section, grammar unchanged (a type form),
 node set and evaluation rules (`Compile()` back to a closure).
 
+Status after run 2: unchanged, nothing implemented. The descriptor loops
+do not replace it: they iterate declarations, while the ORM needs the
+*body* of a lambda (`u.Age > 18`) as data. What the unrolled loops do give
+the `data` rewrite is the typed materialisation side (`Fields<t>()` plus
+`f.Set` per column, `var row t`), so expression trees are the only
+compiler piece left for deleting `sema/orm*.rs`.
+
 ## 5. Order and sizing
 
-1. `TypesWith<A>()` — done 2026-10-24 (section 2); next the
-   `zell-lang/web` rewrite (1 run), then static unrolling of the loop.
+1. `TypesWith<A>()` — done 2026-10-24 (section 2); static unrolling of
+   the loop and descriptor types — done 2026-10-25; next the
+   `zell-lang/web` rewrite (1 run).
 2. Expression trees — spec first (needs a decision on the node set), then
    2 runs (compiler, `data` rewrite).
 3. Attributes as values / run-time `reflect` — after the two above; sized

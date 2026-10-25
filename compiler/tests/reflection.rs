@@ -205,3 +205,61 @@ fn tables_are_shared_and_leak_free() {
     assert_eq!(code, 0, "{errs}");
     assert_eq!(out, "Box 1 []User true\nstring User\n2\n*Box\n");
 }
+
+#[test]
+fn unrolled_binder_calls_actions_directly() {
+    // examples/reflect_binding.zl: Dispatch is built from unrolled
+    // TypesWith / t.Methods / m.Params loops. Its instance binds every
+    // parameter with its static type and calls each action directly: no
+    // MethodInfo.Invoke, no []any, no descriptor table reads.
+    let src = std::fs::read_to_string(repo().join("examples/reflect_binding.zl")).unwrap();
+    let (p, errors) = analyze(&src);
+    assert!(errors.is_empty(), "unexpected errors: {errors:#?}");
+    let p = p.expect("program");
+    // No descriptor is read at run time, so the controllers get no tables.
+    let r = p.reflect.as_ref().expect("reflection on");
+    assert!(r.types_with.is_empty(), "the unrolled loop emits no TypesWith list");
+    for c in ["Users", "Math"] {
+        assert!(!r.full.contains(&struct_ty(&p, c)), "{c} got a method table");
+    }
+    let dump = p.dump();
+    let start = dump.lines().position(|l| l.contains("func #") && l.contains(".Dispatch [")).expect("Dispatch");
+    let body: String = dump.lines().skip(start).take_while({
+        let mut first = true;
+        move |l| std::mem::take(&mut first) || !(l.starts_with("func #") || l.starts_with("async func #") || l.starts_with('@'))
+    }).collect::<Vec<_>>().join("\n");
+    for call in ["examples.reflect_binding.Users.Hello(", "examples.reflect_binding.Users.Create(", "examples.reflect_binding.Users.Slow(", "examples.reflect_binding.Math.Add(", "encoding.json.Parse<User>(", "strconv.Atoi("] {
+        assert!(body.contains(&format!("call {call}")), "no direct call {call}:\n{body}");
+    }
+    for needle in ["Invoke", "[]any", "TypeInfo.", "MethodInfo.", "ParamInfo.", "Attribute"] {
+        assert!(!body.contains(needle), "{needle} in the unrolled binder:\n{body}");
+    }
+    // Every descriptor variable is bound to nil (all its uses folded).
+    assert!(!body.contains("call reflect.TypeOf"), "a descriptor table is read:\n{body}");
+    // The machine code agrees: the LLVM IR of Dispatch calls the actions.
+    let dir = std::env::temp_dir().join(format!("zell-reflect-{}-binder", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ll = dir.join("b.ll");
+    let r = Command::new(env!("CARGO_BIN_EXE_zell")).arg("build").arg(repo().join("examples/reflect_binding.zl")).arg("--emit=llvm-ir").arg("-o").arg(&ll).output().unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let ir = std::fs::read_to_string(&ll).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut disp = String::new();
+    let mut inside = false;
+    for l in ir.lines() {
+        if l.starts_with("define") && l.contains("@zell_examples__reflect_binding__Dispatch") {
+            inside = true;
+        }
+        if inside {
+            disp.push_str(l);
+            disp.push('\n');
+            if l == "}" {
+                inside = false;
+            }
+        }
+    }
+    for f in ["Users__Hello", "Users__Create", "Users__Slow", "Math__Add", "json__Parse__User"] {
+        assert!(disp.contains(&format!("__{f}")), "Dispatch IR does not call {f}");
+    }
+    assert!(!disp.contains("Invoke") && !disp.contains("invoke_thunk"), "Dispatch IR boxes through Invoke");
+}

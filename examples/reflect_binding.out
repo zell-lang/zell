@@ -1,0 +1,8 @@
+/users/hello -> hello Ann hello Ann
+/math/add -> 42
+/math/add -> error: strconv.Atoi: parsing "forty": invalid syntax
+/users/create -> {"Name":"Bob (admin)","Age":30}
+/users/create -> error: age must not be negative
+/users/create -> error: Name: expected string, found number
+/users/slow -> waited 2 ms
+/nowhere -> error: 404 /nowhere

@@ -1,0 +1,156 @@
+// A typed request binder written as library code: controllers are found
+// with reflect.TypesWith<controller>(), and the loops over the types, their
+// methods and the method parameters are unrolled at compile time. Every
+// parameter is parsed into its own static type (strconv / json.Parse<p.Type>)
+// and the action is called directly (m.Apply): no []any, no Invoke, no
+// boxing on the request path.
+namespace examples.reflect_binding
+
+import io
+import encoding.json
+
+// -- the "framework" ---------------------------------------------------------
+
+@attribute(targets: [reflect.Target.Struct])
+struct controller {
+    prefix string
+}
+
+@attribute(targets: [reflect.Target.Func])
+struct get {
+    path string
+}
+
+@attribute(targets: [reflect.Target.Param])
+struct query {
+    name string
+}
+
+@attribute(targets: [reflect.Target.Param])
+struct body {}
+
+// The result of an action as text.
+func render<R>(r R) string {
+    switch r {
+    case string s: return s
+    case int n: return fmt.Format("{0}", n)
+    default: return json.Format(r)
+    }
+}
+
+// Dispatch finds the action for path, binds its parameters from the query
+// and the body, and calls it.
+async func Dispatch(path string, q map[string]string, text string) string! {
+    for t in reflect.TypesWith<controller>() {
+        var c t
+        for m in t.Methods {
+            var g = m.Attribute<get>()
+            if g == nil {
+                continue
+            }
+            if t.Attribute<controller>().prefix + g.path != path {
+                continue
+            }
+            var args m.Args
+            for p in m.Params {
+                var qa = p.Attribute<query>()
+                if qa != nil {
+                    var raw = q[qa.name]
+                    switch p.Type.Kind {
+                    case reflect.Kind.Int: p.Set(&args, strconv.Atoi(raw)?)
+                    case reflect.Kind.String: p.Set(&args, raw)
+                    case reflect.Kind.Bool: p.Set(&args, raw == "true")
+                    default: reflect.Error("unsupported query parameter type " + p.Type.Name)
+                    }
+                } else if p.Attribute<body>() != nil {
+                    p.Set(&args, json.Parse<p.Type>(text)?)
+                } else {
+                    reflect.Error("parameter " + p.Name + " of " + t.Name + "." + m.Name + " needs @query or @body")
+                }
+            }
+            if m.IsAsync {
+                return render(await m.Apply(&c, args))
+            }
+            if m.Result.Kind == reflect.Kind.Fallible {
+                return render(m.Apply(&c, args)?)
+            }
+            return render(m.Apply(&c, args))
+        }
+    }
+    return error("404 " + path)
+}
+
+// -- the application -----------------------------------------------------------
+
+struct User {
+    Name string
+    Age  int
+}
+
+@controller(prefix: "/users")
+struct Users {
+    count int
+
+    @get(path: "/hello")
+    func Hello(@query(name: "name") name string, @query(name: "times") times int) string {
+        var s = ""
+        for i in 0..times {
+            if i > 0 {
+                s += " "
+            }
+            s += "hello " + name
+        }
+        return s
+    }
+
+    @get(path: "/create")
+    func Create(@body u User, @query(name: "admin") admin bool) User! {
+        if u.Age < 0 {
+            return error("age must not be negative")
+        }
+        this.count += 1
+        if admin {
+            u.Name = u.Name + " (admin)"
+        }
+        return u
+    }
+
+    @get(path: "/slow")
+    async func Slow(@query(name: "ms") ms int) string {
+        await task.Delay(ms)
+        return fmt.Format("waited {0} ms", ms)
+    }
+
+    // Not an action: no @get.
+    func helper() int {
+        return 1
+    }
+}
+
+@controller(prefix: "/math")
+struct Math {
+    @get(path: "/add")
+    func Add(@query(name: "a") a int, @query(name: "b") b int) int {
+        return a + b
+    }
+}
+
+async func call(path string, q map[string]string, text string) {
+    try {
+        var out = await Dispatch(path, q, text)?
+        println(path, "->", out)
+    } catch err {
+        println(path, "-> error:", err.Message())
+    }
+}
+
+async func main() {
+    await call("/users/hello", map[string]string{"name": "Ann", "times": "2"}, "")
+    await call("/math/add", map[string]string{"a": "40", "b": "2"}, "")
+    await call("/math/add", map[string]string{"a": "forty", "b": "2"}, "")
+    await call("/users/create", map[string]string{"admin": "true"}, "{\"Name\":\"Bob\",\"Age\":30}")
+    await call("/users/create", map[string]string{}, "{\"Name\":\"Eve\",\"Age\":-1}")
+    await call("/users/create", map[string]string{}, "{\"Name\":3}")
+    await call("/users/slow", map[string]string{"ms": "2"}, "")
+    await call("/nowhere", map[string]string{}, "")
+}
