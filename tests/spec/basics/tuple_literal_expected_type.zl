@@ -1,0 +1,41 @@
+// test: a tuple literal takes its expected type element by element, so nil gets typed in return, assignment, typed initialisation and argument position (DESIGN.md, tuples)
+// status: passing
+namespace spec.basics.tuple_literal_expected_type
+
+import io
+
+struct Order { Id int }
+
+func find(id int) (*Order, bool) {
+    if id == 1 {
+        return (new Order{Id: 1}, true)
+    }
+    return (nil, false)
+}
+
+func firstOr(p (*Order, int)) int {
+    var (o, n) = p
+    if o == nil {
+        return n
+    }
+    return o.Id
+}
+
+func failing() (int, error) {
+    return (0, nil)
+}
+
+func main() {
+    var (o, ok) = find(2)
+    println(o == nil, ok)
+    var (o1, ok1) = find(1)
+    println(o1.Id, ok1)
+    var t (*Order, int) = (nil, 3)
+    var (a, b) = t
+    println(a == nil, b)
+    t = (nil, 4)
+    var (_, c) = t
+    println(c, firstOr((nil, 7)), firstOr((new Order{Id: 9}, 7)))
+    var (n, err) = failing()
+    println(n, err == nil)
+}

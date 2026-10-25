@@ -524,7 +524,7 @@ written by hand), **33** (see 67), **46** (see 78).
     runes, `char - char` gives `int`, and `char ± int` gives `char`
     (checked for a valid code point in debug builds). Comparisons already
     work.
-72. ❌ **ergonomics:** **`nil` in a tuple `return` is "use of untyped nil"**
+72. ✅ **Fixed (2026-10-25):** cause: the tuple literal passed its expected element types down but still rejected an untyped `nil` element; it now coerces `nil` to the expected element type (DESIGN.md «Функции», `basics/tuple_literal_expected_type`). **ergonomics:** **`nil` in a tuple `return` is "use of untyped nil"**
     even though the result type `(*Order, bool)` is known. Workaround: `var
     none *Order = nil; return (none, false)` (in the iterator `Next`).
     **Decision:** a tuple literal in a `return`, an assignment or an

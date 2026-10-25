@@ -69,9 +69,14 @@ impl<'a> Sema<'a> {
                     Some(Type::Tuple(ts)) if ts.len() == es.len() => ts.into_iter().map(Some).collect(),
                     _ => vec![None; es.len()],
                 };
+                // Element by element (DESIGN.md, tuples): `nil` takes the
+                // expected element type, `return (nil, false)` for `(*T, bool)`.
                 let vs: Vec<hir::Expr> = es.iter().zip(hint).map(|(x, h)| {
                     let v = self.value(x, h);
-                    self.default_type(v)
+                    match h {
+                        Some(t) if matches!(self.tt.get(v.ty), Type::Nil) => self.coerce(v, t, Ctx::Elem),
+                        _ => self.default_type(v),
+                    }
                 }).collect();
                 let ty = self.tt.tuple(vs.iter().map(|v| v.ty).collect());
                 mk(ExprKind::Tuple(vs), ty, span)
