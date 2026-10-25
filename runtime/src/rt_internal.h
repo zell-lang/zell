@@ -94,7 +94,9 @@ typedef struct zell__hook {
     int32_t has_data;
 } zell__hook;
 /* Links the embedded hook h: fn(w) runs when `owner` is cancelled (at once,
- * on this thread, if it already is). Retains w; owner NULL links nothing. */
+ * on this thread, if it already is). Retains w; owner NULL links nothing.
+ * h->w must already be w: the wait is queued (and its waker reads h->w
+ * without the owner's lock) before it is linked, so it is never written. */
 ZELL_HIDDEN void zell__hook_link(zell__hook *h, zell_task *owner, void (*fn)(zell_task *), zell_task *w);
 /* Sets fn to run when t itself is the target of zell_task_cancel (task.Any
  * cancelling a pending Recv). For tasks with no parent (waits); set before

@@ -613,6 +613,48 @@ TEST(channel_async_and_strings) {
 /* ---- work stealing: one worker floods its local queue (the ring
  * overflows to the global queue), the other workers drain it ---- */
 
+/* Channel waits link their embedded cancel hook after the wait is queued
+ * (task_sync.c): the waker reads hook.w meanwhile without the owner's lock,
+ * so linking must not write it (a data race under `make tsan` while
+ * zell__hook_link rewrote it). Both sides run in a task scope, so both
+ * link hooks. */
+enum { CH_N = 3000 };
+static int64_t ch_handle, ch_recv_done;
+
+static void ch_receiver(void *arg) {
+    (void)arg;
+    for (int i = 0; i < CH_N; i++) {
+        zell_task *t = zell_task_chan_recv(ch_handle);
+        int64_t *slot = zell_task_await(t);
+        assert(slot[0] == i && slot[1] == 0);
+        zell_release(t);
+    }
+    __atomic_store_n(&ch_recv_done, 1, __ATOMIC_RELEASE);
+}
+
+TEST(chan_wait_hook_link) {
+    ch_handle = zell_task_chan_new(0, 8, NULL, 16, NULL, 8, 16, NULL, 8);
+    ch_recv_done = 0;
+    zell_task *owner = zell_task_new_plain(0, NULL);
+    zell_task *prev = zell_task_enter_scope(owner);
+    zell_sched_post(ch_receiver, NULL);   /* runs as task `owner` too */
+    for (int64_t i = 0; i < CH_N; i++) {
+        zell_task *t = zell_task_chan_send(ch_handle, &i);
+        zell_task_await(t);
+        zell_release(t);
+    }
+    int64_t t0 = now_ms();
+    while (!__atomic_load_n(&ch_recv_done, __ATOMIC_ACQUIRE)) {
+        assert(now_ms() - t0 < 10000);
+        sched_yield();
+    }
+    zell_task_leave_scope(prev);
+    zell_release(prev);
+    zell_task_complete(owner, NULL);
+    zell_release(owner);
+    zell_task_chan_release(ch_handle);
+}
+
 enum { FLOOD = 4000 };
 static pthread_t flood_thread[FLOOD];
 static int64_t flood_done;
@@ -1557,6 +1599,7 @@ int main(int argc, char **argv) {
     zell_slice_release(&args);
 
     RUN(misuse_panics);   /* forks: run before worker threads are busy */
+    RUN(chan_wait_hook_link);
     RUN(spawn_await);
     RUN(many_spawns_all);
     RUN(nested_await_on_worker);

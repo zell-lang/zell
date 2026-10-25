@@ -2374,7 +2374,8 @@ void zell__hook_link(hook *h, zell_task *owner, void (*fn)(zell_task *), zell_ta
     h->fn = fn;
     h->has_data = 0;
     h->data = 0;
-    h->w = w;
+    /* h->w == w already: set before the wait was published (a waker reads
+     * it without the owner's lock, so it is not rewritten here) */
     h->embedded = 1;
     if (owner) hook_add(owner, h); else orphan_add(h);
 }
