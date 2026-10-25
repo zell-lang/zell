@@ -323,7 +323,7 @@ fn has_section(obj: &Path, name: &str) -> bool {
 #[test]
 fn debug_info_flags_and_identical_code() {
     let dir = tmpdir("flags");
-    let src = repo().join("benchmarks/fib/fib.zl");
+    let src = repo().join("benchmarks/fib/main.zl");
     let src = if src.is_file() { src } else { fixture("values.zl") };
     let dbg = dir.join("dbg.o");
     let rel = dir.join("rel.o");
