@@ -1267,12 +1267,12 @@ func describeEvent(e Event) string {
 enum Lookup<T> {
     Found(value T)
     Missing(key string)
-}
 
-func orElse<T>(l Lookup<T>, fallback T) T {
-    switch l {
-        case Lookup.Found(v): return v
-        case Lookup.Missing(_): return fallback
+    func OrElse(fallback T) T {
+        switch this {
+            case Lookup.Found(v): return v
+            case Lookup.Missing(_): return fallback
+        }
     }
 }
 
@@ -1394,7 +1394,7 @@ async func demoMisc(book *OrderBook) void! {
         println(" ", describeEvent(e))
     }
     var prices = map[string]int{"apple": 120, "fig": 75}
-    println(" ", orElse(find(prices, "fig"), -1), orElse(find(prices, "kiwi"), -1))
+    println(" ", find(prices, "fig").OrElse(-1), find(prices, "kiwi").OrElse(-1))
     switch find(prices, "kiwi") {
         case Lookup.Found(v): println("  found", v)
         case Lookup.Missing(k): println("  missing", k)

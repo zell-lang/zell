@@ -1,0 +1,49 @@
+// test: methods of a generic enum are instantiated with the enum (one copy per type argument); they see T, call each other and take the enum value as this
+// status: passing
+namespace spec.generics.generic_enum_methods
+
+import io
+
+enum Opt<T> {
+    Some(v T)
+    None
+
+    func IsSome() bool {
+        switch this {
+            case Opt.Some(_): return true
+            case Opt.None: return false
+        }
+    }
+
+    func Or(d T) T {
+        switch this {
+            case Opt.Some(v): return v
+            case Opt.None: return d
+        }
+    }
+
+    func Describe(d T) string {
+        if this.IsSome() {
+            return fmt.Format("some {0}", this.Or(d))
+        }
+        return fmt.Format("none, default {0}", d)
+    }
+}
+
+func find(xs []string, want string) Opt<int> {
+    for i, x in xs {
+        if x == want {
+            return Opt<int>.Some(i)
+        }
+    }
+    return Opt<int>.None
+}
+
+func main() {
+    var a = Opt<int>.Some(3)
+    var b = Opt<int>.None
+    println(a.Or(0), b.Or(7), a.IsSome(), b.IsSome())
+    var s = Opt<string>.Some("x")
+    println(s.Or("y"), Opt<string>.None.Or("y"))
+    println(find(["a", "b"], "b").Describe(-1), find(["a"], "z").Describe(-1))
+}

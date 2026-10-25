@@ -354,7 +354,7 @@ written by hand), **33** (see 67), **46** (see 78).
     buffered output) and `cross.rs::windows_fatal_access_violation` under
     Wine. Wine itself kills a process on stack overflow before any handler
     runs, so that case is checked on Linux only.
-59. ❌ **bug:** **methods of a generic enum cannot be called**: "cannot call
+59. ✅ **Fixed (2026-10-25):** **bug:** **methods of a generic enum cannot be called**: "cannot call
     method Or on value of type Opt<int> … methods exist only on structs,
     enums and interfaces".
     ```zell
@@ -370,6 +370,15 @@ written by hand), **33** (see 67), **46** (see 78).
     **Decision:** methods of a generic enum get the same instantiation path
     as methods of a generic struct. The tour says enums take type
     parameters and methods.
+    **Cause and fix:** `instantiate_enum` created the variants but never the
+    methods (only plain enums registered them, in `resolve.rs`), so
+    `Opt<int>` had none. Generic enum instances now get their methods the
+    way generic struct instances do (one function per instance in the
+    instance environment, receiver = the enum value), the template check
+    also checks their bodies, and the rollback after that check drops the
+    instance method entries. Spec test `generics/generic_enum_methods`;
+    `orElse` in `examples/kitchen_sink.zl` is now the method
+    `Lookup.OrElse`.
 60. ❌ **bug:** **`var (a, b) = m[k]` with a 2-tuple value type means comma-ok,
     not destructuring**: with `m map[string](int, int)`, `a` is the tuple and
     `b` is the `bool`, and the error only shows up later ("(int, int) cannot

@@ -719,7 +719,7 @@ impl<'a> Sema<'a> {
         self.force_template(t);
         let tm = &self.gen.templates[t as usize];
         let TmplDecl::Enum(decl) = tm.decl else { return None };
-        let (tname, ns) = (tm.name.clone(), tm.ns);
+        let (root, tname, ns) = (tm.root, tm.name.clone(), tm.ns);
         let name = self.inst_name(&tname, &args);
         if !self.depth_ok(&name, span) {
             return None;
@@ -731,10 +731,11 @@ impl<'a> Sema<'a> {
         let hns = self.inst_hir_ns(t, self.cur_ns);
         let node = self.unit_new_node();
         let unit_prev = self.unit_enter(node);
-        let saved = self.enter(t, env, note);
+        let sites = self.inst_sites(span);
+        let saved = self.enter(t, env.clone(), note.clone());
         let eid = self.enums.len() as u32;
         self.enums.push(hir::Enum {
-            name,
+            name: name.clone(),
             full_name,
             namespace: hns,
             variants: Vec::new(),
@@ -750,6 +751,29 @@ impl<'a> Sema<'a> {
         self.unit_bind(node, units::MemoKey::Inst(Inst::Enum(eid).into()));
         self.gen.inst_enums.insert(eid, (t, args));
         self.resolve_enum_variants(eid as usize);
+        // Methods: instantiated with the enum, like a generic struct's
+        // (the receiver is the enum value, as for a plain enum).
+        for m in &decl.methods {
+            if m.is_static || !m.generics.is_empty() {
+                self.err("enum methods cannot be static or generic", m.name.span);
+                continue;
+            }
+            if self.enum_methods.contains_key(&(eid, m.name.name.clone())) || decl.variants.iter().any(|v| v.name.name == m.name.name) {
+                self.err(format!("duplicate member {} in enum {tname}", m.name.name), m.name.span);
+                continue;
+            }
+            let fid = self.new_func(m, FuncKind::Free, FuncSrc::Free(m), &format!("{name}.{}", m.name.name));
+            let full = self.funcs[fid.0 as usize].full_name.clone();
+            let symbol = self.inst_symbol(&full);
+            self.funcs[fid.0 as usize].symbol = symbol;
+            self.funcs[fid.0 as usize].namespace = hns;
+            self.enum_methods.insert((eid, m.name.name.clone()), fid);
+            self.enums[eid as usize].methods.push((m.name.name.clone(), fid));
+            self.enum_method_owner.insert(fid.0, eid);
+            self.unit_bind_func(node, fid);
+            self.gen.insts.insert(fid.0, InstFunc { env: env.clone(), file: self.cur_file, ns: self.cur_ns, root, note: note.clone(), depth: self.gen.depth, sites: sites.clone() });
+            self.resolve_func_sig(fid.0 as usize);
+        }
         self.leave(saved);
         self.unit_leave(unit_prev);
         Some(eid)
@@ -846,6 +870,8 @@ impl<'a> Sema<'a> {
         self.struct_src.truncate(m.structs);
         self.enums.truncate(m.enums);
         self.enum_src.truncate(m.enums);
+        self.enum_methods.retain(|(e, _), f| (*e as usize) < m.enums && (f.0 as usize) < m.funcs);
+        self.enum_method_owner.retain(|f, e| (*f as usize) < m.funcs && (*e as usize) < m.enums);
         let g = &mut self.gen;
         g.templates.truncate(m.templates);
         g.tparams.truncate(m.tparams);
@@ -907,7 +933,12 @@ impl<'a> Sema<'a> {
                     }
                 }
                 TmplDecl::Enum(_) => {
-                    self.instantiate_enum(t, args, span);
+                    if let Some(eid) = self.instantiate_enum(t, args, span) {
+                        let ms: Vec<FuncId> = self.enums[eid as usize].methods.iter().map(|m| m.1).collect();
+                        for f in ms {
+                            self.check_function_body(f);
+                        }
+                    }
                 }
             }
             self.fns = saved_fns;
