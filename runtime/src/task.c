@@ -1067,9 +1067,10 @@ struct zell_task {
     unsigned char slot[];       /* result_size bytes (8-aligned) */
 };
 
-/* The word compiled code reads inline (ABI.md 10.2 "Task layout"): the
- * ramp's cancel-hook mark. Moving it is an ABI change. */
-_Static_assert(offsetof(struct zell_task, hook_seq) == 144, "ABI.md 10.2: task layout");
+/* The words compiled code reads inline (ABI.md 10.2 "Task layout"): the
+ * await fast path (state, panic_msg, slot) and the ramp's cancel-hook mark
+ * (hook_seq). Moving any of them is an ABI change. */
+_Static_assert(offsetof(struct zell_task, state) == 24 && offsetof(struct zell_task, hook_seq) == 144 && offsetof(struct zell_task, panic_msg) == 200 && offsetof(struct zell_task, slot) == 224 && TASK_DONE == 1, "ABI.md 10.2: task layout");
 
 /* A thread blocked in zell_task_await, on its stack. It parks on its own
  * (thread-local) mutex and condition variable: a process-wide condition

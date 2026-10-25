@@ -163,6 +163,9 @@
 //! `zell_coro_frame_free`. The ramp's `zell_coro_enter` / `zell_coro_leave`
 //! are inlined on the thread-local `zell_coro_tls` `{ ctx, cur,
 //! orphan_seq, orphan_on }` (ABI.md 10.2).
+//! An `await` of a task tests its state word inline (+24 == 1, acquire)
+//! and takes the result at +224 when it did not panic (+200 NULL; ABI.md
+//! 10.2 "Task layout").
 //! Callers awaiting a direct call outside a coroutine read `res.value` when
 //! `res.task` is NULL; callers keeping the task, and thunks of async
 //! functions used as values, pass a NULL awaiter and materialise a done

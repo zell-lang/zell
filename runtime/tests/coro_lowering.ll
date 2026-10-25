@@ -39,8 +39,9 @@
 ;
 ;
 ; `work` is written the way the compiler emits it (zell_coro_enter /
-; zell_coro_leave inline on zell_coro_tls, ABI.md 10.2, a frame that is
-; not zeroed); the other functions use the equivalent runtime calls.
+; zell_coro_leave / zell_task_is_done inline on zell_coro_tls and the task
+; layout of ABI.md 10.2, a frame that is not zeroed); the other functions
+; use the equivalent runtime calls.
 ;
 ; Protocol: `void @f(params, ptr %res)` with %res -> { ptr task; T value }.
 ; The ramp stores the coroutine's Task<T> (+1) into res.task when the body
@@ -136,7 +137,9 @@ enter.ctx:
   store ptr %ctx0, ptr %ctx.slot
   ; 2. body: `await task.Delay(5)` (result type void)
   %d = call ptr @zell_task_delay(i64 5)
-  %d.done = call i1 @zell_task_is_done(ptr %d)
+  %d.st.p = getelementptr inbounds i8, ptr %d, i64 24   ; zell_task_is_done inline: state == DONE
+  %d.st = load atomic i32, ptr %d.st.p acquire, align 4
+  %d.done = icmp eq i32 %d.st, 1
   br i1 %d.done, label %d.ready, label %d.try
 
 d.try:

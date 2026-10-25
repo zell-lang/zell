@@ -1405,13 +1405,13 @@ built as `*_async` variants that return a `zell_task *`.
 | `void zell_coro_leave(zell_object *ctx0)` | a coroutine that never suspended (so made no task) returns: `ctx0` (+1, consumed) is the current context again, so whatever the body set does not leak into the caller (10.8). Inlined by compiled code: `old = tls.ctx; tls.ctx = ctx0; zell_release(old)` |
 | `zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *ops, const void *result)` | an already **done** plain task, +1, holding `result` (`result_size` bytes copied; the slot takes over the reference, nothing is retained). Used by callers that keep the `Task<T>` of an async call that completed synchronously |
 | `void zell_task_complete(zell_task *t, const void *result)` | stores the result (copies `result_size` bytes from `result`, which is borrowed: the task **retains** it with `ops`; `result` may be NULL for void tasks or a zero result), marks the task done, wakes blocking waiters, and posts the continuations. **Panics `task completed twice`** on a second call. After it returns, `t` may already have been freed by another thread unless the caller still owns a reference |
-| `bool zell_task_is_done(const zell_task *t)` | acquire-load of the state |
+| `bool zell_task_is_done(const zell_task *t)` | acquire-load of the state (compiled code inlines it: "Task layout" below); panics on NULL |
 | `bool zell_task_add_continuation(zell_task *t, zell_resume_fn fn, void *frame)` | atomically: if `t` is still pending, registers `(fn, frame)` and returns **true** (the caller must now suspend). If `t` is already done, registers nothing and returns **false** (the caller continues immediately). Each registration fires exactly once |
 | `bool zell_task_add_continuation_linked(zell_task *t, zell_resume_fn fn, void *frame)` | the same for a resumed linked coroutine (10.3, no task of its own): the continuation carries the current task and context (retained), which stay current |
 | `void zell_coro_defer(zell_task *t, void *frame, zell_object *ctx0)` / `void zell_coro_register(bool own)` | frame-linked await (10.3): a linked frame's first suspension on `t` is recorded (one per thread, with the current context; `ctx0`, +1 consumed, is current again) and published by the last frame of the synchronous chain to suspend, as `zell_task_add_continuation` would for that frame (`own`: its task stops being current); a done `t` posts the resumption instead |
 | `extern _Thread_local void *zell_coro_next` | the awaiter a linked frame hands over when it ends; `run_job` resumes it (10.3) |
 | `void zell_coro_unwound_linked(void *word, void *awaiter, zell_object *ctx0)` / `void zell_coro_link_panic(zell_error *e, void *value, int64_t size, int64_t err_off)` | a linked frame's destroy path (the `task.Panic` error into the awaiter's word) and the awaiter reading it (re-panic for `err_off < 0`, else `{zero, e}` into `value`), 10.3 |
-| `void *zell_task_result(const zell_task *t)` | **[borrowed]** pointer to the result slot, valid while `t` is alive. Panics `task result read before completion` if pending. To keep a refcounted result, copy and **retain** it |
+| `void *zell_task_result(const zell_task *t)` | **[borrowed]** pointer to the result slot, valid while `t` is alive. Panics `task result read before completion` if pending. To keep a refcounted result, copy and **retain** it. For a done task that did not panic it is `t + 224` ("Task layout"), which compiled code computes inline |
 | `void zell_task_run_main(zell_main_ramp_fn ramp, void *res)` | program entry of an `async func main` (11): posts `ramp(res)` as a job (the global queue: the main thread is no worker) and blocks the calling thread (10.5) until the ramp **returned**, i.e. until main's first suspension or its synchronous end. `typedef void (*zell_main_ramp_fn)(void *res)`; `res` is the ramp's result slot `{ ptr task; T value }` (10.3), read by the caller afterwards. The ramp runs with **no current task**, as it did on the main thread (its task, made at the first suspension, is a root; the debug agent keeps it as the main record, 22), but on a worker, so spawns, `Yield`s and wake-ups before its first suspension go to that worker's local queues. A panic before the first suspension is outside a task and ends the process (8.1) |
 | `void *zell_task_await(zell_task *t)` | **blocking** await: waits until `t` is done and returns the **[borrowed]** result slot. See 10.5 for where it may be used |
 | `zell_task *zell_task_spawn(zell_task_fn fn, void *ctx)` | creates a task (8-byte POD result slot) and posts `fn(task, ctx)` to the pool. `typedef void (*zell_task_fn)(zell_task *task, void *ctx)`. `fn` must call `zell_task_complete(task, ...)`, either before returning or later. The job holds its own reference only **until `fn` returns**, so to complete later `fn` must `zell_retain(task)`. Returns +1 |
@@ -1421,14 +1421,17 @@ built as `*_async` variants that return a `zell_task *`.
 | `zell_task *zell_task_all(zell_task *const *tasks, int64_t n)` | `Task<void>` that completes once every task in the array has completed. `n == 0` returns a completed task. Read the individual results from the input tasks. +1 |
 | `zell_task *zell_task_any(zell_task *const *tasks, int64_t n)` | task whose 8-byte result is the `int64_t` **index** of the first input to complete. `n` must be at least 1. +1 |
 
-**Task layout.** Compiled code reads these words of a task inline (the
+**Task layout.** Compiled code reads four words of a task inline (the
 offsets are the same on every supported target; `task.c` checks them with
 `_Static_assert`, and `zell_debug_task_layout` publishes state and slot for
 the debuggers, 20):
 
 | offset | word | read by |
 |---|---|---|
+| +24 | `int32 state`: 0 pending, **1 `TASK_DONE`**; acquire load (stored with release once the result or panic is in place) | the `await` fast path (`zell_task_is_done` inline) and the result fast path |
 | +144 | `int64 hook_seq`: the task's cancel-hook link number; relaxed load | the inlined `zell_coro_enter` (the ramp's mark) |
+| +200 | `zell_string *panic_msg`: NULL unless the task panicked (written before the state) | the result fast path |
+| +224 | the result slot (`result_size` bytes, 8-aligned) | the result fast path: `state == 1 && panic_msg == NULL` gives `t + 224`, exactly what `zell_task_result` / `zell_task_result_err` return then (borrowed: the reader copies and retains); every other case (a panicked task, `task.Yield`'s sentinel, which is never done) calls them |
 
 **Thread state for inlined ramps.** `extern _Thread_local zell_coro_tls_t
 zell_coro_tls` (same TLS model as `zell_coro_chain`: native TLS everywhere,
@@ -1440,6 +1443,7 @@ task as the runtime keeps them:
 | +0 | `zell_object *ctx` | the current context (owned, 10.8) |
 | +8 | `zell_task *cur` | the current task (owned, 10.11), NULL = none |
 | +16 | `int64_t orphan_seq` | the orphan cancel-hook link number (10.11) |
+| +24 | `int32_t orphan_on` | orphan hooks are recorded while nonzero |
 
 Compiled code reads `cur`, `orphan_seq` and `ctx`, writes `orphan_on = 1`
 (the inlined `zell_coro_enter`: `mark = cur ? cur->hook_seq : orphan_seq`,
@@ -1490,7 +1494,7 @@ entry:
 
 ; each `x = await e` (e : Task<U>):
   t = <evaluate e>                                 ; +1 (owned local in the frame)
-  if zell_task_is_done(t) goto ready              ; fast path, optional
+  if zell_task_is_done(t) goto ready              ; fast path, optional (inline: t->state == 1)
   cur = load task.slot
   own = zell_task_lazy(cur, sizeof(T), ops_T, load ctx.slot, load mark.slot)  ; makes the task on the first call
   store own -> task.slot
@@ -1501,6 +1505,7 @@ entry:
   switch s: 0 -> ready, 1 -> unwind, default -> done   ; unwind: 8.1
 ready:
   x = load U from zell_task_result(t); retain x if U is a reference type
+                                                   ; (inline: t + 224 when done and not panicked, 10.2)
   zell_release(t)
 
 ; `x = await g(args)` of a direct call of an async function g, outside a

@@ -51,6 +51,13 @@ use inkwell::IntPredicate;
 const LINK_LINKED: u64 = 1;
 /// Byte offset of a task's cancel-hook link number (ABI.md 10.2 "Task layout").
 const TASK_HOOK_SEQ_OFF: u64 = 144;
+/// Byte offsets of a task's state word (int32), panic message (NULL unless
+/// it panicked) and result slot, and the state of a done task (ABI.md 10.2
+/// "Task layout").
+const TASK_STATE_OFF: u64 = 24;
+const TASK_PANIC_MSG_OFF: u64 = 200;
+const TASK_SLOT_OFF: u64 = 224;
+const TASK_DONE: u64 = 1;
 
 impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// Calls intrinsic `name` (non-overloaded) with raw arguments.
@@ -383,7 +390,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         };
         let ready = self.block("await.ready");
         let try_ = self.block("await.try");
-        let done = self.call_rt_v("zell_task_is_done", &[t.into()]).into_int_value();
+        let done = self.task_done_inline(t);
         self.b.build_conditional_branch(done, ready, try_).unwrap();
         self.b.position_at_end(try_);
         let (own, kind, ctxr) = self.coro_suspend_begin();
@@ -433,7 +440,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_unconditional_branch(ready).unwrap();
         self.b.position_at_end(ready);
         self.dbga_resume();
-        self.task_result_rt(t, err_off)
+        self.task_result_inline(t, err_off)
     }
 
     /// The first-suspension step of an `await` that has to suspend (ABI.md
@@ -497,6 +504,53 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         let st = self.llty(t).into_struct_type();
         self.td.offset_of_element(&st, 1)
+    }
+
+    /// `zell_task_is_done(t)` inline (ABI.md 10.2 "Task layout"): an
+    /// acquire load of the state word; a nil `t` goes to the runtime call,
+    /// which panics.
+    fn task_done_inline(&mut self, t: PointerValue<'ctx>) -> IntValue<'ctx> {
+        let nil = self.block("await.nil");
+        let chk = self.block("await.chk");
+        let nn = self.b.build_is_not_null(t, "").unwrap();
+        self.b.build_conditional_branch(nn, chk, nil).unwrap();
+        self.b.position_at_end(nil);
+        self.call_rt("zell_task_is_done", &[t.into()]);
+        self.b.build_unreachable().unwrap();
+        self.b.position_at_end(chk);
+        let sp = self.byte_gep(t, TASK_STATE_OFF);
+        let st = self.atomic_load(self.ctx.i32_type().into(), sp, 4, inkwell::AtomicOrdering::Acquire, "task.state").into_int_value();
+        self.b.build_int_compare(IntPredicate::EQ, st, self.ctx.i32_type().const_int(TASK_DONE, false), "done").unwrap()
+    }
+
+    /// The result slot of done task `t` ([`Self::task_result_rt`]) with the
+    /// common case inline (ABI.md 10.2 "Task layout"): a done task that did
+    /// not panic has its result at `t + TASK_SLOT_OFF`, which is what
+    /// `zell_task_result` returns for it (borrowed). Anything else (a
+    /// panicked task, `task.Yield`'s sentinel) takes the runtime call.
+    fn task_result_inline(&mut self, t: PointerValue<'ctx>, err_off: Option<u64>) -> PointerValue<'ctx> {
+        let done = self.task_done_inline(t);
+        let pm = self.block("result.chk");
+        let fast = self.block("result.fast");
+        let slow = self.block("result.slow");
+        let join = self.block("result");
+        self.b.build_conditional_branch(done, pm, slow).unwrap();
+        self.b.position_at_end(pm);
+        let mp = self.byte_gep(t, TASK_PANIC_MSG_OFF);
+        let msg = self.b.build_load(self.ptr_ty(), mp, "panic.msg").unwrap().into_pointer_value();
+        let ok = self.b.build_is_null(msg, "").unwrap();
+        self.b.build_conditional_branch(ok, fast, slow).unwrap();
+        self.b.position_at_end(fast);
+        let p1 = self.byte_gep(t, TASK_SLOT_OFF);
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(slow);
+        let p2 = self.task_result_rt(t, err_off);
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        let phi = self.b.build_phi(self.ptr_ty(), "result.slot").unwrap();
+        phi.add_incoming(&[(&p1, fast), (&p2, slow_end)]);
+        phi.as_basic_value().into_pointer_value()
     }
 
     /// The result slot of done task `t` (`zell_task_result`, or the `_err`
