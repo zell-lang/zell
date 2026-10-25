@@ -1,0 +1,58 @@
+// test: Select-style projections are representable: a tuple result and a struct literal result become Tuple and Struct nodes; two-parameter lambdas have one Param per parameter
+// status: passing
+namespace spec.expr.projections
+
+import io
+import expr
+
+struct User {
+    Id int
+    Name string
+    Age int
+}
+
+struct UserDto {
+    Key int
+    Label string
+}
+
+func describe(n *expr.Node, depth int) {
+    var pad = strings.Repeat("  ", depth)
+    var t = expr.TypeOf(n)
+    switch *n {
+    case expr.Node.Param(i, _): println(pad + "Param", i, t.Name)
+    case expr.Node.Field(_, name, idx, _, owner): println(pad + "Field", name, idx, t.Name, "of", owner.Name)
+    case expr.Node.Const(v, _): println(pad + "Const", v, t.Name)
+    case expr.Node.Captured(i, name, v, _): println(pad + "Captured", i, name, v, t.Name)
+    case expr.Node.Binary(op, _, _, _): println(pad + "Binary", op.Symbol(), t.Name)
+    case expr.Node.Unary(op, _, _): println(pad + "Unary", op.Symbol(), t.Name)
+    case expr.Node.Call(f, args, _): println(pad + "Call", f, len(args), t.Name)
+    case expr.Node.IsNil(_, neg): println(pad + "IsNil", neg)
+    case expr.Node.Tuple(elems, _): println(pad + "Tuple", len(elems), t.Name)
+    case expr.Node.Struct(_, fields):
+        var names []string = []
+        for f in fields {
+            names = append(names, fmt.Format("{0}:{1}", f.Index, f.Name))
+        }
+        println(pad + "Struct", t.Name, names)
+    }
+    for c in expr.Children(n) {
+        describe(c, depth + 1)
+    }
+}
+
+func main() {
+    var pair expr<func(*User) (int, string)> = u => (u.Id, u.Name)
+    describe(pair.Root(), 0)
+    println(pair)
+    var suffix = "!"
+    var dto expr<func(*User) UserDto> = u => UserDto{Key: u.Id * 10, Label: u.Name + suffix}
+    describe(dto.Root(), 0)
+    println(dto)
+    var older expr<func(*User, *User) bool> = (a, b) => a.Age > b.Age
+    describe(older.Root(), 0)
+    println(older, len(older.Params()))
+    var u = User{Id: 4, Name: "ann", Age: 30}
+    var v = User{Id: 5, Name: "bob", Age: 20}
+    println(pair.Compile()(&u), dto.Compile()(&u).Label, older.Compile()(&u, &v))
+}

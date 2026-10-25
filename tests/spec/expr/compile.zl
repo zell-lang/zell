@@ -1,0 +1,33 @@
+// test: Compile() returns the lambda as an ordinary function of type F: in-memory filtering, no tree is decoded, the result is the same function on every call
+// status: passing
+namespace spec.expr.compile
+
+import io
+
+struct Item {
+    Name string
+    Price int
+    Tags []string
+}
+
+func Filter(items []Item, p expr<func(Item) bool>) []string {
+    var f = p.Compile()
+    var out []string = []
+    for it in items {
+        if f(it) {
+            out = append(out, it.Name)
+        }
+    }
+    return out
+}
+
+func main() {
+    var items = [Item{Name: "pen", Price: 3, Tags: ["office"]}, Item{Name: "lamp", Price: 40, Tags: []}, Item{Name: "desk", Price: 300, Tags: ["office", "big"]}]
+    var max = 50
+    println(Filter(items, it => it.Price < max))
+    println(Filter(items, it => len(it.Tags) > 0 && strings.Contains(it.Name, "e")))
+    println(Filter(items, it => slices.Contains(it.Tags, "big") || it.Name == "pen"))
+    var price expr<func(Item) int> = it => it.Price * 2 + 1
+    var g = price.Compile()
+    println(g(items[1]), price.Compile()(items[2]))
+}

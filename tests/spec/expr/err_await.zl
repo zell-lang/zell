@@ -1,0 +1,20 @@
+// error: await is not allowed in an expression tree
+// status: passing
+// test: await inside an expression tree
+namespace spec.expr.err_await
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+async func limit() int { return 3 }
+
+async func main() {
+    var p expr<func(*User) bool> = u => u.Age > await limit()
+    println(p)
+}

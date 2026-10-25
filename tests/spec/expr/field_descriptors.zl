@@ -1,0 +1,67 @@
+// test: a field node's static descriptor maps it to a column, through reflect.Fields<T>() attributes in generic library code and through FieldInfo at run time
+// status: passing
+namespace spec.expr.field_descriptors
+
+import io
+import expr
+
+@attribute(targets: [reflect.Target.Field])
+struct col {
+    name string
+    key bool
+}
+
+struct Order {
+    @col(name: "order_id", key: true) Id int
+    @col(name: "total_cents") Total int
+    Note string
+}
+
+// The column of field node `n` of entity `T`, by the compile-time field
+// list (the descriptor's index selects the field).
+func column<T>(n *expr.Node) string {
+    var f = expr.FieldOf(n)
+    if f == nil || f.Index < 0 {
+        return "?"
+    }
+    for c in reflect.Fields<T>() {
+        if c.Index == f.Index {
+            var a = c.Attribute<col>()
+            if a != nil {
+                return a.name
+            }
+            return strings.ToLower(c.Name)
+        }
+    }
+    return "?"
+}
+
+func Columns<T>(p expr<func(*T) bool>) []string {
+    var out []string = []
+    expr.Walk(p.Root(), (n) => {
+        switch *n {
+        case expr.Node.Field(_, _, _, _, owner):
+            if owner == reflect.TypeOf<T>() {
+                out = append(out, column<T>(n))
+            }
+        }
+        return true
+    })
+    return out
+}
+
+func main() {
+    var p expr<func(*Order) bool> = o => o.Id > 10 && o.Total < 500 && o.Note != ""
+    println(Columns(p))
+    println(Columns<Order>(o => o.Total == 0))
+    // The run-time descriptor: name, type and attributes of the field.
+    expr.Walk(p.Root(), (n) => {
+        var f = expr.FieldOf(n)
+        if f != nil {
+            var a = f.Attribute<col>()
+            println(f.Name, f.Index, f.Type.Name, a != nil && a.key)
+        }
+        return true
+    })
+    println(p.Params()[0].Name, p.Params()[0].Elem.Name)
+}

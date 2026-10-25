@@ -1,0 +1,18 @@
+// error: the type argument of expr must be a function type
+// status: passing
+// test: expr<T> needs a function type
+namespace spec.expr.err_not_func
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+func main() {
+    var p expr<int>
+    println(p)
+}

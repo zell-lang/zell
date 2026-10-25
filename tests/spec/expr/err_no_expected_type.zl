@@ -1,0 +1,19 @@
+// error: cannot infer the type of lambda parameter u
+// status: passing
+// test: a lambda with no expected type (an expr<F> parameter whose F is not known yet) cannot become a tree
+namespace spec.expr.err_no_expected_type
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+func Columns<T>(p expr<func(*T) bool>) int { return 0 }
+
+func main() {
+    println(Columns(u => u.Age > 1))
+}

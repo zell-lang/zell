@@ -1,0 +1,18 @@
+// error: call of spec.expr.err_other_call.older is not allowed in an expression tree
+// status: passing
+// test: a call outside the whitelist
+namespace spec.expr.err_other_call
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+func main() {
+    var p expr<func(*User) bool> = u => older(u)
+    println(p)
+}

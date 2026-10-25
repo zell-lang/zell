@@ -1,0 +1,18 @@
+// error: operator & is not allowed in an expression tree
+// status: passing
+// test: an operator outside the node set
+namespace spec.expr.err_bit_op
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+func main() {
+    var p expr<func(*User) bool> = u => u.Age & 1 == 0
+    println(p)
+}

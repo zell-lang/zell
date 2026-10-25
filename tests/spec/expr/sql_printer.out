@@ -1,0 +1,22 @@
+((age >= ?) AND active)
+  args: [18]
+((user_id = ?) OR (name <> ?))
+  args: [7 root]
+(NOT active AND ((score * ?) > ?))
+  args: [2 3.5]
+((((age + ?) - ?) < ?) AND ((age % ?) = ?))
+  args: [1 2 15 2 0]
+(-age < ?)
+  args: [0]
+(name LIKE ? || '%' AND name LIKE '%' || ?)
+  args: [A x]
+(instr(lower(name), ?) > 0 OR (upper(name) = ?))
+  args: [an ANN]
+((length(name) > ?) AND (length(tags) = ?))
+  args: [3 0]
+name IN (?)
+  args: [[ann bob]]
+(manager IS NULL OR (manager IS NOT NULL AND (manager_age > ?)))
+  args: [18]
+((address_city = ?) AND (address_zip_code <> ?))
+  args: [Paris ]

@@ -1,0 +1,18 @@
+// error: an expression tree must be a single expression: a block body is not allowed
+// status: passing
+// test: a block body cannot become an expression tree
+namespace spec.expr.err_block_body
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+func main() {
+    var p expr<func(*User) bool> = u => { return u.Age > 1 }
+    println(p)
+}

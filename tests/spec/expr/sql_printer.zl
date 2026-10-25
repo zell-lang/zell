@@ -1,0 +1,140 @@
+// test: a library-style translator turns expression trees into SQL with ? placeholders and an argument list (every node kind, nested fields, columns from attributes)
+// status: passing
+namespace spec.expr.sql_printer
+
+import io
+import expr
+
+@attribute(targets: [reflect.Target.Field])
+struct column {
+    name string
+}
+
+struct Address {
+    City string
+    @column(name: "zip_code") Zip string
+}
+
+@allowCycle
+struct User {
+    @column(name: "user_id") Id int
+    Name string
+    Age int
+    Score float
+    Active bool
+    Address Address
+    Manager *User
+    Tags []string
+}
+
+struct Query {
+    Where string
+    Args []any
+}
+
+// The column of a field node: `@column(name:)` or the lower-case field
+// name; nested structs give `address_city`.
+func column_of(n *expr.Node) string {
+    var f = expr.FieldOf(n)
+    var c = f.Attribute<column>()
+    var name = strings.ToLower(f.Name)
+    if c != nil {
+        name = c.name
+    }
+    switch *n {
+    case expr.Node.Field(b, _, _, _, _):
+        switch *b {
+        case expr.Node.Field(_, _, _, _, _): return column_of(b) + "_" + name
+        }
+    }
+    return name
+}
+
+func sqlOp(op expr.Op) string {
+    switch op {
+    case expr.Op.And: return "AND"
+    case expr.Op.Or: return "OR"
+    case expr.Op.Eq: return "="
+    case expr.Op.Ne: return "<>"
+    case expr.Op.Not: return "NOT "
+    }
+    return op.Symbol()
+}
+
+func tr(n *expr.Node, q *Query) string {
+    switch *n {
+    case expr.Node.Param(i, _):
+        return "t" + fmt.Format("{0}", i)
+    case expr.Node.Field(_, _, _, _, _):
+        return column_of(n)
+    case expr.Node.Const(v, _):
+        q.Args = append(q.Args, v)
+        return "?"
+    case expr.Node.Captured(_, _, v, _):
+        q.Args = append(q.Args, v)
+        return "?"
+    case expr.Node.Binary(op, l, r, _):
+        return "(" + tr(l, q) + " " + sqlOp(op) + " " + tr(r, q) + ")"
+    case expr.Node.Unary(op, x, _):
+        return sqlOp(op) + tr(x, q)
+    case expr.Node.Call(f, args, _):
+        switch f {
+        case "strings.HasPrefix": return tr(args[0], q) + " LIKE " + tr(args[1], q) + " || '%'"
+        case "strings.HasSuffix": return tr(args[0], q) + " LIKE '%' || " + tr(args[1], q)
+        case "strings.Contains": return "instr(" + tr(args[0], q) + ", " + tr(args[1], q) + ") > 0"
+        case "strings.ToLower": return "lower(" + tr(args[0], q) + ")"
+        case "strings.ToUpper": return "upper(" + tr(args[0], q) + ")"
+        case "len": return "length(" + tr(args[0], q) + ")"
+        case "slices.Contains":
+            var x = tr(args[1], q)
+            return x + " IN (" + tr(args[0], q) + ")"
+        }
+        return "?" + f
+    case expr.Node.IsNil(x, negated):
+        if negated {
+            return tr(x, q) + " IS NOT NULL"
+        }
+        return tr(x, q) + " IS NULL"
+    case expr.Node.Tuple(elems, _):
+        var parts []string = []
+        for e in elems {
+            parts = append(parts, tr(e, q))
+        }
+        return strings.Join(parts, ", ")
+    case expr.Node.Struct(_, fields):
+        var parts []string = []
+        for f in fields {
+            parts = append(parts, tr(f.Value, q) + " AS " + strings.ToLower(f.Name))
+        }
+        return strings.Join(parts, ", ")
+    }
+    return "?"
+}
+
+func Where(p expr<func(*User) bool>) Query {
+    var q = Query{Where: "", Args: []}
+    q.Where = tr(p.Root(), &q)
+    return q
+}
+
+func show(p expr<func(*User) bool>) {
+    var q = Where(p)
+    println(q.Where)
+    println("  args:", q.Args)
+}
+
+func main() {
+    var minAge = 18
+    var names = ["ann", "bob"]
+    show(u => u.Age >= minAge && u.Active)
+    show(u => u.Id == 7 || u.Name != "root")
+    show(u => !u.Active && u.Score * 2.0 > 3.5)
+    show(u => u.Age + 1 - 2 < 10 * 3 / 2 && u.Age % 2 == 0)
+    show(u => -u.Age < 0)
+    show(u => strings.HasPrefix(u.Name, "A") && strings.HasSuffix(u.Name, "x"))
+    show(u => strings.Contains(strings.ToLower(u.Name), "an") || strings.ToUpper(u.Name) == "ANN")
+    show(u => len(u.Name) > 3 && len(u.Tags) == 0)
+    show(u => slices.Contains(names, u.Name))
+    show(u => u.Manager == nil || u.Manager != nil && u.Manager.Age > minAge)
+    show(u => u.Address.City == "Paris" && u.Address.Zip != "")
+}

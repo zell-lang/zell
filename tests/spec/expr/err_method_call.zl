@@ -1,0 +1,23 @@
+// error: method call Person.IsAdult is not allowed in an expression tree
+// status: passing
+// test: a method call inside an expression tree
+namespace spec.expr.err_method_call
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+struct Person {
+    Age int
+    func IsAdult() bool { return this.Age >= 18 }
+}
+
+func main() {
+    var p expr<func(*Person) bool> = x => x.IsAdult()
+    println(p)
+}

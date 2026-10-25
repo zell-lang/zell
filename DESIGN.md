@@ -282,6 +282,8 @@ var (x, y) = Swap(1, 2)
   (`ctx.Transaction(async () => { ...; await ctx.SaveChanges()? })` —
   `void!`). Без ожидаемого типа — ошибка `cannot infer the type of lambda
   parameter u`.
+- Лямбда на месте `expr<F>` становится деревом выражения, а не замыканием
+  (раздел «Деревья выражений»).
 - Функции — значения первого класса, тип `func(int) int`.
 - **Переменное число аргументов**, как в Go: последний параметр
   `args ...T` — это `[]T`. Вызов передаёт в него оставшиеся аргументы
@@ -2022,6 +2024,96 @@ var span = task.Get(CurrentSpan)              // *SpanInfo или nil, в люб
 - Используется `zell.diag` (текущий span), `zell.log` (`Enrich.FromContext`),
   `http.Client` и `sql` (автоматический `traceparent`).
 
+## Деревья выражений
+
+Лямбда, переданная туда, где ожидается **`expr<F>`** (`F` — функциональный
+тип), становится не замыканием, а значением-деревом (аналог
+`Expression<Func<>>` в C#): библиотека читает тело лямбды как данные и
+переводит его, например, в SQL, без хуков в компиляторе.
+
+```zell
+func Where(p expr<func(*User) bool>) Query { ... }
+
+var minAge = 18
+var q = Where(u => u.Age >= minAge && strings.HasPrefix(u.Name, "A"))
+var p expr<func(*User) bool> = u => u.Address.City == "Paris"
+var keep = p.Compile()                  // func(*User) bool, обычная функция
+```
+
+- **Тип.** `expr<F>` — встроенная форма типа (импорт не нужен, грамматика
+  та же: `path typeargs`); это структура `expr.Expr<F>` пакета `expr`.
+  `F` обязан быть функциональным типом (`expr<int>` — ошибка «the type
+  argument of expr must be a function type»). Лямбда становится деревом
+  везде, где известен ожидаемый тип: аргумент, типизированная переменная,
+  поле, `return`. Сначала она проверяется как обычная лямбда типа `F`
+  (типы параметров выводятся так же, в том числе у `u => ...`; в вызове
+  generic-функции `Where<T>(p expr<func(*T) bool>)` — после вывода `T` из
+  других аргументов или явных `Where<User>(...)`). Без ожидаемого типа —
+  обычная ошибка `cannot infer the type of lambda parameter u`. Деревом
+  становится только литерал лямбды: значение типа `F` на месте `expr<F>` —
+  ошибка «only a lambda literal becomes an expression tree».
+- **Узлы.** Параметр; доступ к полю, в том числе вложенный
+  (`u.Address.City`, сквозь указатели); константа; захваченное значение;
+  `== != < <= > >=`, `+ - * / %` (и `+` строк), `&& || !`, унарный `-`;
+  `x == nil` / `x != nil`; вызовы из белого списка (одна таблица в
+  компиляторе, `sema/exprtree.rs` `TREE_CALLS`): `strings.HasPrefix`,
+  `HasSuffix`, `Contains`, `ToLower`, `ToUpper`, `len`, `slices.Contains`;
+  кортеж `(a, b)` и литерал структуры `T{A: x}` — результаты проекций
+  (`expr<func(*User) (int, string)>`, `expr<func(*User) UserDto>`).
+- **Запрещено** (ошибка компиляции на месте подвыражения): блочное тело
+  (`u => { ... }`, а значит и присваивания), `await` и `async`-лямбда,
+  вложенная лямбда, `?` и `try`, вызовы вне списка (`call of app.f is not
+  allowed in an expression tree (allowed: ...)`), вызовы методов (`method
+  call User.IsAdult ...`), вызовы значений-функций, побитовые операторы и
+  сдвиги, преобразования типов, индексация, литералы срезов и map, `&`.
+- **Захват — значениями, при построении дерева** (как в C#). Каждое
+  максимальное подвыражение без параметров лямбды — *слот*: литерал
+  остаётся константой, всё остальное (переменная, путь полей `req.MinAge`,
+  глобальная переменная, разрешённый вызов от них) вычисляется один раз,
+  когда вычисляется сама лямбда, и хранится в дереве как значение. Поэтому
+  `for n in names { ps = append(ps, u => u.Name == n) }` даёт каждому
+  дереву своё `n`, а присваивание переменной после построения не меняет ни
+  дерево, ни `Compile()`. Повторное упоминание того же значения
+  (`u.Age > n && len(u.Name) > n`) использует один слот. Переменные
+  создающей функции при этом не переезжают в ячейки.
+- **`Compile()`** возвращает лямбду как обычную функцию `F` бесплатно:
+  дерево несёт и замыкание (оно читает те же слоты).
+- **Комбинаторы** (`expr`): `And(a, b)`, `Or(a, b)`, `AndAll(ps)`,
+  `OrAll(ps)` (срез; generic-функции не бывают вариативными), `Not(p)` —
+  над предикатами `expr<func(T) bool>` одного `T`; результат —
+  `expr<func(T) bool>` с узлом `Binary`/`Unary` над корнями частей, его
+  `Compile()` вычисляет части с сокращённым вычислением. Пустой `AndAll` —
+  константа `true`, пустой `OrAll` — `false`.
+- **Представление и стоимость.** Структура узлов каждого места лямбды —
+  константа `expr.Site` (неуничтожимый объект в секции только для чтения:
+  узлы в префиксном порядке, их строки, число параметров). Значение
+  `expr<F>` — `{site, (замыкание F, значения слотов, типы узлов)}`: три
+  замыкания над *одним* окружением, кортежем захваченных значений в одном
+  heap-боксе (`hir::Function::value_env`, `ExprKind::EnvClosures`).
+  Построение дерева без захватов не выделяет память, с захватами — один
+  бокс. Узлы декодируются только по `Root()` (каждый вызов — новое
+  дерево); константы и значения слотов упаковываются в `any` в этот же
+  момент.
+- **Пакет `expr`.** `p.Root() *expr.Node`, `p.Params() []*reflect.TypeInfo`,
+  `p.ParamNames()`, `p.Compile()`, `p.String()` (`u => u.Age > 18`;
+  `println(p)` печатает так же). `expr.Node` — enum с данными:
+  `Param(index, t)`, `Field(base, name, index, t, owner)`,
+  `Const(value any, t)`, `Captured(index, name, value any, t)`,
+  `Binary(op, left, right, t)`, `Unary(op, operand, t)`,
+  `Call(fn, args, t)` (`fn` — полное имя из списка), `IsNil(operand,
+  negated)`, `Tuple(elems, t)`, `Struct(t, fields []FieldInit)`; `t` —
+  `*reflect.TypeInfo` статического типа узла, `owner` — структура поля.
+  `expr.Op`: `Add Sub Mul Div Rem Eq Ne Lt Le Gt Ge And Or Not Neg`
+  (`op.Symbol()`). Функции: `TypeOf(n)`, `FieldOf(n) *reflect.FieldInfo`
+  (дескриптор поля: имя, индекс, тип, атрибуты — так библиотека находит
+  колонку через `f.Attribute<column>()` или по `f.Index` в
+  `reflect.Fields<T>()`), `Children(n)`, `Walk(n, f)` (сначала родитель;
+  `false` из `f` пропускает детей), `Values(n) []any` (константы и
+  захваченные значения в порядке обхода), `Format(n, names)`.
+- **Только параметры.** Константы и захваченные значения остаются
+  значениями (`any`) и никогда не превращаются в текст: переводчик
+  передаёт их как параметры запроса (`?`/`$1`), а не подставляет в SQL.
+
 ## Память
 
 Трассирующего сборщика мусора нет и не планируется. Модель — подсчёт
@@ -3137,7 +3229,8 @@ params      = param { "," param } ;
 param       = ident { "," ident } type | ident "..." type ;   (* variadic: last parameter, a []T *)
 type        = path [ typeargs ] [ "!" ] | "*" type | "weak" "*" type | "[" [ constexpr ] "]" type
             | "map" "[" type "]" type | "func" "(" [ types ] ")" [ type ]
-            | "(" types ")" ;           (* path may start at a compile-time descriptor: t, p.Type, f.Type, m.Result, m.Args *)
+            | "(" types ")" ;           (* path may start at a compile-time descriptor: t, p.Type, f.Type, m.Result, m.Args;
+                                           expr<F> (an expression tree) is a path with typeargs *)
 block       = "{" { stmt } "}" ;
 stmt        = var | const | if | for | switch | trystmt | "return" [ exprs ]
             | "break" [ ident ] | "continue" [ ident ] | "defer" expr | exprs [ assignop exprs ]

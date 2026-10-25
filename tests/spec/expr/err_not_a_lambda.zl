@@ -1,0 +1,19 @@
+// error: cannot use func(*User) bool as expr<func(*User) bool>: only a lambda literal becomes an expression tree
+// status: passing
+// test: only a lambda literal becomes an expression tree, not a function value
+namespace spec.expr.err_not_a_lambda
+
+import io
+
+struct User {
+    Name string
+    Age int
+}
+
+func older(u *User) bool { return u.Age > 40 }
+
+func main() {
+    var f func(*User) bool = older
+    var p expr<func(*User) bool> = f
+    println(p)
+}

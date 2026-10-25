@@ -1,0 +1,41 @@
+// test: expr.And / Or / AndAll / OrAll / Not combine trees of the same function type; the result is a tree (Root, String) and its Compile() evaluates the parts
+// status: passing
+namespace spec.expr.combinators
+
+import io
+import expr
+
+struct User {
+    Name string
+    Age int
+}
+
+func main() {
+    var adult expr<func(*User) bool> = u => u.Age >= 18
+    var short expr<func(*User) bool> = u => len(u.Name) <= 3
+    var names = ["ann", "bob"]
+    var ps []expr<func(*User) bool> = []
+    for n in names {
+        ps = append(ps, u => u.Name == n)
+    }
+    var any = expr.OrAll(ps)
+    var both = expr.AndAll([adult, short, any])
+    var not = expr.Not(adult)
+    var empty = expr.AndAll<*User>([])
+    var none = expr.OrAll<*User>([])
+    var pair = expr.And(adult, expr.Not(short))
+    var users = [User{Name: "ann", Age: 30}, User{Name: "bob", Age: 12}, User{Name: "carol", Age: 40}, User{Name: "dan", Age: 50}]
+    for p in [any, both, not, empty, none, pair, expr.Not(expr.Or(adult, short))] {
+        var f = p.Compile()
+        var hits []string = []
+        for u in users {
+            var x = u
+            if f(&x) {
+                hits = append(hits, u.Name)
+            }
+        }
+        println(p, "->", hits)
+    }
+    println(expr.Values(both.Root()))
+    println(len(both.Params()), both.Params()[0].Name, both.ParamNames())
+}

@@ -1,0 +1,55 @@
+// test: captured values are evaluated when the tree is built: each tree built in a loop keeps its own value, later assignments change neither the tree nor its Compile()
+// status: passing
+namespace spec.expr.captures_loop
+
+import io
+import expr
+
+struct User {
+    Name string
+    Age int
+}
+
+struct Filter {
+    MinAge int
+    Names []string
+}
+
+func capturedValues(p expr<func(*User) bool>) []any {
+    var out []any = []
+    expr.Walk(p.Root(), (n) => {
+        switch *n {
+        case expr.Node.Captured(i, name, v, _):
+            out = append(out, fmt.Format("{0}={1}", name, v))
+        }
+        return true
+    })
+    return out
+}
+
+func main() {
+    var ps []expr<func(*User) bool> = []
+    for n in ["ann", "bob", "cid"] {
+        ps = append(ps, u => u.Name == n)
+    }
+    var limit = 30
+    var old expr<func(*User) bool> = u => u.Age < limit
+    limit = 10
+    var req = Filter{MinAge: 21, Names: []}
+    var adult expr<func(*User) bool> = u => u.Age >= req.MinAge
+    req.MinAge = 99
+    var bob = User{Name: "bob", Age: 25}
+    for p in ps {
+        println(p, capturedValues(p), p.Compile()(&bob))
+    }
+    println(old, capturedValues(old), old.Compile()(&bob))
+    println(adult, capturedValues(adult), adult.Compile()(&bob))
+    // A tree inside a closure captures the closure's upvalue.
+    var prefix = "b"
+    var mk func() expr<func(*User) bool> = () => {
+        var t expr<func(*User) bool> = u => strings.HasPrefix(u.Name, prefix)
+        return t
+    }
+    var t = mk()
+    println(t, capturedValues(t), t.Compile()(&bob))
+}

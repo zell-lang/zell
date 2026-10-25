@@ -1,0 +1,23 @@
+Tuple 2 (int, string)
+  Field Id 0 int of User
+    Param 0 *User
+  Field Name 1 string of User
+    Param 0 *User
+u => (u.Id, u.Name)
+Struct UserDto [0:Key 1:Label]
+  Binary * int
+    Field Id 0 int of User
+      Param 0 *User
+    Const 10 int
+  Binary + string
+    Field Name 1 string of User
+      Param 0 *User
+    Captured 1 suffix ! string
+u => UserDto{Key: u.Id * 10, Label: u.Name + suffix}
+Binary > bool
+  Field Age 2 int of User
+    Param 0 *User
+  Field Age 2 int of User
+    Param 1 *User
+(a, b) => a.Age > b.Age 2
+(4 ann) ann! true

@@ -1,0 +1,6 @@
+u => u.Name == n [n=ann] false
+u => u.Name == n [n=bob] true
+u => u.Name == n [n=cid] false
+u => u.Age < limit [limit=30] true
+u => u.Age >= req.MinAge [req.MinAge=21] true
+u => strings.HasPrefix(u.Name, prefix) [prefix=b] true

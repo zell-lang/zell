@@ -1,0 +1,6 @@
+[order_id total_cents note]
+[total_cents]
+Id 0 int true
+Total 1 int false
+Note 2 string false
+*Order Order
