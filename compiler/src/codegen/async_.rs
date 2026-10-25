@@ -948,7 +948,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         if let ExprKind::Call { callee: Callee::Func(fid), args } = &t.kind {
             if self.prog.funcs[fid.0 as usize].is_async {
-                return self.await_direct_call(ty, *fid, args);
+                let mut v = self.await_direct_call(ty, *fid, args)?;
+                v.v = v.v.map(|r| self.trace_std_call(*fid, ty, r, t.span.start));
+                return Ok(v);
             }
         }
         let tv = self.expr(t)?;

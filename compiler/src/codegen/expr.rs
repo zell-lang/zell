@@ -716,6 +716,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
                 let r = self.call_fn(fv, &ma).try_as_basic_value().left();
                 self.release_temps_from(d);
+                let r = r.map(|v| self.trace_std_call(*fid, e.ty, v, e.span.start));
                 Ok(Val { v: r, owned: true })
             }
             Callee::Extern(x) => self.extern_call(*x, args, e.span.start),

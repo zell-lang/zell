@@ -1,0 +1,5 @@
+strconv.Atoi: parsing "x": invalid syntax
+  created at   tests/spec/errors/trace_std_call_site.zl:11  number
+  returned via tests/spec/errors/trace_std_call_site.zl:11  number
+  returned via tests/spec/errors/trace_std_call_site.zl:21  main
+3 doc

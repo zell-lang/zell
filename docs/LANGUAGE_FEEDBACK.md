@@ -237,7 +237,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     of 1000 `a.New` objects crash under `--leak-check` only. Likely
     allocations beyond the first 64 KB chunk are not recognised as arena
     records. Workaround in `scene-graph`: one `a.Alloc<T>(1000)` per frame.
-45. ❌ **Error frames created in standard library functions carry the
+45. ✅ **Fixed (2026-10-25):** cause: std functions written in Zell are instantiated in the scope of the user file, so their sites took that file with the std line. Frames inside the standard library are no longer recorded (as panic backtraces have no lines for std code) and the direct call (or `await`) of a fallible std function is the creation site, as for runtime externs (DESIGN.md «Ошибки», `errors/trace_std_call_site`). **Error frames created in standard library functions carry the
     caller's file name**: `strconv.Atoi` failing in `g.zl` gives frames
     `g.zl:17 strconv.fail`, `g.zl:17 strconv.Atoi` (line 17 of the std
     file, in a 16-line `g.zl`). Workaround in `errors-deep-dive`: convert

@@ -1,0 +1,31 @@
+// test: an error made inside a std function written in Zell has the call of that function as its creation site; frames inside the standard library are not recorded (DESIGN.md «Ошибки»)
+// status: passing
+namespace spec.errors.trace_std_call_site
+
+import io
+import errors
+import strconv
+import encoding.json
+
+func number(s string) int! {
+    var n = strconv.Atoi(s)?
+    return n
+}
+
+func doc(s string) json.Value! {
+    return json.Parse<json.Value>(s)?
+}
+
+func main() {
+    try {
+        number("x")?
+    } catch err {
+        println(err.Message())
+        println(errors.Trace(err))
+    }
+    try {
+        doc("{bad")?
+    } catch err {
+        println(len(errors.Frames(err)), errors.Frames(err)[0].Func)
+    }
+}

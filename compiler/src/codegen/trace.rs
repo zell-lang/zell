@@ -35,6 +35,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             return None;
         }
         let f = self.f.as_ref()?.hir?;
+        // Frames inside the standard library are not recorded (like panic
+        // backtraces, which have no lines for std code): the call of the
+        // std function is the creation site (`trace_std_call`).
+        if crate::sema::stdlib::is_std_namespace(&f.full_name) {
+            return None;
+        }
         let src = self.prog.sources.get(f.file);
         let file = src.map(|s| s.path.clone()).unwrap_or_else(|| "?".into());
         let line = src.map(|s| s.line_of(offset)).unwrap_or(0);
@@ -66,6 +72,26 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             Some(site) => self.when_error(err, |cg| cg.call_rt_v("zell_error_created", &[err.into(), site.into()])),
             None => err,
         }
+    }
+
+    /// The result `r` of a direct call of `callee` at `offset`: a call of a
+    /// fallible std function written in Zell is a creation site (DESIGN.md
+    /// «Ошибки»), as a runtime extern's is; a site the error already has
+    /// (a user error passed through std code) is kept.
+    /// `ty` is the call's (or the awaited call's) result type.
+    pub(crate) fn trace_std_call(&mut self, callee: crate::hir::FuncId, ty: crate::types::TypeId, r: BasicValueEnum<'ctx>, offset: u32) -> BasicValueEnum<'ctx> {
+        let f = &self.prog.funcs[callee.0 as usize];
+        let Type::Fallible(inner) = *self.ty(ty) else { return r };
+        if !crate::sema::stdlib::is_std_namespace(&f.full_name) || self.error_site(offset).is_none() {
+            return r;
+        }
+        if *self.ty(inner) == Type::Void {
+            return self.trace_created(r, offset);
+        }
+        let s = r.into_struct_value();
+        let err = self.b.build_extract_value(s, 1, "err").unwrap();
+        let err = self.trace_created(err, offset);
+        self.b.build_insert_value(s, err, 1, "").unwrap().into_struct_value().into()
     }
 
     /// `f(err)` when `err` is not NULL, else NULL: the trace calls run only
@@ -116,7 +142,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         if self.opts.no_error_trace || self.f.as_ref().and_then(|f| f.hir).is_none() {
             return err;
         }
+        let in_std = self.f.as_ref().and_then(|f| f.hir).is_some_and(|f| crate::sema::stdlib::is_std_namespace(&f.full_name));
         let site = match offset {
+            // std code records no frame but still settles a pending trace
+            Some(_) if in_std => self.ptr_ty().const_null(),
             Some(o) => match self.error_site(o) {
                 Some(s) => s,
                 None => return err,
