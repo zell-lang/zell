@@ -435,7 +435,11 @@ impl<'a> Sema<'a> {
     pub(crate) fn lookup_global(&mut self, name: &ast::Ident, report: bool) -> Option<PathRes> {
         let n = name.name.as_str();
         if let Some(&(m, _, _)) = self.nss[self.cur_ns].members.get(n) {
-            return Some(PathRes::Member(self.unalias(m)));
+            let m = self.unalias(m);
+            if let Member::Ns(ns) = m {
+                self.mark_ns_import_used(ns);
+            }
+            return Some(PathRes::Member(m));
         }
         // Stdlib code is instantiated in the scope of the user file that
         // uses it, but a stdlib root it names (`hash.fnv`) is never hidden
@@ -511,6 +515,7 @@ impl<'a> Sema<'a> {
                 }
                 return None;
             }
+            self.mark_ns_import_used(r);
             return Some(PathRes::Member(Member::Ns(r)));
         }
         if let Some(s) = self.builtin_attr_type(n) {
@@ -521,6 +526,19 @@ impl<'a> Sema<'a> {
             self.err(format!("{n} is private to namespace {path} (only capitalised names are exported)"), name.span);
         }
         None
+    }
+
+    /// A namespace reached by name (`geo.Hello()` after `import geo`)
+    /// uses the file's glob import of that namespace, if any.
+    fn mark_ns_import_used(&mut self, ns: NsIdx) {
+        let fs = &mut self.file_scopes[self.cur_file];
+        for (i, e) in fs.imports.iter().enumerate() {
+            if matches!(e, ImportEntry::Glob(g) if *g == ns) {
+                if let Some(u) = fs.import_uses.get_mut(i) {
+                    u.1 = true;
+                }
+            }
+        }
     }
 
     /// `json.Value` in a file with `import encoding.json`: a builtin

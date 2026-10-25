@@ -1,0 +1,10 @@
+// test: an import used only through qualified names (geo.Hello()) counts as used
+// status: passing
+namespace spec.namespaces.qualified_use_of_import
+
+import io
+import spec.namespaces.qualified_use_of_import.geo
+
+func main() {
+    println(geo.Hello())
+}

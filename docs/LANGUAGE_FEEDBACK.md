@@ -250,7 +250,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     `mapper` is outside package `geo`"; `-p name` is not accepted
     (`--workspace` neither). Workaround: `zell test <member dir>` for each
     member; `doc_examples.rs` does that for a root with `[workspace]`.
-48. ❌ **`import geo` followed only by qualified uses (`geo.Hello()`) is an
+48. ✅ **Fixed (2026-10-25):** cause: a qualified head (`geo`) resolved through the own namespace or the roots and never marked the glob import of that namespace as used; `lookup_global` now does. **`import geo` followed only by qualified uses (`geo.Hello()`) is an
     "unused import" error.** Workaround: drop the import (a direct
     dependency is reachable by its full name) or use the names unqualified.
 49. ❌ **`import os.signal` does not make `signal.X` available**; the
