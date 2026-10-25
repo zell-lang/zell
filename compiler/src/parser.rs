@@ -50,7 +50,7 @@
 //! so the caller backtracks.
 
 use crate::ast::*;
-use crate::diagnostics::Diagnostics;
+use crate::diagnostics::{Diagnostic, Diagnostics, Fix};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -1070,6 +1070,9 @@ impl Parser<'_> {
     fn simple_stmt(&mut self) -> PResult<StmtKind> {
         let targets = self.expr_list()?;
         let target = tuple_of(targets);
+        if self.at_incdec() {
+            return Ok(self.incdec(target));
+        }
         let Some(op) = assign_op(self.peek()) else {
             if let ExprKind::Tuple(_) = target.kind {
                 return Err(self.unexpected("`=`"));
@@ -1082,6 +1085,38 @@ impl Parser<'_> {
         self.bump();
         let value = tuple_of(self.expr_list()?);
         Ok(StmtKind::Assign { target, op, value })
+    }
+
+    /// At `++` / `--` (two adjacent `+` or `-`) that ends the statement.
+    fn at_incdec(&self) -> bool {
+        let (a, b) = (&self.tokens[self.pos], self.tokens.get(self.pos + 1));
+        matches!(a.kind, TokenKind::Plus | TokenKind::Minus)
+            && b.is_some_and(|b| b.kind == a.kind && b.span.start == a.span.end)
+            && matches!(self.peek_n(2), TokenKind::Semi | TokenKind::RBrace | TokenKind::Eof)
+    }
+
+    /// `i++` / `i--`: Zell has no such operator (DESIGN.md «Операторы»).
+    /// Reported with a fix to `i += 1`, and parsed as that assignment so
+    /// nothing else is reported.
+    fn incdec(&mut self, target: Expr) -> StmtKind {
+        let first = self.bump();
+        let second = self.bump();
+        let (op, sym, word) = match first.kind {
+            TokenKind::Plus => (AssignOp::Add, "++", "+="),
+            _ => (AssignOp::Sub, "--", "-="),
+        };
+        let span = first.span.to(second.span);
+        let name = path_text(&target).unwrap_or_else(|| "x".into());
+        if !self.silent {
+            let msg = format!("Zell has no {sym}; write {name} {word} 1");
+            let mut d = Diagnostic::error(msg, span).with_code(crate::diagnostics::codes::SYNTAX);
+            d.fixes.push(Fix::edit(format!("Replace with `{word} 1`"), span, format!(" {word} 1")));
+            self.diags.push(d);
+            self.error_count += 1;
+            self.last_error_at = Some(span.start);
+        }
+        let value = Expr { kind: ExprKind::Int(1), span };
+        StmtKind::Assign { target, op, value }
     }
 
     fn expr_list(&mut self) -> PResult<Vec<Expr>> {
@@ -1280,7 +1315,7 @@ impl Parser<'_> {
         let mut left = self.unary()?;
         while let Some(op) = binary_op(self.peek()) {
             let prec = op.precedence();
-            if prec < min_prec {
+            if prec < min_prec || self.at_incdec() {
                 break;
             }
             self.bump();
@@ -1851,6 +1886,16 @@ fn binary_op(kind: &TokenKind) -> Option<BinaryOp> {
         TokenKind::OrOr => Or,
         _ => return None,
     })
+}
+
+/// `a.b.c` of a dotted name (`this.n`), for messages.
+fn path_text(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(id) => Some(id.name.clone()),
+        ExprKind::This => Some("this".into()),
+        ExprKind::Field { base, name } => Some(format!("{}.{}", path_text(base)?, name.name)),
+        _ => None,
+    }
 }
 
 fn assign_op(kind: &TokenKind) -> Option<AssignOp> {

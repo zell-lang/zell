@@ -226,7 +226,13 @@ impl Lexer<'_, '_> {
             let keyword_name = n >= 2
                 && self.tokens[n - 2].kind == TokenKind::Dot
                 && TokenKind::keyword(last.kind.text()).is_some();
-            if last.kind.ends_statement() || keyword_name {
+            // `i++` / `i--` at the end of a line (no such operator: the
+            // parser reports it, and the next line stays a new statement).
+            let incdec = n >= 2
+                && matches!(last.kind, TokenKind::Plus | TokenKind::Minus)
+                && self.tokens[n - 2].kind == last.kind
+                && self.tokens[n - 2].span.end == last.span.start;
+            if last.kind.ends_statement() || keyword_name || incdec {
                 let end = last.span.end;
                 // Zero-width: no trivia of its own.
                 self.leading.push(self.pending_from..self.pending_from);

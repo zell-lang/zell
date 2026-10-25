@@ -1426,3 +1426,18 @@ fn trailing_dot_joins_the_next_line_and_recovers() {
     let stmts = &f.body.as_ref().unwrap().stmts;
     assert!(stmts.iter().any(|s| matches!(&s.kind, StmtKind::Expr(Expr { kind: ExprKind::Field { base, name }, .. }) if name.name.is_empty() && matches!(&base.kind, ExprKind::Ident(i) if i.name == "c"))), "{stmts:#?}");
 }
+
+#[test]
+fn increment_operator_is_reported_with_a_fix_and_recovers() {
+    let src = "namespace t\nfunc f() {\n    var i = 0\n    i++\n    var j = i\n    this.n--\n}\n";
+    let d = parse_err(src);
+    let msgs: Vec<&str> = d.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(msgs, ["Zell has no ++; write i += 1", "Zell has no --; write this.n -= 1"], "{d:#?}");
+    let e = &d[0].fixes[0].edits[0];
+    let fixed = format!("{}{}{}", &src[..e.span.start as usize], e.new_text, &src[e.span.end as usize..]);
+    assert!(fixed.contains("    i += 1\n"), "{fixed}");
+    // `a - -b` and `x--y` keep their meaning
+    let (file, diags) = zell::parser::parse_source("namespace t\nfunc f() {\n    var a = 1 - -2\n    var b = a--1\n}\n");
+    assert!(!diags.has_errors(), "{:?}", diags.items);
+    assert!(!file.decls.is_empty());
+}

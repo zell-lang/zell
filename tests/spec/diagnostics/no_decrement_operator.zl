@@ -1,0 +1,15 @@
+// error: Zell has no --; write c.n -= 1
+// status: passing
+// no-stderr: expected expression
+namespace spec.diagnostics.no_decrement_operator
+
+import io
+
+struct C { n int }
+
+func main() {
+    var c = C{n: 3}
+    for c.n > 0 { c.n-- }
+    var x = c.n - -1
+    println(x)
+}

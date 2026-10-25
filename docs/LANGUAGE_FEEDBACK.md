@@ -545,7 +545,7 @@ written by hand), **33** (see 67), **46** (see 78).
     the loop. A nested search returns from a helper (`firstSharedSku`)
     instead. **Decision:** Go labels, `name:` on the line before `for`, plus
     `break name` / `continue name`. This also answers the `case` question.
-75. ❌ **ergonomics:** **`i++` gives "expected expression, found `+`"**, then
+75. ✅ **Fixed (2026-10-25):** cause: `++` is two `+` tokens, and the line did not end after `+`, so the next line was parsed as the operand. Decision: no operator; adjacent `++`/`--` ending a statement now ends the line and is reported as `Zell has no ++; write i += 1` with a quick fix (`Diagnostic::fixes`, offered by the LSP), parsed as `i += 1` so nothing follows (DESIGN.md «Объявления переменных», `diagnostics/no_*crement_operator`, `tests/parser.rs`). **ergonomics:** **`i++` gives "expected expression, found `+`"**, then
     "expected expression, found `var`" on the next line. **Decision:**
     either add Go's `i++` / `i--` statements (not expressions), or report
     `Zell has no ++; write i += 1` and recover.

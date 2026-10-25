@@ -1,0 +1,14 @@
+// error: Zell has no ++; write i += 1
+// status: passing
+// no-stderr: expected expression
+// no-stderr: unknown identifier
+namespace spec.diagnostics.no_increment_operator
+
+import io
+
+func main() {
+    var i = 0
+    i++
+    var j = i
+    println(j)
+}
