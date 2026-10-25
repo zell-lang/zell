@@ -1,0 +1,62 @@
+// test: a slice literal converts to [N]T where that type is expected and the length matches: variable declarations, assignment, arguments, returns, struct fields and nested arrays; the array is a value (copied on assignment) and owns its string elements (--leak-check)
+// status: passing
+// run-flags: --leak-check
+namespace spec.basics.array_literal
+
+import io
+import strings
+
+struct Grid {
+    cells [2][3]int
+}
+
+func sum(a [3]int) int {
+    var s = 0
+    for x in a {
+        s += x
+    }
+    return s
+}
+
+func labels() [3]string {
+    return ["low", strings.ToUpper("mid"), "high"]
+}
+
+func part(ok bool) string! {
+    if !ok {
+        return error("no part")
+    }
+    return strings.ToUpper("v")
+}
+
+// An error in the third element releases the two strings built before it.
+func build(ok bool) [3]string! {
+    var a [3]string = [strings.ToUpper("a"), part(true)?, part(ok)?]
+    return a
+}
+
+func main() {
+    var a [3]string = ["a", "b", "c"]
+    println(a, len(a))
+    var b = a
+    b[0] = "z"
+    println(a, b)
+    a = ["x", "y", "w"]
+    println(a)
+    println(sum([1, 2, 3]))
+    println(labels())
+    var g = Grid{cells: [[1, 2, 3], [4, 5, 6]]}
+    println(g.cells, g.cells[1][2])
+    var e [0]int = []
+    println(e)
+    var ok = try build(true) catch err {
+        println(err)
+        return
+    }
+    println(ok)
+    var r = try build(false) catch err {
+        println(err)
+        return
+    }
+    println(r)
+}

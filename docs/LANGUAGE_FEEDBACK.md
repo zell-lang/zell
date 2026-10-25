@@ -506,7 +506,7 @@ written by hand), **33** (see 67), **46** (see 78).
     **Decision:** add Go's spread `f(xs...)` for variadic parameters, and
     have `task.All` of a `[]Task<T>` give `Task<[]T>` (`[]T!` when T is
     fallible, with the first error cancelling the rest).
-69. ❌ **ergonomics:** **fixed arrays have no literal**: `var a [3]string =
+69. ✅ **Fixed (2026-10-25):** as decided: a slice literal where `[N]T` is expected (declaration with a type, assignment, argument, `return`, field; nested arrays too) builds the array, and a length mismatch is `array literal has 2 elements, want 3`. `[...]T{…}` is not added: the grammar has no typed `[N]T{…}` literal to extend (DESIGN.md «Типы»). Spec: `basics/array_literal`, `diagnostics/array_literal_length`. **ergonomics:** **fixed arrays have no literal**: `var a [3]string =
     ["a", "b", "c"]` is "cannot assign []string to variable of type
     [3]string", and the Go form `[3]string{…}` does not parse. Workaround:
     one assignment per element (the `labels` array). **Decision:** a slice

@@ -1,0 +1,10 @@
+// error: array literal has 2 elements, want 3
+// status: passing
+namespace spec.diagnostics.array_literal_length
+
+import io
+
+func main() {
+    var a [3]string = ["a", "b"]
+    println(a)
+}

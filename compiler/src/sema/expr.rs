@@ -952,6 +952,18 @@ impl<'a> Sema<'a> {
                 let vs = elems.iter().map(|e| self.expr_to(e, el, Ctx::Elem)).collect();
                 return mk(ExprKind::SliceLit(vs), t, span);
             }
+            // `var a [3]string = ["a", "b", "c"]`: a fixed-array literal.
+            if let Type::Array(el, n) = *self.tt.get(t) {
+                if elems.len() as u64 != n {
+                    self.err(format!("array literal has {} elements, want {n}", elems.len()), span);
+                    for e in elems {
+                        self.expr_to(e, el, Ctx::Elem);
+                    }
+                    return self.invalid(span);
+                }
+                let vs = elems.iter().map(|e| self.expr_to(e, el, Ctx::Elem)).collect();
+                return mk(ExprKind::SliceLit(vs), t, span);
+            }
         }
         let Some(first) = elems.first() else {
             self.err("cannot infer the type of an empty slice literal; declare the variable with a type (var s []int = [])", span);

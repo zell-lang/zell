@@ -621,6 +621,21 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             return Ok(Val::borrowed(self.zero(ty)));
         }
         let et = self.elem_of(ty).unwrap();
+        if let Type::Array(..) = self.ty(ty) {
+            // A fixed-array literal: each owned element is held until the
+            // aggregate owns it (an early exit releases those built so far).
+            let mut agg = self.zero(ty).into_array_value();
+            let mut holds = Vec::with_capacity(elems.len());
+            for (i, x) in elems.iter().enumerate() {
+                let v = self.expr_owned(x)?;
+                holds.push(self.hold_raw(et, v));
+                agg = self.b.build_insert_value(agg, v, i as u32, "").unwrap().into_array_value();
+            }
+            for h in holds.into_iter().rev() {
+                self.unhold(h);
+            }
+            return Ok(Val::owned(agg.into()));
+        }
         let out = self.entry_alloca(self.slice_ty().into(), "lit", false);
         let size = self.i64_ty().const_int(self.size_of(et), false);
         let n = self.i64_ty().const_int(elems.len() as u64, false);
