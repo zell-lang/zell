@@ -1,0 +1,14 @@
+// test: an explicit import of a stdlib namespace used only by qualified names (task.Delay, strings.ToUpper) is not an unused import
+// status: passing
+namespace spec.namespaces.std_import_qualified_use
+
+import io
+import task
+import os
+import errors
+import strings
+
+async func main() {
+    await task.Delay(1)
+    println(strings.ToUpper("x"), errors.Is(error("a"), error("b")), len(os.Args()) > 0)
+}

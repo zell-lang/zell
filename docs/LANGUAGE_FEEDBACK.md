@@ -264,7 +264,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     helpers (`mustParse`, `parseError` in `testing-guide`); consider
     `testing.Ok(t, f())` returning the value and `testing.Fails(t, f())`
     returning the error.
-52. ❌ **Implicit namespaces report "unused import"**: `import task`, `import os`,
+52. ✅ **Fixed (2026-10-25):** same cause as 48 (stdlib namespaces are roots reachable without import, so `task.Delay` never touched `import task`); an import used by qualified names now counts, a truly unused one stays an error (DESIGN.md «Правила импорта»). **Implicit namespaces report "unused import"**: `import task`, `import os`,
     `import errors`, `import strings` are errors ("unused import") because those
     namespaces are implicit, while `println` is unknown without `import io`.
     Either accept (and ignore) an explicit import of an implicit namespace, or
