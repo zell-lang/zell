@@ -62,6 +62,8 @@ ZELL_HIDDEN void *zell__hp_alloc_big(int64_t size, int zero);
 ZELL_HIDDEN void zell__hp_free_big(void *p);
 ZELL_HIDDEN int64_t zell__hp_big_capacity(const void *p);
 ZELL_HIDDEN void *zell__hp_resize(void *p, int64_t size);
+/* Gives the calling thread's cached coroutine frames back (mem.c). */
+ZELL_HIDDEN void zell__frame_cache_flush(void);
 
 /* Size class of a small size (1 ..= ZELL__HP_SMALL_MAX): 16-byte steps to
  * 128, then four classes per power of two. */
@@ -88,11 +90,8 @@ static inline int zell__heap_is_small(const void *p) {
     return (int)((__atomic_load_n(&leaf[bit >> 6], __ATOMIC_RELAXED) >> (bit & 63)) & 1);
 }
 
-/* `size` bytes, zeroed when `zero`; NULL when the heap is off. */
-static inline void *zell__heap_alloc(int64_t size, int zero) {
-    if (__builtin_expect(!zell__heap_on, 0) && !zell__hp_start()) return NULL;
-    if (__builtin_expect(size > ZELL__HP_SMALL_MAX, 0)) return zell__hp_alloc_big(size, zero);
-    uint32_t c = zell__hp_cls(size);
+/* A block of size class c (not zeroed); the heap must be on. */
+static inline void *zell__heap_alloc_cls(uint32_t c) {
     hp_page *pg = zell__hp_tls->cur[c];
     hp_block *b = pg->free;
     if (__builtin_expect(b != NULL, 1)) {
@@ -101,16 +100,20 @@ static inline void *zell__heap_alloc(int64_t size, int zero) {
     } else {
         b = zell__hp_alloc_slow(c);
     }
+    return b;
+}
+
+/* `size` bytes, zeroed when `zero`; NULL when the heap is off. */
+static inline void *zell__heap_alloc(int64_t size, int zero) {
+    if (__builtin_expect(!zell__heap_on, 0) && !zell__hp_start()) return NULL;
+    if (__builtin_expect(size > ZELL__HP_SMALL_MAX, 0)) return zell__hp_alloc_big(size, zero);
+    void *b = zell__heap_alloc_cls(zell__hp_cls(size));
     if (zero) memset(b, 0, (size_t)size);
     return b;
 }
 
-/* Frees memory from zell__heap_alloc. */
-static inline void zell__heap_free(void *p) {
-    if (__builtin_expect(!zell__heap_is_small(p), 0)) {
-        zell__hp_free_big(p);
-        return;
-    }
+/* Frees a block of a small-object segment (zell__heap_is_small(p)). */
+static inline void zell__heap_free_small(void *p) {
     hp_page *pg = zell__hp_page_of(p);
     hp_block *b = p;
     hp_heap *h = zell__hp_tls;
@@ -123,6 +126,15 @@ static inline void zell__heap_free(void *p) {
         return;
     }
     zell__hp_free_remote(pg, b);
+}
+
+/* Frees memory from zell__heap_alloc. */
+static inline void zell__heap_free(void *p) {
+    if (__builtin_expect(!zell__heap_is_small(p), 0)) {
+        zell__hp_free_big(p);
+        return;
+    }
+    zell__heap_free_small(p);
 }
 
 /* Usable bytes of memory from zell__heap_alloc. */

@@ -323,6 +323,23 @@ Expected gains are derived from the profile shares and counts above;
   Lowered: 2 of 68 async functions of `examples/` and 11 of 330 of the
   stdlib they use (most of them do I/O).
 
+### C6. Per-thread coroutine frame cache (runtime)
+- Change: `zell_coro_frame_free` keeps freed frames in a thread-local
+  LIFO list per heap size class (no atomics; a frame freed on another
+  thread goes into that thread's cache), at most 1024 frames and 256 KB
+  per thread, the rest back to the heap; `_alloc` / `_alloc_uninit` take
+  from it first. Flushed at thread exit and before the leak report;
+  bypassed when the heap is off (ASan). ABI.md 10.3.
+- Done (2026-10-25). Measured (same session, after C5 -> C6, Go):
+  websocket_echo server CPU 9.1 -> 8.25 us/msg, 599k -> 626k msg/s with
+  the Go client (Go 7.6 us); await_chain yield 14 -> 14 ms (after C5 the
+  frames left are few; a 64-frame cap was 1-2 ms slower there, the cap
+  covers a 1000-deep chain); channel_pingpong, spawn_tasks,
+  fanout_fanin, mutex_contention, select_many, async_io unchanged within
+  noise; timers 65 -> 67 ms total (+3%: frames freed on the workers stay
+  in their caches, so the posting thread allocates fresh pages; a
+  disabled cache in the same binary is 65.6).
+
 Not pursued: cheaper local pinning (measured 0); fewer biased-RC atomics in
 frames (frames are not refcounted; the hot `zell_release` is task objects,
 removed by C2/R2); a malloc-free global queue (after C1 the global queue

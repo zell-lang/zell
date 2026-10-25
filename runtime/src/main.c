@@ -1,5 +1,6 @@
 /* main.c - runtime entry points, process arguments, exit. */
 #include "rt_internal.h"
+#include "heap.h"
 #include "platform/platform.h"
 
 #include <stdlib.h>
@@ -38,6 +39,7 @@ void zell_runtime_shutdown(void) {
     g_initialized = 0;
     /* objects waiting in refcount merge queues (rc.c) */
     if (zell__rc_drain_fn) zell__rc_drain_fn();
+    zell__frame_cache_flush();   /* this thread's cached coroutine frames (mem.c) */
     zell__leak_report();
 }
 

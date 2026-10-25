@@ -552,6 +552,7 @@ static void heap_sweep(hp_heap *h, int all) {
 static void heap_thread_exit(void *arg) {
     hp_heap *h = arg;
     if (!h || h == &hp_empty_heap) return;
+    zell__frame_cache_flush();   /* while the frames can still go back to this heap */
     t_heap = &hp_empty_heap;   /* frees by later TLS destructors take the remote path */
     for (uint32_t c = 0; c < ZELL__HP_CLASSES; c++) {
         hp_list *ls[2] = { &h->queue[c], &h->full[c] };

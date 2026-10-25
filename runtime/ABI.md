@@ -1584,11 +1584,16 @@ Rules the compiler must respect:
 - Use `@zell_coro_resume` as the resume function (or your own trampoline that
   calls `llvm.coro.resume`). Coroutine resumption is always performed by a worker
   thread.
-- Frame memory comes from `zell_coro_frame_alloc_uninit(size)` (from the object
+- Frame memory comes from `zell_coro_frame_alloc_uninit(size)` (from a
+  per-thread cache of freed frames per size class, else the object
   heap's size classes, or `malloc` when the heap is off; **not zeroed**;
   `ZELL_FRAME_POISON=1` fills it with 0xA5 to catch a read of a slot nobody
   wrote) or `zell_coro_frame_alloc(size)` (the same, zeroed), and is released
-  with `zell_coro_frame_free(p)` (NULL ok), possibly on another thread. An
+  with `zell_coro_frame_free(p)` (NULL ok), possibly on another thread
+  (the frame then goes into that thread's cache: LIFO, no atomics, at
+  most 1024 frames and 256 KB per thread, the rest goes back to the
+  heap; flushed at thread exit and before the leak report; bypassed when
+  the heap is off, so under ASan). An
   uninitialised frame is correct only if the destroy path (8.1: a panic
   unwinds a frame on the chain, **also one that is running and never
   suspended**) reads nothing a suspension writes: the compiler stores zero

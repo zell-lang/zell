@@ -145,9 +145,63 @@ void zell_free(void *p) { free(p); }
  * the zeroing zell_coro_frame_alloc for a coroutine whose destroy function
  * reads LLVM's suspend index. ZELL_FRAME_POISON=1 fills uninitialised
  * frames with 0xA5, to catch a read of a slot nobody wrote. */
+/* Per-thread frame cache: a LIFO free list per heap size class, so a deep
+ * chain of frames made and freed over and over (every async call that
+ * suspends) neither walks the heap's page lists nor empties and retires
+ * pages. No atomics: a frame freed on another thread goes into that
+ * thread's cache (frames have no owner; the heap takes a block back from
+ * any thread). Capped per class (FC_MAX_N frames, FC_MAX_BYTES) and per
+ * thread (FC_MAX_TOTAL: a 1000-deep chain of 200-byte frames fits; more
+ * would keep remotely freed frames from their owners' heaps, which then
+ * take fresh pages); past the cap a frame goes back to the heap. Only
+ * heap blocks are cached (the heap is off under ASan, so ASan sees every
+ * frame), and only small ones. Flushed at thread exit (heap.c calls
+ * zell__frame_cache_flush first) and at shutdown before the leak report. */
+#define FC_MAX_N 1024
+#define FC_MAX_BYTES ((int64_t)256 << 10)
+#define FC_MAX_TOTAL ((int64_t)256 << 10)
+
+typedef struct {
+    void *head[ZELL__HP_CLASSES];
+    uint32_t n[ZELL__HP_CLASSES];
+    int64_t bytes;
+} frame_cache;
+
+static _Thread_local frame_cache t_fc;
+
+void zell__frame_cache_flush(void) {
+    for (uint32_t c = 0; c < ZELL__HP_CLASSES; c++) {
+        void *p = t_fc.head[c];
+        t_fc.head[c] = NULL;
+        t_fc.n[c] = 0;
+        while (p) {
+            void *next = *(void **)p;
+            zell__heap_free(p);
+            p = next;
+        }
+    }
+    t_fc.bytes = 0;
+}
+
+static inline __attribute__((always_inline)) void *frame_alloc(int64_t size, int zero) {
+    if (__builtin_expect(!zell__heap_on, 0) && !zell__hp_start()) return NULL;
+    if (__builtin_expect(size > ZELL__HP_SMALL_MAX, 0)) return zell__hp_alloc_big(size, zero);
+    uint32_t c = zell__hp_cls(size);
+    void *p = t_fc.head[c];
+    if (p) {
+        t_fc.head[c] = *(void **)p;
+        t_fc.n[c]--;
+        t_fc.bytes -= zell__hp_sizes[c];
+    } else {
+        p = zell__heap_alloc_cls(c);
+    }
+    if (zero) memset(p, 0, (size_t)size);
+    return p;
+}
+
 void *zell_coro_frame_alloc(int64_t size) {
     if (size < 16) size = 16;
-    void *p = zell__heap_alloc(size, 1);
+    void *p = frame_alloc(size, 1);
     return p ? p : zell_alloc(size);
 }
 
@@ -162,7 +216,7 @@ static __attribute__((noinline)) int frame_poison_init(void) {
 
 void *zell_coro_frame_alloc_uninit(int64_t size) {
     if (size < 16) size = 16;
-    void *p = zell__heap_alloc(size, 0);
+    void *p = frame_alloc(size, 0);
     if (__builtin_expect(!p, 0)) {
         p = malloc((size_t)size);
         if (!p) zell__panicf("out of memory (requested %lld bytes)", (long long)size);
@@ -174,8 +228,26 @@ void *zell_coro_frame_alloc_uninit(int64_t size) {
 
 void zell_coro_frame_free(void *p) {
     if (!p) return;
-    if (zell__heap_on) zell__heap_free(p);
-    else free(p);
+    if (!zell__heap_on) {
+        free(p);
+        return;
+    }
+    if (__builtin_expect(!zell__heap_is_small(p), 0)) {
+        zell__hp_free_big(p);
+        return;
+    }
+    hp_page *pg = zell__hp_page_of(p);
+    int64_t sz = pg->bsize;
+    uint32_t c = pg->cls;
+    uint32_t n = t_fc.n[c];
+    if (n < FC_MAX_N && (int64_t)(n + 1) * sz <= FC_MAX_BYTES && t_fc.bytes + sz <= FC_MAX_TOTAL) {
+        *(void **)p = t_fc.head[c];
+        t_fc.head[c] = p;
+        t_fc.n[c] = n + 1;
+        t_fc.bytes += sz;
+        return;
+    }
+    zell__heap_free_small(p);
 }
 
 /* ---- objects ---- */

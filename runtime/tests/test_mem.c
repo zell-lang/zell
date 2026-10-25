@@ -461,6 +461,39 @@ TEST(brc_weak) {
     zell_release(w);
 }
 
+/* Coroutine frames (ABI.md 10.3): the per-thread cache hands back the
+ * last freed frame of a class, zeroes for zell_coro_frame_alloc, caps,
+ * takes frames freed by other threads, and is flushed at thread exit. */
+static void *frames_free_all(void *arg) {
+    void **v = arg;
+    for (int i = 0; i < 2000; i++) zell_coro_frame_free(v[i]);
+    return NULL;
+}
+
+TEST(coro_frame_cache) {
+    void *a = zell_coro_frame_alloc_uninit(200);
+    memset(a, 0x5A, 200);
+    zell_coro_frame_free(a);
+    void *b = zell_coro_frame_alloc(190);   /* same class (224) */
+    for (int i = 0; i < 190; i++) assert(((unsigned char *)b)[i] == 0);
+    zell_coro_frame_free(b);
+    zell_coro_frame_free(NULL);
+    /* past the caps, and the big path */
+    static void *v[2000];
+    for (int i = 0; i < 2000; i++) v[i] = zell_coro_frame_alloc_uninit(i % 2 ? 200 : 40000);
+    for (int i = 0; i < 2000; i++) memset(v[i], i & 0xff, i % 2 ? 200 : 40000);
+    for (int i = 0; i < 2000; i++) zell_coro_frame_free(v[i]);
+    for (int i = 0; i < 2000; i++) v[i] = zell_coro_frame_alloc_uninit(200);
+    for (int i = 0; i < 2000; i++)
+        for (int j = i + 1; j < i + 4 && j < 2000; j++) assert(v[i] != v[j]);
+    /* freed (and cached) on another thread, which then exits */
+    pthread_t th;
+    pthread_create(&th, NULL, frames_free_all, v);
+    pthread_join(th, NULL);
+    for (int i = 0; i < 2000; i++) v[i] = zell_coro_frame_alloc(200);
+    for (int i = 0; i < 2000; i++) zell_coro_frame_free(v[i]);
+}
+
 int main(void) {
     printf("test_mem\n");
     RUN(alloc_zeroed);
@@ -480,5 +513,6 @@ int main(void) {
     RUN(brc_queue);
     RUN(brc_owner_exit);
     RUN(brc_weak);
+    RUN(coro_frame_cache);
     return 0;
 }
