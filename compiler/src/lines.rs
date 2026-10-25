@@ -9,14 +9,19 @@
 //! emits a second, small object: one read-only global `zell_lines` (plus
 //! `zell_lines_len`) and a constructor that registers it with the runtime
 //! (`zell_lines_register`). Every function's address in the table is a
-//! 32-bit offset from the table (`ptrtoint(@f) - ptrtoint(&slot)`), which the
-//! static linker resolves the same way on ELF, Mach-O and COFF; the table
-//! is ordinary data, so `strip` keeps it and no load bias applies.
+//! 32-bit offset from the table (`ptrtoint(@f) - ptrtoint(&slot)`, magic
+//! "ZLN2"), which the static linker resolves on ELF, COFF and arm64 Mach-O.
+//! x86_64 Mach-O cannot encode that difference (`@f` is undefined in this
+//! object: "unsupported relocation with subtraction expression"), so there
+//! each entry is an absolute 64-bit pointer instead (magic "ZLN3",
+//! `X86_64_RELOC_UNSIGNED`, rebased by dyld). The table is ordinary data,
+//! so `strip` keeps it and no load bias applies in either form.
 //!
 //! ```text
 //! "ZLN2"  u32 nfiles  u32 nlines  u32 nfuncs  u32 strsize  u32 ncode
 //! {i32 rel; u32 size; u32 first} code[ncode]   one per function: rel = its address - the address of rel;
 //!                                              its line entries are lines[first .. next code's first)
+//!                                              ("ZLN3": {u64 addr; u32 size; u32 first}, table 8-aligned)
 //! u32 files[nfiles]                            string offsets (paths as given to the compiler)
 //! {u32 off; u32 fl} lines[nlines]              off from the function's start, sorted; fl = file << 20 | line, file 0xfff: no line
 //! {u32 fl; u32 last; u32 name} funcs[nfuncs]   source range of a Zell function: file << 20 | first line, last line
@@ -292,6 +297,12 @@ pub fn write_object(objs: &[PathBuf], names: &Names, machine: &TargetMachine, ou
     if code.is_empty() {
         return Ok(None);
     }
+    write_table(&code, &files, names, machine, out).map(Some)
+}
+
+/// Writes the line-table object of `code` (whose files are `files`) to `out`;
+/// returns the table's size.
+fn write_table(code: &[Code], files: &Files, names: &Names, machine: &TargetMachine, out: &Path) -> Result<usize, String> {
     // Strings, functions' source ranges, the tail of the table.
     let mut strtab: Vec<u8> = Vec::new();
     let mut strs: HashMap<String, u32> = HashMap::new();
@@ -319,7 +330,7 @@ pub fn write_object(objs: &[PathBuf], names: &Names, machine: &TargetMachine, ou
     for o in &file_offs {
         tail.extend_from_slice(&o.to_le_bytes());
     }
-    for c in &code {
+    for c in code {
         for (o, v) in &c.lines {
             tail.extend_from_slice(&o.to_le_bytes());
             tail.extend_from_slice(&v.to_le_bytes());
@@ -337,10 +348,14 @@ pub fn write_object(objs: &[PathBuf], names: &Names, machine: &TargetMachine, ou
     m.set_triple(&machine.get_triple());
     m.set_data_layout(&machine.get_target_data().get_data_layout());
     let (i32t, i64t, i8t, ptr) = (ctx.i32_type(), ctx.i64_type(), ctx.i8_type(), ctx.ptr_type(inkwell::AddressSpace::default()));
-    let code_ty = ctx.struct_type(&[i32t.into(), i32t.into(), i32t.into()], false);
+    // x86_64 Mach-O cannot encode `@f - &slot` with `@f` undefined in this
+    // object (only arm64's SUBTRACTOR pair can): store absolute pointers,
+    // rebased by dyld ("ZLN3"); elsewhere 32-bit offsets ("ZLN2").
+    let abs = machine.get_triple().as_str().to_string_lossy().starts_with("x86_64-apple");
+    let code_ty = if abs { ctx.struct_type(&[ptr.into(), i32t.into(), i32t.into()], false) } else { ctx.struct_type(&[i32t.into(), i32t.into(), i32t.into()], false) };
     let tab_ty = ctx.struct_type(&[i32t.array_type(6).into(), code_ty.array_type(code.len() as u32).into(), i8t.array_type(tail.len() as u32).into()], false);
     let g = m.add_global(tab_ty, None, "zell_lines");
-    let magic = u32::from_le_bytes(*b"ZLN2");
+    let magic = u32::from_le_bytes(if abs { *b"ZLN3" } else { *b"ZLN2" });
     let hdr = [magic, file_offs.len() as u32, nlines as u32, funcs.len() as u32, strtab.len() as u32, code.len() as u32];
     let hdr = i32t.const_array(&hdr.iter().map(|v| i32t.const_int(*v as u64, false)).collect::<Vec<_>>());
     let fn_ty = ctx.void_type().fn_type(&[], false);
@@ -348,19 +363,23 @@ pub fn write_object(objs: &[PathBuf], names: &Names, machine: &TargetMachine, ou
     let mut first = 0u32;
     for (k, c) in code.iter().enumerate() {
         let f = m.get_function(&c.sym).unwrap_or_else(|| m.add_function(&c.sym, fn_ty, Some(Linkage::External)));
-        let fa = f.as_global_value().as_pointer_value().const_to_int(i64t);
-        // SAFETY: indices within the table's type.
-        let slot = unsafe { g.as_pointer_value().const_in_bounds_gep(tab_ty, &[i32t.const_zero(), i32t.const_int(1, false), i32t.const_int(k as u64, false), i32t.const_zero()]) };
-        let rel = fa.const_sub(slot.const_to_int(i64t)).const_truncate(i32t);
-        entries.push(code_ty.const_named_struct(&[rel.into(), i32t.const_int(c.size.min(u32::MAX as u64), false).into(), i32t.const_int(first as u64, false).into()]));
+        let fp = f.as_global_value().as_pointer_value();
+        let addr: inkwell::values::BasicValueEnum = if abs {
+            fp.into()
+        } else {
+            // SAFETY: indices within the table's type.
+            let slot = unsafe { g.as_pointer_value().const_in_bounds_gep(tab_ty, &[i32t.const_zero(), i32t.const_int(1, false), i32t.const_int(k as u64, false), i32t.const_zero()]) };
+            fp.const_to_int(i64t).const_sub(slot.const_to_int(i64t)).const_truncate(i32t).into()
+        };
+        entries.push(code_ty.const_named_struct(&[addr, i32t.const_int(c.size.min(u32::MAX as u64), false).into(), i32t.const_int(first as u64, false).into()]));
         first += c.lines.len() as u32;
     }
     let bytes: Vec<_> = tail.iter().map(|b| i8t.const_int(*b as u64, false)).collect();
     g.set_initializer(&tab_ty.const_named_struct(&[hdr.into(), code_ty.const_array(&entries).into(), i8t.const_array(&bytes).into()]));
     g.set_constant(true);
-    g.set_alignment(4);
+    g.set_alignment(if abs { 8 } else { 4 });
     g.set_visibility(GlobalVisibility::Hidden);
-    let size = tail.len() + 24 + 12 * code.len();
+    let size = tail.len() + 24 + if abs { 16 } else { 12 } * code.len();
     let len = m.add_global(i64t, None, "zell_lines_len");
     len.set_initializer(&i64t.const_int(size as u64, false));
     len.set_constant(true);
@@ -381,5 +400,35 @@ pub fn write_object(objs: &[PathBuf], names: &Names, machine: &TargetMachine, ou
         return Err(format!("internal compiler error: line-table module is invalid:\n{}", e.to_string()));
     }
     machine.write_to_file(&m, FileType::Object, out).map_err(|e| format!("cannot write {}: {}", out.display(), e.to_string()))?;
-    Ok(Some(size))
+    Ok(size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The line-table object is emitted for every supported object format
+    /// (x86_64 Mach-O refuses a difference with a symbol undefined in the object).
+    #[test]
+    fn table_object_every_target() {
+        let dir = std::env::temp_dir().join(format!("zell-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let code: Vec<Code> = ["main.f", "main.g"].iter().map(|s| Code { sym: s.to_string(), size: 16, lines: vec![(0, 7), (4, 8)] }).collect();
+        let mut files = Files::default();
+        files.list.push("t.zl".into());
+        files.index.insert("t.zl".into(), 0);
+        for t in ["macos-amd64", "macos-arm64", "linux-amd64", "linux-arm64", "windows-amd64"] {
+            let target = Target::parse(t).unwrap();
+            let machine = crate::codegen::target_machine(&target, inkwell::OptimizationLevel::None).unwrap();
+            let out = dir.join(format!("{t}.o"));
+            let r = write_table(&code, &files, &Names::default(), &machine, &out);
+            assert!(r.is_ok(), "{t}: {r:?}");
+            let data = std::fs::read(&out).unwrap();
+            let obj = object::File::parse(&*data).unwrap();
+            assert!(obj.symbols().any(|s| s.name().is_ok_and(|n| n.ends_with("zell_lines"))), "{t}: no zell_lines");
+            let magic: &[u8] = if t == "macos-amd64" { b"ZLN3" } else { b"ZLN2" };
+            assert!(data.windows(4).any(|w| w == magic), "{t}: no {magic:?} table");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

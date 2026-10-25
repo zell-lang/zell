@@ -2,10 +2,12 @@
  * -> source file, line and Zell function.
  *
  * The compiler links one extra object into every program; its constructor
- * hands the table to zell_lines_register. Code addresses in the table are
- * 32-bit offsets relative to the table itself, resolved by the static
- * linker on ELF, Mach-O and COFF alike, so they are already run-time
- * addresses: no load bias, no file reading, nothing platform-specific. */
+ * hands the table to zell_lines_register. Code addresses in a "ZLN2" table
+ * are 32-bit offsets relative to the table itself, resolved by the static
+ * linker (ELF, COFF, arm64 Mach-O); a "ZLN3" table (x86_64 Mach-O, whose
+ * relocations cannot express that offset) holds absolute 64-bit pointers,
+ * rebased by dyld. Either way they are already run-time addresses: no load
+ * bias, no file reading, nothing platform-specific. */
 #include "rt_internal.h"
 #include "platform/platform.h"
 
@@ -22,11 +24,25 @@ static uint32_t rd32(const unsigned char *p) {
 /* The registered table (one per program). */
 static const unsigned char *g_tab;
 static size_t g_len;
+static size_t g_stride;  /* code entry size: 12 (ZLN2) or 16 (ZLN3) */
 
 void zell_lines_register(const void *table, int64_t len) {
-    if (!table || len < ZELL__LINES_HDR || memcmp(table, "ZLN2", 4) != 0) return;
+    if (!table || len < ZELL__LINES_HDR) return;
+    if (memcmp(table, "ZLN2", 4) == 0) g_stride = 12;
+    else if (memcmp(table, "ZLN3", 4) == 0) g_stride = 16;
+    else return;
     g_tab = table;
     g_len = (size_t)len;
+}
+
+/* The run-time address of code entry `e`. */
+static uintptr_t code_addr(const unsigned char *e) {
+    if (g_stride == 16) {
+        uint64_t a;
+        memcpy(&a, e, 8);  /* a pointer of this process: native byte order */
+        return (uintptr_t)a;
+    }
+    return (uintptr_t)e + (uintptr_t)(intptr_t)(int32_t)rd32(e);
 }
 
 /* The code ranges sorted by run-time address, built on first use. */
@@ -46,13 +62,13 @@ static int code_cmp(const void *a, const void *b) {
 static void build_index(void) {
     const unsigned char *t = g_tab;
     uint32_t ncode = rd32(t + 20);
-    if ((size_t)ZELL__LINES_HDR + (size_t)ncode * 12 > g_len) return;
+    if ((size_t)ZELL__LINES_HDR + (size_t)ncode * g_stride > g_len) return;
     code_range *c = malloc(sizeof *c * (ncode ? ncode : 1));
     if (!c) return;
     for (uint32_t k = 0; k < ncode; k++) {
-        const unsigned char *e = t + ZELL__LINES_HDR + (size_t)k * 12;
-        c[k].lo = (uintptr_t)e + (uintptr_t)(intptr_t)(int32_t)rd32(e);
-        c[k].size = rd32(e + 4);
+        const unsigned char *e = t + ZELL__LINES_HDR + (size_t)k * g_stride;
+        c[k].lo = code_addr(e);
+        c[k].size = rd32(e + g_stride - 8);
         c[k].k = k;
     }
     qsort(c, ncode, sizeof *c, code_cmp);
@@ -86,7 +102,7 @@ bool zell__lines_find(uintptr_t pc, const char **file, uint32_t *line, const cha
     if (st != 2 || !g_code) return false;  /* another thread is building it: symbol+offset */
     const unsigned char *t = g_tab;
     uint32_t nfiles = rd32(t + 4), nlines = rd32(t + 8), nfuncs = rd32(t + 12), strsize = rd32(t + 16), ncode = rd32(t + 20);
-    size_t files = ZELL__LINES_HDR + (size_t)ncode * 12, lines = files + (size_t)nfiles * 4, funcs = lines + (size_t)nlines * 8,
+    size_t files = ZELL__LINES_HDR + (size_t)ncode * g_stride, lines = files + (size_t)nfiles * 4, funcs = lines + (size_t)nlines * 8,
            str = funcs + (size_t)nfuncs * 12;
     if (str + strsize > g_len || strsize == 0 || t[str + strsize - 1] != 0) return false;
     /* the code range holding pc */
@@ -99,8 +115,8 @@ bool zell__lines_find(uintptr_t pc, const char **file, uint32_t *line, const cha
     }
     const code_range *c = &g_code[lo];
     if (pc - c->lo >= c->size) return false;
-    const unsigned char *ce = t + ZELL__LINES_HDR + (size_t)c->k * 12;
-    uint32_t first = rd32(ce + 8), end = c->k + 1 < ncode ? rd32(ce + 12 + 8) : nlines;
+    const unsigned char *ce = t + ZELL__LINES_HDR + (size_t)c->k * g_stride;
+    uint32_t first = rd32(ce + g_stride - 4), end = c->k + 1 < ncode ? rd32(ce + 2 * g_stride - 4) : nlines;
     if (first > end || end > nlines) return false;
     long i = find(t + lines + (size_t)first * 8, end - first, (uint32_t)(pc - c->lo));
     if (i < 0) return false;

@@ -42,6 +42,31 @@ static void register_table(void) {
 }
 /* registers in the child: on Windows run_child starts a new process */
 static void p_lined_child(void) { register_table(); p_lined(); }
+/* The same table in the "ZLN3" layout (x86_64 Mach-O): code entries
+ * {u64 address; u32 size; u32 first}. */
+static _Alignas(8) unsigned char g_tab3[24 + 16 + 4 + 8 + 12 + 16];
+static void register_table3(void) {
+    unsigned char *t = g_tab3;
+    uint64_t a = (uint64_t)(uintptr_t)(void *)p_lined;
+    memcpy(t, "ZLN3", 4);
+    put32(t + 4, 1);
+    put32(t + 8, 1);
+    put32(t + 12, 1);
+    put32(t + 16, 11);
+    put32(t + 20, 1);
+    memcpy(t + 24, &a, 8);
+    put32(t + 32, 4096);
+    put32(t + 36, 0);
+    put32(t + 40, 0);
+    put32(t + 44, 0);
+    put32(t + 48, 7);
+    put32(t + 52, 1);
+    put32(t + 56, 100);
+    put32(t + 60, 5);
+    memcpy(t + 64, "t.zl\0lined\0", 11);
+    zell_lines_register(t, 75);
+}
+static void p_lined3_child(void) { register_table3(); p_lined(); }
 
 TEST(messages) {
     char buf[16384];
@@ -70,6 +95,8 @@ TEST(line_table) {
     char buf[16384];
     assert(run_child(p_lined_child, buf, sizeof buf) == 2);
     assert(strstr(buf, "panic: lined\n"));
+    assert(strstr(buf, "\n  t.zl:7 lined\n"));
+    assert(run_child(p_lined3_child, buf, sizeof buf) == 2);
     assert(strstr(buf, "\n  t.zl:7 lined\n"));
 }
 

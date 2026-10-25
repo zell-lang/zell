@@ -1209,14 +1209,15 @@ its relocations to (section, offset) addresses, maps every row to the
 global function symbol holding it, and writes one more object for the same
 target (an LLVM module of its own):
 
-- `zell_lines` (hidden, constant, 4-byte aligned): the table below, in an
-  allocated read-only section (`.rodata` on ELF, `__TEXT,__const` or
-  `__DATA_CONST,__const` on Mach-O, `.rdata` on COFF);
+- `zell_lines` (hidden, constant, 4-byte aligned, 8 for `ZLN3`): the
+  table below, in an allocated read-only section (`.rodata` /
+  `.data.rel.ro` on ELF, `__TEXT,__const` or `__DATA,__const` on Mach-O,
+  `.rdata` on COFF);
 - `zell_lines_len` (`i64`, hidden): its size in bytes;
 - a constructor (`llvm.global_ctors`: `.init_array`, `__mod_init_func`,
   `.ctors`) calling `void zell_lines_register(const void *table, int64_t
-  len)` (lines.c), which keeps the pointer (a table without the `ZLN2`
-  magic is ignored). The constructor is what keeps the table alive under
+  len)` (lines.c), which keeps the pointer (a table without the `ZLN2` or
+  `ZLN3` magic is ignored). The constructor is what keeps the table alive under
   `--gc-sections` / `-dead_strip`; programs without it (C tests, ThinLTO
   builds, whose bitcode objects have no DWARF to read) simply have no
   table.
@@ -1228,15 +1229,20 @@ itself (`ptrtoint(@f) - ptrtoint(&field)`), which the static linker
 resolves (`R_X86_64_PC32` / `R_AARCH64_PREL32`, `IMAGE_REL_AMD64_REL32`,
 `ARM64_RELOC_SUBTRACTOR` + `UNSIGNED`): the values are run-time addresses
 in a PIE or ASLR image too, so the runtime applies **no load slide** and
-reads no file.
+reads no file. x86_64 Mach-O has no relocation for a difference whose
+symbol is undefined in the object (the functions live in the program's
+object), so on `x86_64-apple-darwin` the table has magic `ZLN3` and every
+code entry holds the function's absolute 64-bit address
+(`X86_64_RELOC_UNSIGNED`), which dyld rebases like any data pointer: again
+a run-time address, no slide applied. Every other target emits `ZLN2`.
 
 **Layout** (little-endian, 4-byte fields):
 
 | Offset | Field |
 |---|---|
-| 0 | magic `"ZLN2"` |
+| 0 | magic `"ZLN2"` (`"ZLN3"`: x86_64 Mach-O) |
 | 4 | `u32 nfiles`, `u32 nlines`, `u32 nfuncs`, `u32 strsize`, `u32 ncode` |
-| 24 | `{i32 rel; u32 size; u32 first} code[ncode]`: one per function with lines; its code is `[&rel + rel, &rel + rel + size)`; its line entries are `lines[first .. next code entry's first)` (`nlines` for the last) |
+| 24 | `{i32 rel; u32 size; u32 first} code[ncode]`: one per function with lines; its code is `[&rel + rel, &rel + rel + size)`; its line entries are `lines[first .. next code entry's first)` (`nlines` for the last). `ZLN3`: `{u64 addr; u32 size; u32 first}` (16 bytes, native-endian pointer), code `[addr, addr + size)` |
 | | `u32 files[nfiles]`: offsets into `str` of the source paths, spelled as the compiler was given them (like error-trace sites, 7) |
 | | `{u32 off; u32 fl} lines[nlines]`: per function, sorted by `off` (address − the function's start); `fl = file << 20 \| line`; an entry covers addresses up to the next one of its function; `file` `0xfff` = no line (non-Zell code, line 0) |
 | | `{u32 fl; u32 last; u32 name} funcs[nfuncs]`: source range of each Zell function (`file << 20 \| first line`, last line) and its name as in error traces (namespace stripped) |
