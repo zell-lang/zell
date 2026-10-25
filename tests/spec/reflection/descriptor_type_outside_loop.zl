@@ -1,0 +1,14 @@
+// error: p.Type is a run-time descriptor here: a descriptor can be used as a type only inside a loop unrolled at compile time
+// status: passing
+namespace spec.reflection.descriptor_type_outside_loop
+
+import io
+
+func zero(p *reflect.ParamInfo) {
+    var x p.Type
+    println(x)
+}
+
+func main() {
+    zero(nil)
+}

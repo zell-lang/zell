@@ -139,6 +139,9 @@ const_decl ::= CONST IDENTIFIER type? ASSIGN expr
 
 type ::= prefix_type BANG?
 prefix_type ::= pointer_type | slice_type | array_type | map_type | func_type | tuple_type | named_type
+// Inside a loop unrolled at compile time the qualified name may start at a
+// descriptor variable (`t`, `p.Type`, `f.Type`, `m.Result`, `m.Args`):
+// resolved by sema, the grammar is unchanged.
 named_type ::= qualified_name generic_args?
 generic_args ::= LT type (COMMA type)* GT
 // `weak *T` (weak pointer): `weak` is contextual, an IDENTIFIER spelled

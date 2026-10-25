@@ -1,0 +1,9 @@
+Point {"X":1,"Y":2} {"X":0,"Y":0}
+  X 1 int
+  Y 2 int
+  Shift returns Point {"X":0,"Y":0}
+    by Point {"X":1,"Y":2}
+    label string ""
+Item {"Name":"pen","Tags":["a","b"]} {"Name":"","Tags":null}
+  Name "pen" string
+  Tags ["a","b"] []string

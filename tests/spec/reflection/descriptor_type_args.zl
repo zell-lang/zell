@@ -1,0 +1,51 @@
+// test: a descriptor of an unrolled loop is a type: t, f.Type, p.Type and m.Result as type arguments (json.Parse<p.Type>, reflect.TypeOf<m.Result>) and in var x T, t{...} and new t{...}
+// status: passing
+namespace spec.reflection.descriptor_type_args
+
+import io
+import encoding.json
+
+@attribute(targets: [reflect.Target.Struct])
+struct doc {
+    sample string
+}
+
+@doc(sample: "{\"X\":1,\"Y\":2}")
+struct Point {
+    X int
+    Y int
+
+    func Shift(by Point, label string) Point {
+        return Point{X: this.X + by.X, Y: this.Y + by.Y}
+    }
+}
+
+@doc(sample: "{\"Name\":\"pen\",\"Tags\":[\"a\",\"b\"]}")
+struct Item {
+    Name string
+    Tags []string
+}
+
+func main() {
+    for t in reflect.TypesWith<doc>() {
+        // t as a type argument and as a type
+        var v = try json.Parse<t>(t.Attribute<doc>().sample) else t{}
+        var boxed = new t{}
+        println(t.Name, json.Format(v), json.Format(*boxed))
+        for f in reflect.Fields<t>() {
+            // f.Type as a type
+            var x f.Type = f.Get(v)
+            println(" ", f.Name, json.Format(x), reflect.TypeOf<f.Type>().Name)
+        }
+        for m in t.Methods {
+            var r m.Result
+            println(" ", m.Name, "returns", reflect.TypeOf<m.Result>().Name, json.Format(r))
+            for p in m.Params {
+                // p.Type as a type argument
+                var zero p.Type
+                var a = try json.Parse<p.Type>(t.Attribute<doc>().sample) else zero
+                println("   ", p.Name, reflect.TypeOf<p.Type>().Name, json.Format(a))
+            }
+        }
+    }
+}
