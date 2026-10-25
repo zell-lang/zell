@@ -9,67 +9,69 @@ Measured 2026-10-24, same session and machine load for Go and .NET; medians of 3
 - Go 1.24.7 (`go build`), default GOMAXPROCS. 16 hardware threads (AMD Ryzen 7 8845HS w- Radeon 780M Graphics), Linux 6.19, loopback TCP.
 - Zell: not rebuilt; numbers are copied from commit bodies / docs (source in the table notes). They are from the other agent's runs, so machine load may differ.
 - Ported faithfully: same phases, counts, LCG, output lines, checksums (all identical to Go). Deviations: Go unbuffered channels become `Channel.CreateBounded(1)` (.NET has no rendezvous channel); goroutines are `Task.Run`; `sync.Mutex` is `SemaphoreSlim(1,1).WaitAsync` (plus an uncontended `lock` column); `select` is `Task.WhenAny` over 8 pending `ReadAsync` re-armed per event (what `main.zl` does with `task.Any`); `context` is `CancellationTokenSource`; `Gosched` is `await Task.Yield()`; await_chain is an async recursion (Go's is a plain call chain, as in the README); async_io uses `Socket` async APIs, NoDelay, 1000 conns x 1000 x 64 B. park1M uses async tasks awaiting one gate `TaskCompletionSource` (a .NET task cannot block cheaply, a blocked thread per task would not scale).
-- Zell columns: spawn_tasks, mutex, await_chain, pingpong: `7a4dc64`; fanout_fanin, select_many: `4b4ec33`; async_io: `docs/ASYNC_PLAN.md` first table (`53dbf10`, before the poller work); timers, cancel_tree: `benchmarks/README.md` (`ce6122a`, 4 vCPU table, wall/drain only).
+- Zell columns until 2026-10-24 (superseded, see the note below): spawn_tasks, mutex, await_chain, pingpong: `7a4dc64`; fanout_fanin, select_many: `4b4ec33`; async_io: `docs/ASYNC_PLAN.md` first table (`53dbf10`, before the poller work); timers, cancel_tree: `benchmarks/README.md` (`ce6122a`, 4 vCPU table, wall/drain only).
+
+> Note 2026-10-25: the Zell column is now re-measured, not copied: master `a1cd2e6`, `--release`, 16 threads, same session as the Go and .NET numbers, 5 interleaved rounds, medians (Go/.NET columns below are still the 2026-10-24 3-run medians; the fresh ones are in `benchmarks/README.md` "Async wave result (2026-10-25)", within a few percent). select_many `select` 1237 is interleaving noise, ~1120 in isolation.
 
 ## Results (ms unless noted)
 
 ### spawn_tasks
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| run1M | 321 | 148 | 260 | 1.76 |
-| park1M | 263 | 1039 | 480 | 0.46 |
-| wake1M | 210 | 123 | 169 | 1.37 |
+| run1M | 246 | 148 | 260 | 1.76 |
+| park1M | 235 | 1039 | 480 | 0.46 |
+| wake1M | 89 | 123 | 169 | 1.37 |
 
 ### channel_pingpong
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| pingpong 5M | 527 | 423 | 2374 | 5.6 |
-| pipeline 1M | 145 | 76 | 258 | 3.4 |
+| pingpong 5M | 430 | 423 | 2374 | 5.6 |
+| pipeline 1M | 125 | 76 | 258 | 3.4 |
 
 ### fanout_fanin
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| fan-in | 555 | 324 | 569 | 1.76 |
-| pool | 232 | 76 | 641 | 8.4 |
+| fan-in | 460 | 324 | 569 | 1.76 |
+| pool | 136 | 76 | 641 | 8.4 |
 
 ### mutex_contention
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| contended | 557 | 206 | 3444 | 16.7 |
-| uncontended | 72 | 38 | 263 (`SemaphoreSlim`), 55 (`lock`) | 6.9 / 1.4 |
+| contended | 107 | 206 | 3444 | 16.7 |
+| uncontended | 39 | 38 | 263 (`SemaphoreSlim`), 55 (`lock`) | 6.9 / 1.4 |
 
 ### timers
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| total (wall) | 89 (4 vCPU) | 51 | 65 | 1.27 |
-| start loop | - | 41 | 55 | 1.34 |
-| mean / max late (us) | - | 129 / 2028 | 808 / 4315 | 6.3 / 2.1 |
+| total (wall) | 66 | 51 | 65 | 1.27 |
+| start loop | 56 | 41 | 55 | 1.34 |
+| mean / max late (us) | 41 / 267 | 129 / 2028 | 808 / 4315 | 6.3 / 2.1 |
 
 ### await_chain
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| sync (10M calls) | 132 | 10 | 302 | 30 |
-| yield (1k chains) | 100 | 6 | 125 (AOT: 51) | 21 (8.5) |
+| sync (10M calls) | 11 | 10 | 302 | 30 |
+| yield (1k chains) | 14 | 6 | 125 (AOT: 51) | 21 (8.5) |
 
 ### cancel_tree
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| cancel drain avg (us) | 18100 (README, 4 vCPU) | 4393 | 8776 | 2.0 |
-| cancel drain max (us) | - | 5909 | 19216 | 3.3 |
-| timeout drain avg (us) | 17100 (README) | 4834 | 8192 | 1.7 |
+| cancel drain avg (us) | 2323 | 4393 | 8776 | 2.0 |
+| cancel drain max (us) | 2962 | 5909 | 19216 | 3.3 |
+| timeout drain avg (us) | 2777 | 4834 | 8192 | 1.7 |
 
 ### async_io
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| total | ~1550 (643k rt/s) | 1255 | 1551 | 1.24 |
-| round trips/s | 643k | 797k | 645k | 0.81 |
-| p50 / p99 / max (us) | - / 6200 / - | 1130 / 2491 / 60088 | 1353 / 3287 / 21853 | 1.2 / 1.3 / 0.36 |
+| total | 1254 (797k rt/s) | 1255 | 1551 | 1.24 |
+| round trips/s | 797k | 797k | 645k | 0.81 |
+| p50 / p99 / max (us) | 1180 / 1591 / 21014 | 1130 / 2491 / 60088 | 1353 / 3287 / 21853 | 1.2 / 1.3 / 0.36 |
 
 ### select_many
 | phase | Zell | Go | .NET | .NET/Go |
 |---|---|---|---|---|
-| select / task.Any | 1114 | 832 | 1009 | 1.21 |
-| merge | 1049 | 399 | 960 | 2.4 |
+| select / task.Any | 1237 | 832 | 1009 | 1.21 |
+| merge | 827 | 399 | 960 | 2.4 |
 
 ## CPU and context switches (whole run, median of 3)
 

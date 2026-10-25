@@ -1,4 +1,5 @@
 # Async performance plan (2026-10-24)
+Status 2026-10-25: all items done; results in benchmarks/README.md "Async wave result".
 
 What the task runtime (`runtime/src/task.c`, `task_sync.c`, `task_io.c`) and
 the coroutine lowering (`compiler/src/codegen/async_.rs`) must change to

@@ -937,6 +937,77 @@ while a spinner held the token, which then took other work, could wait
 forever behind a job that never yields (found by the new 16-worker
 starvation test in `runtime/tests/test_task.c`).
 
+## Async wave result (2026-10-25)
+
+Final measurement of the async wave (`docs/ASYNC_PLAN.md`), master `a1cd2e6`,
+`--release` (as `scripts/bench-perf.sh`), go 1.24.7, .NET SDK 10.0.108
+(Release, workstation non-concurrent GC, see `RESULTS-dotnet.md`), 16 threads
+(AMD Ryzen 7 8845HS), Fedora 42, loopback. One session, one process at a time,
+runtimes interleaved (Zell, Go, .NET, again) for 5 rounds; medians of the
+phase values each program prints. "Start of wave" is the first table of
+`docs/ASYNC_PLAN.md` (`b933053`, one run); timers and cancel_tree had no
+16-thread number then, so their start column is the 4 vCPU table of this file.
+Times in ms unless noted, lower is better; ratios below 1 mean Zell is faster.
+
+| bench | phase | Zell start of wave | Zell now | Go | .NET | Zell/Go | Zell/.NET |
+|---|---|---:|---:|---:|---:|---:|---:|
+| spawn_tasks | run1M ms | 937 | **246** | 148 | 233 | 1.66 | 1.06 |
+| spawn_tasks | park1M ms | 285 | **235** | 1 101 | 456 | 0.21 | 0.52 |
+| spawn_tasks | wake1M ms | 469 | **89** | 121 | 204 | 0.74 | 0.44 |
+| channel_pingpong | pingpong 5M ms | 619 | **430** | 418 | 2 365 | 1.03 | 0.18 |
+| channel_pingpong | pipeline 1M ms | 149 | **125** | 76 | 269 | 1.64 | 0.46 |
+| fanout_fanin | fan-in ms | 606 | **460** | 312 | 547 | 1.47 | 0.84 |
+| fanout_fanin | pool ms | 251 | **136** | 78 | 430 | 1.74 | 0.32 |
+| mutex_contention | contended ms | 624 | **107** | 203 | 3 452 | 0.53 | 0.03 |
+| mutex_contention | uncontended ms | 71 | **39** | 35 | 257 | 1.11 | 0.15 |
+| timers | total ms (start: 4 vCPU) | 89 | **66** | 51 | 66 | 1.29 | 1.00 |
+| timers | mean late us | - | **41** | 126 | 793 | 0.33 | 0.05 |
+| await_chain | sync 10M ms | 130 | **11** | 10 | 299 | 1.10 | 0.04 |
+| await_chain | yield 1k chains ms | 96 | **14** | 7 | 129 | 2.00 | 0.11 |
+| cancel_tree | cancel drain avg us (start: 4 vCPU) | 18 100 | **2 323** | 4 336 | 8 491 | 0.54 | 0.27 |
+| cancel_tree | timeout drain avg us (start: 4 vCPU) | 17 100 | **2 777** | 4 756 | 7 974 | 0.58 | 0.35 |
+| async_io | total ms | 1 555 | **1 254** | 1 256 | 1 527 | 1.00 | 0.82 |
+| async_io | p99 us | 6 200 | **1 591** | 2 420 | 2 882 | 0.66 | 0.55 |
+| select_many | select ms | 1 115 | **1 237** | 967 | 1 001 | 1.28 | 1.24 |
+| select_many | merge ms | 1 006 | **827** | 396 | 956 | 2.09 | 0.87 |
+| websocket_echo | msg/s, Go client | - | 619 086 | 663 983 | n/a | 0.93 (Go/Zell rate) | n/a |
+| http_hello | req/s, Go load | - | 608 886 | 396 296 | n/a | 1.54 (rate; server CPU 8.3 vs 17.1 us/req) | n/a |
+
+websocket_echo and http_hello are Zell vs Go only (5 rounds of their `run.sh`,
+rates are medians; ratio column for these two is the Zell/Go rate).
+
+CPU (user+sys of the whole process, `perf stat`) and context switches,
+median of 5:
+
+| bench | Zell CPU s | Zell switches | Go CPU s | Go switches | .NET CPU s | .NET switches |
+|---|---:|---:|---:|---:|---:|---:|
+| spawn_tasks | 1.43 | 94 005 | 5.32 | 168 756 | 7.94 | 142 969 |
+| channel_pingpong | 1.27 | 18 377 | 0.59 | 15 849 | 24.14 | 605 |
+| fanout_fanin | 2.66 | 126 305 | 1.46 | 193 237 | 13.07 | 158 040 |
+| mutex_contention | 0.26 | 3 486 | 0.67 | 12 168 | 37.25 | 2 368 |
+| timers | 0.2 | 13 189 | 0.21 | 5 587 | 0.57 | 9 291 |
+| await_chain | 0.04 | 309 | 0.02 | 1 058 | 0.75 | 2 778 |
+| cancel_tree | 0.28 | 5 892 | 0.97 | 80 820 | 2.86 | 27 842 |
+| async_io | 19.7 | 4 226 | 19.01 | 2 647 | 21.14 | 158 158 |
+| select_many | 6.19 | 507 057 | 2.23 | 76 022 | 22.36 | 895 174 |
+
+Worker-count sweep (`ZELL_WORKERS` / `GOMAXPROCS` / `DOTNET_PROCESSOR_COUNT`, median of 5, ms):
+
+| bench phase | Zell 1 / 4 / 16 | Go 1 / 4 / 16 | .NET 1 / 4 / 16 |
+|---|---|---|---|
+| mutex contended | 38 / 96 / 107 | 35 / 175 / 203 | 573 / 2838 / 3452 |
+| ping-pong | 409 / 439 / 430 | 459 / 425 / 418 | 1921 / 2090 / 2365 |
+| pipeline | 129 / 122 / 125 | 86 / 75 / 76 | 522 / 160 / 269 |
+
+Findings:
+
+- Zell beats Go on mutex_contention (0.53x, barging mutex, 2.6x less CPU), cancel_tree (0.54x, 14x fewer switches), timers lateness (mean 41 vs 126 us, nothing over 1 ms), park1M (0.21x) and wake1M (0.74x), and has the best async_io p99 (1.6 vs 2.4 ms).
+- At parity: ping-pong (1.03x), await_chain sync (11 vs 10 ms, was 13x), async_io throughput (1254 vs 1256), uncontended mutex (39 vs 35), timers total.
+- Remaining gaps: select_many (select 1.28x, merge 2.1x, 507k switches and 6.2 vs 2.2 CPU s: the idle protocol and cancel hooks per wait, ASYNC_PLAN R3 leftovers), fanout_fanin (1.5x / 1.7x, parking churn), pipeline 1.6x and await_chain yield 2x (a task object per resumed frame, remaining C2 cost), spawn run1M 1.7x (`async main` still posts through the global queue).
+- Against the start of the wave every phase improved except select (1115 -> 1237 in the interleaved run); checked separately: select_many in isolation, 5 interleaved runs per commit, select/merge medians 0d93b0e 1131/840, b4ad300 (R5) 1108/842, ef15437 1111/849, 14ab1da (frame cache) 1143/848, HEAD 1124/835. No regression: the 1237 is interleaving noise (it follows a .NET run), the true value is ~1120, equal to the start of wave.
+- .NET: ahead of Go on nothing but park1M; 5-15x behind on hand-off chains and burns 13-37 CPU s on pingpong, fanout, mutex and select_many (spinning pool workers).
+- Caveats: one 16-thread machine with a desktop session running (load average 3-4 at start), same-session interleaving but not isolated cores, cancel_tree/timers start values are 4 vCPU, the start column is single-run, ws/http client dominates its own rate (Go client against Zell server 619k vs Go server 664k msg/s; Zell load generator is slower than Go's), the .NET ports are not rendezvous channels (see `RESULTS-dotnet.md`).
+
 ## json_codec on .NET
 
 `benchmarks/json_codec/dotnet/` is the same program on System.Text.Json (typed path through a `[JsonSerializable]` source-generated context, schema-less path through `JsonDocument`/`JsonElement`, net10.0, workstation GC, invariant globalization). `dotnet/run.sh` publishes once (`dotnet publish -c Release -r linux-x64 --self-contained false -o bin`) and runs it with the same `SCALE`, `JSON_DOC_BYTES` and `JSON_DOC_FILE` variables as the others. `benchmarks/json_codec/compare.sh` (`ZELL=... JSON_DOC_FILE=... ./compare.sh`) builds and runs Zell, Go and .NET once each on one document and prints the checksum and phase lines side by side, then states whether the checksum lines are identical. The .NET value-format phase writes sorted keys and shortest-round-trip numbers to match Go's `json.Marshal(any)` byte for byte.
