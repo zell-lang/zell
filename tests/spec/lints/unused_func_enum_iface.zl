@@ -1,0 +1,31 @@
+// test: a lower-case enum method that implements an interface method is used through the interface (no L0007)
+// status: passing
+// no-warning: L0007
+namespace spec.lints.unused_func_enum_iface
+
+import io
+
+interface describer {
+    func describe() string
+}
+
+enum Color {
+    Red
+    Green
+
+    func describe() string {
+        if this == Color.Red {
+            return "red"
+        }
+        return "green"
+    }
+}
+
+func show(d describer) {
+    println(d.describe())
+}
+
+func main() {
+    show(Color.Red)
+    show(Color.Green)
+}

@@ -624,7 +624,7 @@ written by hand), **33** (see 67), **46** (see 78).
     Suggested: a second slot per async method, `(data, args..., ptr res)`
     (the ramp itself), used by `await iface.M()` with the awaiter's frame
     as in `await_linked`; the `Task<T>` slot stays for kept tasks.
-85. ❌ **Lint L0007 ignores enum methods used only through an interface**
+85. ✅ **Fixed (2026-10-25):** cause: enum methods are free functions reached only through vtables, which the reference walk of L0007 does not see (struct methods are not free functions, so the lint skips them); a method of an enum that satisfies an interface and implements one of its methods now counts as used (docs/TOOLING.md, `lints/unused_func_enum_iface`). **Lint L0007 ignores enum methods used only through an interface**
     (found 2026-10-25): a lower-case enum method that implements an
     interface method reports `function f is never used`; struct methods
     are fine.

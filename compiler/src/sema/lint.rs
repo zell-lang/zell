@@ -214,6 +214,18 @@ fn referenced_funcs(p: &Program) -> HashSet<u32> {
             _ => {}
         });
     }
+    // Enum methods are free functions reached through vtables: a method
+    // that implements an interface the enum satisfies counts as used.
+    for en in &p.enums {
+        let has = |n: &str| en.methods.iter().any(|(m, _)| m == n);
+        for it in &p.interfaces {
+            if it.methods.iter().all(|m| has(&m.name) || m.default.is_some()) {
+                for (_, f) in en.methods.iter().filter(|(m, _)| it.methods.iter().any(|im| im.name == *m)) {
+                    out.insert(f.0);
+                }
+            }
+        }
+    }
     out
 }
 
