@@ -31,10 +31,12 @@ async func main() {
         println("any failed:", err.Message())
         return
     }
-    println("winner:", first)
+    // task.Any does not wait for the cancelled loser, so the loser's defer
+    // could print at any time; await it before printing anything.
     var r = try await slow catch err {
+        println("winner:", first)
         println("cancelled:", errors.Is(err, task.ErrCancelled))
         return
     }
-    println("unreachable", r)
+    println("unreachable", first, r)
 }
