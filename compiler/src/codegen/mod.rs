@@ -156,7 +156,11 @@
 //! `zell_coro_next`, which `run_job` resumes; a panic leaves its
 //! `task.Panic` error in `res.task` (`zell_coro_unwound_linked`, read back
 //! by `zell_coro_link_panic`). Frames come from
-//! `zell_coro_frame_alloc` and go back with `zell_coro_frame_free`.
+//! `zell_coro_frame_alloc_uninit` (not zeroed: the slots the destroy path
+//! reads are stored and escaped at entry; [`coro_frame_fixup`] switches a
+//! frame whose destroy function loads LLVM's suspend index to the zeroing
+//! `zell_coro_frame_alloc` after optimisation) and go back with
+//! `zell_coro_frame_free`.
 //! Callers awaiting a direct call outside a coroutine read `res.value` when
 //! `res.task` is NULL; callers keeping the task, and thunks of async
 //! functions used as values, pass a NULL awaiter and materialise a done
@@ -274,6 +278,7 @@ mod cycles;
 mod debug;
 mod debug_agent;
 pub use debug::dedup_declares;
+pub use async_::coro_frame_fixup;
 mod expr;
 mod funcs;
 mod iface;

@@ -160,7 +160,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_conditional_branch(unsafe { IntValue::new(need) }, alloc, begin).unwrap();
         self.b.position_at_end(alloc);
         let sz = self.intrinsic("llvm.coro.size.i64", &mut []);
-        let mem = self.call_rt_v("zell_coro_frame_alloc", &[unsafe { IntValue::new(sz) }.into()]).into_pointer_value();
+        let mem = self.call_rt_v("zell_coro_frame_alloc_uninit", &[unsafe { IntValue::new(sz) }.into()]).into_pointer_value();
         self.b.build_unconditional_branch(begin).unwrap();
         self.b.position_at_end(begin);
         // Zeroing stores emitted later by `entry_alloca` follow this code.
@@ -442,7 +442,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// the unwind path then reads their current values from the frame.
     pub(crate) fn coro_escape_state(&mut self, open: &[(PointerValue<'ctx>, *const hir::Expr)], full: bool) {
         let co = self.fs().coro.unwrap();
-        let mut ptrs: Vec<PointerValue<'ctx>> = vec![co.awaiting];
+        // The task slot too: a frame destroyed before its first suspension
+        // must read the NULL stored at entry, not a spill only a suspend
+        // point writes.
+        let mut ptrs: Vec<PointerValue<'ctx>> = vec![co.awaiting, co.task_slot];
         if full {
             ptrs.extend(open.iter().map(|(a, _)| *a));
             if let Some((arr, n)) = self.fs().defers {
@@ -840,6 +843,99 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let e = self.trace_caught(e, None, true);
             let v = self.b.build_insert_value(v, e, 1, "").unwrap();
             self.b.build_store(slot, v).unwrap();
+        }
+    }
+}
+
+/// Name of an LLVM value (empty when it has none).
+fn value_name(v: LLVMValueRef) -> String {
+    let mut len = 0usize;
+    let p = unsafe { llc::LLVMGetValueName2(v, &mut len) };
+    if p.is_null() {
+        return String::new();
+    }
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(p as *const u8, len) }).into_owned()
+}
+
+/// The users of `v`.
+fn users(v: LLVMValueRef) -> Vec<LLVMValueRef> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut u = llc::LLVMGetFirstUse(v);
+        while !u.is_null() {
+            out.push(llc::LLVMGetUser(u));
+            u = llc::LLVMGetNextUse(u);
+        }
+    }
+    out
+}
+
+/// The destroy function a ramp stores into the frame `mem` (the second
+/// header word, `store ptr @f.destroy, gep(mem, 0, 1)`), if it can be
+/// found among the uses of the allocation.
+fn frame_destroy_fn(mem: LLVMValueRef) -> Option<LLVMValueRef> {
+    let mut ptrs = vec![mem];
+    ptrs.extend(users(mem).into_iter().filter(|u| unsafe { !llc::LLVMIsAGetElementPtrInst(*u).is_null() }));
+    for p in ptrs {
+        for u in users(p) {
+            unsafe {
+                if llc::LLVMIsAStoreInst(u).is_null() || llc::LLVMGetOperand(u, 1) != p {
+                    continue;
+                }
+                let v = llc::LLVMGetOperand(u, 0);
+                if !llc::LLVMIsAFunction(v).is_null() && value_name(v).ends_with(".destroy") {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether destroy function `f` reads the suspend index LLVM keeps in the
+/// frame (`%index = load iN, ptr %index.addr`, CoroSplit's names): it then
+/// dispatches on a field that only a suspension writes, so a frame destroyed
+/// before its first suspension (a panic in the synchronous part) must come
+/// zeroed (index 0) for that dispatch to be defined.
+fn destroy_reads_index(f: LLVMValueRef) -> bool {
+    unsafe {
+        let mut bb = llc::LLVMGetFirstBasicBlock(f);
+        while !bb.is_null() {
+            let mut i = llc::LLVMGetFirstInstruction(bb);
+            while !i.is_null() {
+                if !llc::LLVMIsALoadInst(i).is_null() && (value_name(i).starts_with("index") || value_name(llc::LLVMGetOperand(i, 0)).starts_with("index.addr")) {
+                    return true;
+                }
+                i = llc::LLVMGetNextInstruction(i);
+            }
+            bb = llc::LLVMGetNextBasicBlock(bb);
+        }
+    }
+    false
+}
+
+/// After optimisation (coroutines split): every frame comes from
+/// `zell_coro_frame_alloc_uninit` (ABI.md 10.3: the lowering stores every
+/// slot the destroy path reads before it can run), except where the
+/// destroy function dispatches on LLVM's suspend index (unoptimised code,
+/// or suspend points whose destroy edges reload different spills) or the
+/// destroy function cannot be identified: those calls switch to the
+/// zeroing `zell_coro_frame_alloc`.
+pub fn coro_frame_fixup(module: &inkwell::module::Module) {
+    let Some(raw) = module.get_function("zell_coro_frame_alloc_uninit") else { return };
+    let calls: Vec<LLVMValueRef> = users(raw.as_value_ref()).into_iter().filter(|u| unsafe { !llc::LLVMIsACallInst(*u).is_null() && llc::LLVMGetCalledValue(*u) == raw.as_value_ref() }).collect();
+    let mut zeroed: Option<LLVMValueRef> = None;
+    for call in calls {
+        if frame_destroy_fn(call).is_some_and(|d| !destroy_reads_index(d)) {
+            continue;
+        }
+        let z = *zeroed.get_or_insert_with(|| match module.get_function("zell_coro_frame_alloc") {
+            Some(f) => f.as_value_ref(),
+            None => unsafe { llc::LLVMAddFunction(module.as_mut_ptr(), c"zell_coro_frame_alloc".as_ptr(), llc::LLVMGlobalGetValueType(raw.as_value_ref())) },
+        });
+        unsafe {
+            let n = llc::LLVMGetNumOperands(call);
+            llc::LLVMSetOperand(call, (n - 1) as u32, z);
         }
     }
 }

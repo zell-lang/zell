@@ -37,6 +37,10 @@
 ; with zell_task_await_main) and one that does not (leaf(7) = 8, read
 ; from res.value).
 ;
+;
+; `work` allocates its frame the way the compiler does (not zeroed); the
+; other functions use the zeroing zell_coro_frame_alloc.
+;
 ; Protocol: `void @f(params, ptr %res)` with %res -> { ptr task; T value }.
 ; The ramp stores the coroutine's Task<T> (+1) into res.task when the body
 ; suspends for the first time, or NULL plus the result (+1) into res.value
@@ -62,6 +66,7 @@ declare ptr  @zell_task_await_main(ptr)
 declare ptr  @zell_task_delay(i64)
 declare void @zell_coro_resume(ptr)
 declare ptr  @zell_coro_frame_alloc(i64)
+declare ptr  @zell_coro_frame_alloc_uninit(i64)
 declare void @zell_coro_frame_free(ptr)
 declare void @zell_retain(ptr)
 declare void @zell_release(ptr)
@@ -85,16 +90,19 @@ define void @work(i64 %x, ptr %res) presplitcoroutine {
 entry:
   %ret.slot = alloca i64, align 8
   %task.slot = alloca ptr, align 8      ; the coroutine's task: NULL until its first suspension
-  %ctx.slot = alloca ptr, align 8       ; the caller's context, +1 (zell_task_get_ctx)
+  %ctx.slot = alloca ptr, align 8       ; the caller's context, +1
   %mark.slot = alloca i64, align 8     ; zell_coro_enter's hook mark
-  ; 1. frame on the zell heap, unless LLVM proves the coroutine never suspends
+  ; 1. frame on the zell heap, unless LLVM proves the coroutine never suspends.
+  ;    Not zeroed: every slot the destroy path reads is stored below first
+  ;    (the compiler keeps the zeroing zell_coro_frame_alloc only where the
+  ;    destroy function dispatches on LLVM's suspend index, ABI.md 10.3)
   %id   = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
   %need = call i1 @llvm.coro.alloc(token %id)
   br i1 %need, label %alloc, label %begin
 
 alloc:
   %size = call i64 @llvm.coro.size.i64()
-  %mem  = call ptr @zell_coro_frame_alloc(i64 %size)
+  %mem  = call ptr @zell_coro_frame_alloc_uninit(i64 %size)
   br label %begin
 
 begin:

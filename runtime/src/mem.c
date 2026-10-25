@@ -137,13 +137,39 @@ void *zell_realloc(void *p, int64_t size) {
 
 void zell_free(void *p) { free(p); }
 
-/* Coroutine frames (ABI.md 10.3): zeroed memory from the object heap's
- * size classes (frames are made and freed on every async call, often on
- * different threads), or calloc when the heap is off. */
+/* Coroutine frames (ABI.md 10.3): memory from the object heap's size
+ * classes (frames are made and freed on every async call, often on
+ * different threads), or calloc when the heap is off. The compiler
+ * allocates with zell_coro_frame_alloc_uninit (no memset: the lowering
+ * stores every slot the destroy path can read before it can run) and keeps
+ * the zeroing zell_coro_frame_alloc for a coroutine whose destroy function
+ * reads LLVM's suspend index. ZELL_FRAME_POISON=1 fills uninitialised
+ * frames with 0xA5, to catch a read of a slot nobody wrote. */
 void *zell_coro_frame_alloc(int64_t size) {
     if (size < 16) size = 16;
     void *p = zell__heap_alloc(size, 1);
     return p ? p : zell_alloc(size);
+}
+
+static int g_frame_poison = -1;   /* -1: ZELL_FRAME_POISON not read yet */
+
+static __attribute__((noinline)) int frame_poison_init(void) {
+    const char *e = getenv("ZELL_FRAME_POISON");
+    int on = e && *e && *e != '0';
+    __atomic_store_n(&g_frame_poison, on, __ATOMIC_RELAXED);
+    return on;
+}
+
+void *zell_coro_frame_alloc_uninit(int64_t size) {
+    if (size < 16) size = 16;
+    void *p = zell__heap_alloc(size, 0);
+    if (__builtin_expect(!p, 0)) {
+        p = malloc((size_t)size);
+        if (!p) zell__panicf("out of memory (requested %lld bytes)", (long long)size);
+    }
+    int poison = __atomic_load_n(&g_frame_poison, __ATOMIC_RELAXED);
+    if (__builtin_expect(poison != 0, 0) && (poison > 0 || frame_poison_init())) memset(p, 0xA5, (size_t)size);
+    return p;
 }
 
 void zell_coro_frame_free(void *p) {

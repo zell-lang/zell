@@ -1457,7 +1457,7 @@ entry:
   mark.slot = alloca i64                           ; the cancel-hook mark
   id    = llvm.coro.id(0, null, null, null)
   need  = llvm.coro.alloc(id)                      ; false when LLVM proved there is no suspend point
-  mem   = need ? zell_coro_frame_alloc(llvm.coro.size.i64()) : null
+  mem   = need ? zell_coro_frame_alloc_uninit(llvm.coro.size.i64()) : null   ; not zeroed (rules below)
   hdl   = llvm.coro.begin(id, mem)
   store null -> task.slot
   store zell_coro_enter(mark.slot) -> ctx.slot     ; +1
@@ -1548,9 +1548,23 @@ Rules the compiler must respect:
 - Use `@zell_coro_resume` as the resume function (or your own trampoline that
   calls `llvm.coro.resume`). Coroutine resumption is always performed by a worker
   thread.
-- Frame memory comes from `zell_coro_frame_alloc(size)` (zeroed, from the object
-  heap's size classes, or `calloc` when the heap is off) and is released with
-  `zell_coro_frame_free(p)` (NULL ok), possibly on another thread. Never mix
+- Frame memory comes from `zell_coro_frame_alloc_uninit(size)` (from the object
+  heap's size classes, or `malloc` when the heap is off; **not zeroed**;
+  `ZELL_FRAME_POISON=1` fills it with 0xA5 to catch a read of a slot nobody
+  wrote) or `zell_coro_frame_alloc(size)` (the same, zeroed), and is released
+  with `zell_coro_frame_free(p)` (NULL ok), possibly on another thread. An
+  uninitialised frame is correct only if the destroy path (8.1: a panic
+  unwinds a frame on the chain, **also one that is running and never
+  suspended**) reads nothing a suspension writes: the compiler stores zero
+  into every local, drop flag, defer flag and counter, the awaited-task slot
+  and the task slot right after `coro.begin` and makes them escape, so the
+  destroy path reads them from memory; the values LLVM spills at a suspend
+  point and its **suspend index** are written only by a suspension. After
+  optimisation the compiler checks every destroy function: one that loads
+  the suspend index (CoroSplit's `%index`, as in unoptimised code or when
+  the destroy edges of the suspend points reload different spills), or a
+  frame whose destroy function it cannot identify, gets the zeroing
+  `zell_coro_frame_alloc` (index 0, NULL spills, as before). Never mix
   them with `zell_alloc` / `zell_free`. The frame
   is not a refcounted object. The task owns the result, and the frame owns its
   locals. Guard the allocation with `llvm.coro.alloc` and the free with the

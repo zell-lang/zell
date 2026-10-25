@@ -725,6 +725,7 @@ fn optimise(module: &Module, machine: &TargetMachine, opt: u8) -> Result<(), Str
     let pipeline = format!("default<O{}>", opt.min(3));
     module.run_passes(&pipeline, machine, PassBuilderOptions::create()).map_err(|e| format!("internal compiler error: optimisation failed: {}", e.to_string()))?;
     codegen::dedup_declares(module);
+    codegen::coro_frame_fixup(module);
     Ok(())
 }
 
