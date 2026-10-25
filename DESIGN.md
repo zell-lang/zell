@@ -253,7 +253,11 @@ var (x, y) = Swap(1, 2)
   переменная, поле): `var g func(string) bool = (s) => s != ""`,
   `slices.Map(xs, (x) => x * 2)` (в вызове generic-функции — после вывода
   параметров типа из остальных аргументов), `ctx.Users.Where((u) => u.Age >
-  18)`. Блочная лямбда без типа результата берёт его из ожидаемого типа
+  18)`. Единственный нетипизированный параметр можно писать без скобок:
+  `u => u.Age > 18`, `s => s != ""`, `async u => ...`, `u => { ... }` (то же,
+  что `(u) => ...`; `=>` не имеет другого смысла, неоднозначности нет; перенос
+  строки после `=>` допустим). Несколько параметров — только в скобках.
+  Блочная лямбда без типа результата берёт его из ожидаемого типа
   (`ctx.Transaction(async () => { ...; await ctx.SaveChanges()? })` —
   `void!`). Без ожидаемого типа — ошибка `cannot infer the type of lambda
   parameter u`.
@@ -3034,8 +3038,9 @@ range       = [ expr ] ".." [ expr ] ;
 primary     = literal | ident | path [ typeargs ] "{" [ fields ] "}" | "new" primary
             | "(" expr ")" | "(" exprs ")" | lambda ;
 lambda      = [ "async" ] "func" "(" [ params ] ")" [ type ] block
-            | [ "async" ] "(" [ params | idents ] ")" "=>" ( block | expr ) ;
-                                              (* untyped "(u) =>": types from the expected func type *)
+            | [ "async" ] "(" [ params | idents ] ")" "=>" ( block | expr )
+            | [ "async" ] ident "=>" ( block | expr ) ;
+                                              (* untyped "(u) =>" and "u =>": types from the expected func type *)
 ```
 
 ## Этапы реализации

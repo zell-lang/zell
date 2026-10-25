@@ -7,6 +7,8 @@ async func main() {
         await work()
     }
     var squares = mapAll(xs, (x int) int => x * x)
+    var keep = filter(xs, u => u.Age > 18)
+    var each = run(xs, async v => { await work(v) })
     defer func() { cleanup() }()
     try {
         risky()?

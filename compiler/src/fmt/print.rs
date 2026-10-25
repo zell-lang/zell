@@ -1175,6 +1175,16 @@ impl<'a> Fmt<'a> {
         if func_style {
             parts.push(text("func"));
         }
+        if !func_style && !rest.starts_with('(') && params.len() == 1 {
+            // `u => body`: the bare single-parameter form stays bare.
+            parts.push(text(&params[0].name.name));
+            parts.push(text(" => "));
+            parts.push(match body {
+                LambdaBody::Block(b) => self.block(b),
+                LambdaBody::Expr(x) => self.expr(x),
+            });
+            return concat(parts);
+        }
         let open = self.tok_after(span.start, &TokenKind::LParen).unwrap_or(span.start);
         parts.push(self.params(params, open));
         if let Some(r) = ret {

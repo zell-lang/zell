@@ -1,0 +1,28 @@
+// test: data queries accept a bare single-parameter lambda: Where(u => u.Age > 18), also async u => ... for the transaction-free form
+// status: passing
+namespace spec.data.bare_lambda
+
+import io
+
+struct User {
+    Id   int
+    Name string
+    Age  int
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    await ctx.EnsureCreated()?
+    ctx.Users.Add(new User{Name: "ann", Age: 30})
+    ctx.Users.Add(new User{Name: "bob", Age: 12})
+    _ = await ctx.SaveChanges()?
+    var adults = await ctx.Users.Where(u => u.Age > 18).ToList()?
+    for u in adults {
+        println(u.Name)
+    }
+}

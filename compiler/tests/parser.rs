@@ -917,6 +917,22 @@ fn lambdas_and_parens() {
     assert_eq!(show(&expr("func() {}")), "lambda/0");
     // untyped parameters (typed from the expected function type by sema)
     assert_eq!(show(&expr("where((u) => u.Age > 18)")), "where(lambda/1)");
+    // a single untyped parameter without parentheses
+    assert_eq!(show(&expr("where(u => u.Age > 18)")), "where(lambda/1)");
+    match expr("u => u.Age").kind {
+        ExprKind::Lambda { params, is_async: false, body, .. } => {
+            assert_eq!(params[0].name.name, "u");
+            assert!(matches!(params[0].ty.kind, TypeKind::Infer));
+            assert!(matches!(*body, LambdaBody::Expr(_)));
+        }
+        k => panic!("not a lambda: {k:?}"),
+    }
+    assert!(matches!(expr("u => { return u }").kind, ExprKind::Lambda { ref body, .. } if matches!(**body, LambdaBody::Block(_))));
+    assert!(matches!(expr("async u => u").kind, ExprKind::Lambda { is_async: true, .. }));
+    assert!(matches!(expr("_ => 1").kind, ExprKind::Lambda { .. }));
+    // `u =>` at the end of a line continues; so does a nested bare lambda
+    assert_eq!(show(&expr("f(u =>\n u.Age, v => v)")), "f(lambda/1, lambda/1)");
+    assert_eq!(show(&expr("x => y => x")), "lambda/1");
     match expr("(a, b) => a + b").kind {
         ExprKind::Lambda { params, .. } => {
             assert_eq!(params.len(), 2);

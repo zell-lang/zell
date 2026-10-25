@@ -206,7 +206,8 @@ else_value ::= CONTINUE | BREAK | return_stmt | expr
 // `async` lambdas return Task<T> when called.
 lambda_expr ::= ASYNC? FUNC LPAREN param_list? RPAREN type? block
               | ASYNC? LPAREN (param_list | lambda_names)? RPAREN ARROW (block | expr)
-// `(u) => ...`: parameter types from the expected function type (sema)
+              | ASYNC? IDENTIFIER ARROW (block | expr)
+// `(u) => ...` and the bare `u => ...`: parameter types from the expected function type (sema)
 lambda_names ::= IDENTIFIER (COMMA IDENTIFIER)*
 
 or_expr ::= and_expr (OROR and_expr)*

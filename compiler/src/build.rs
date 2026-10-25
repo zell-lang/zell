@@ -257,7 +257,7 @@ fn find_clang() -> Result<String, String> {
 /// ([`lto_runtime`]) when there is one. Off by default: it needs the
 /// system clang and lld, and the link takes several seconds.
 fn lto_enabled(opts: &BuildOptions) -> bool {
-    opts.release && !cfg!(target_os = "windows") && std::env::var("ZELL_LTO").is_ok_and(|v| v == "1")
+    !tsan_enabled() && opts.release && !cfg!(target_os = "windows") && std::env::var("ZELL_LTO").is_ok_and(|v| v == "1")
 }
 
 /// The bitcode runtime archive beside the native one `rt`
@@ -704,6 +704,28 @@ fn lower<'ctx>(program: &Program, ctx: &'ctx Context, name: &str, output: &Path,
     Ok(module)
 }
 
+/// `ZELL_SANITIZE=thread`: the program is instrumented by LLVM's
+/// ThreadSanitizer pass (every defined function gets `sanitize_thread`, so
+/// its plain accesses and atomics, e.g. the inline RC and mutex CAS of
+/// codegen, become `__tsan_*` calls) and linked with `-fsanitize=thread`.
+/// Link it with a runtime built by `make -C runtime tsan-lib`
+/// (`ZELL_RUNTIME=runtime/build/tsan`); `scripts/tsan-run.sh` does both.
+pub fn tsan_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ZELL_SANITIZE").is_ok_and(|v| v == "thread"))
+}
+
+/// Instruments `module` for ThreadSanitizer ([`tsan_enabled`]).
+fn instrument_tsan(module: &Module, machine: &TargetMachine) -> Result<(), String> {
+    let attr = module.get_context().create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id("sanitize_thread"), 0);
+    for f in module.get_functions() {
+        if f.count_basic_blocks() > 0 {
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        }
+    }
+    module.run_passes("tsan-module,function(tsan)", machine, PassBuilderOptions::create()).map_err(|e| format!("internal compiler error: tsan instrumentation failed: {}", e.to_string()))
+}
+
 /// Every defined function keeps its frame pointer (`"frame-pointer"="all"`,
 /// like the runtime's `-fno-omit-frame-pointer`): the diag CPU profiler
 /// walks stacks through them (docs/FRAMEWORK.md section 5).
@@ -727,6 +749,9 @@ fn optimise(module: &Module, machine: &TargetMachine, opt: u8) -> Result<(), Str
     codegen::dedup_declares(module);
     codegen::coro_frame_fixup(module);
     codegen::lower_unwind(module);
+    if tsan_enabled() {
+        instrument_tsan(module, machine)?;
+    }
     // `ZELL_VERIFY_UNWIND=1`: verify the module after the lowering of the
     // landing pads (codegen/unwind_lower.rs; the compiler's own tests set it).
     if std::env::var_os("ZELL_VERIFY_UNWIND").is_some() {
@@ -842,6 +867,9 @@ fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str],
         cmd.arg(format!("-l{l}"));
     }
     cmd.arg("-lpthread").arg("-lm").arg("-o").arg(output);
+    if tsan_enabled() {
+        cmd.arg("-fsanitize=thread");
+    }
     if lto {
         // ThinLTO over the program's bitcode and the bitcode runtime
         // (`lto_enabled`); lld runs the LTO backend itself.
@@ -908,7 +936,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
         let mut h = Sha256::new();
         h.update(compiler.as_bytes());
         h.update(format!("\0opt={}\0release={}\0leak={}\0trace={}\0debug={}\0triple={}\0inline_rc={}\0open_defer={}\0lines=2\0", opts.opt, opts.release, opts.leak_check, !opts.no_error_trace, opts.emits_debug_info(), machine.get_triple(), std::env::var_os("ZELL_NO_INLINE_RC").is_none(), std::env::var_os("ZELL_NO_OPEN_DEFER").is_none()).as_bytes());
-        h.update(format!("agent={}\0", opts.debug_agent_on()).as_bytes());
+        h.update(format!("agent={}\0tsan={}\0", opts.debug_agent_on(), tsan_enabled()).as_bytes());
         h.update(part.print_to_string().to_bytes());
         let key = lock::hex(&h.finalize()[..8]);
         let obj = cache.join(format!("{name}-{key}.o"));

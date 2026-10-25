@@ -15,7 +15,8 @@
 //!   `[]User!` is `([]User)!` and `*T!` is `(*T)!`. In `func(..) T!` the `!`
 //!   belongs to the return type.
 //! - **Lambdas**: `(` starts a short lambda when its matching `)` is followed
-//!   by `=>`, or when it begins with `name type`.
+//!   by `=>`, or when it begins with `name type`. `name =>` is a lambda with
+//!   one untyped parameter (`=>` has no other meaning).
 //! - **Patterns**: `case T x:` is detected by speculatively parsing a type
 //!   followed by a name and `:`/`,`; everything else is an expression, or a
 //!   range `a..b`.
@@ -1648,6 +1649,7 @@ impl Parser<'_> {
                 self.bump();
                 ExprKind::This
             }
+            TokenKind::Ident(_) | TokenKind::Underscore if self.peek_n(1) == &TokenKind::Arrow => return self.bare_lambda(),
             TokenKind::Ident(_) | TokenKind::Underscore => ExprKind::Ident(self.binding()?),
             TokenKind::LParen => return self.paren_or_lambda(),
             TokenKind::LBracket => {
@@ -1670,12 +1672,15 @@ impl Parser<'_> {
                 let body = Box::new(LambdaBody::Block(self.block()?));
                 ExprKind::Lambda { params, ret, body, is_async: false }
             }
-            TokenKind::Async if matches!(self.peek_n(1), TokenKind::Func | TokenKind::LParen) => {
+            TokenKind::Async
+                if matches!(self.peek_n(1), TokenKind::Func | TokenKind::LParen)
+                    || (matches!(self.peek_n(1), TokenKind::Ident(_) | TokenKind::Underscore) && self.peek_n(2) == &TokenKind::Arrow) =>
+            {
                 self.bump();
                 let mut e = self.primary()?;
                 match &mut e.kind {
                     ExprKind::Lambda { is_async, .. } => *is_async = true,
-                    _ => return Err(self.error_at(start, "async must be followed by a lambda (async func(..) { } or async (..) => e)")),
+                    _ => return Err(self.error_at(start, "async must be followed by a lambda (async func(..) { }, async (..) => e or async x => e)")),
                 }
                 e.kind
             }
@@ -1742,6 +1747,17 @@ impl Parser<'_> {
         })?;
         self.expect(&TokenKind::RBrace)?;
         Ok(ExprKind::MapLit { key_ty: Box::new(key_ty), val_ty: Box::new(val_ty), entries })
+    }
+
+    /// `x => body`: a short lambda with one untyped parameter, no parentheses.
+    fn bare_lambda(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let name = self.binding()?;
+        let ty = TypeExpr { kind: TypeKind::Infer, span: name.span };
+        let params = vec![Param { span: name.span, attrs: Vec::new(), name, ty }];
+        self.expect(&TokenKind::Arrow)?;
+        let body = if self.at(&TokenKind::LBrace) { LambdaBody::Block(self.block()?) } else { LambdaBody::Expr(self.parse_expr()?) };
+        Ok(Expr { kind: ExprKind::Lambda { params, ret: None, body: Box::new(body), is_async: false }, span: self.span_from(start) })
     }
 
     /// `(e)`, `(a, b)` or a short lambda `(x int) => body`.

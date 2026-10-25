@@ -1,0 +1,8 @@
+// error: cannot infer the type of lambda parameter u
+// status: passing
+namespace spec.closures.err_bare_lambda_infer
+
+func main() {
+    var f = u => u + 1
+    _ = f
+}
