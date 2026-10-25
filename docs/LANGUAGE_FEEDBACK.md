@@ -291,7 +291,7 @@ the next `Send`; arenas crash in `zell_retain` past ~12 000 objects).
     dead when the taken branch terminates.
 54. ❌ **`Diagnostic::related` is not forwarded to LSP `relatedInformation`**
     (added for `reflect.Error` "instantiated here" notes, item 34).
-55. ❌ **Unused-import tracking has one flag per import**: `import crypto`
+55. ✅ **Fixed (2026-10-25):** verified, no bug: a qualified head marks the glob import of its namespace used (fix of 48), and the child namespace `hash` reached through `import crypto` is such a glob member; spec test `namespaces/parent_import_used_by_child` (`import crypto` + `hash.Md5Hex`, no "unused import"). **Unused-import tracking has one flag per import**: `import crypto`
     used only through a child namespace (`hash.X`) and similar parent-import
     cases may still be reported as unused; not verified, worth a spec test.
 56. ❌ **`task.WithTimeout(ms, f)` is easy to misread as a delayed start**:

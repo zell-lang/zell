@@ -1,0 +1,11 @@
+// test: an import of a parent namespace used only through a child namespace (`import crypto` + `hash.X`) counts as used, no "unused import" (DESIGN.md «Правила импорта»)
+// status: passing
+// no-stderr: unused import
+namespace spec.namespaces.parent_import_used_by_child
+
+import crypto
+import io
+
+func main() {
+    println(hash.Md5Hex(""))
+}
