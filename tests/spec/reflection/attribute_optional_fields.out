@@ -1,0 +1,5 @@
+Age: min=1 max=0 pattern="" optional=false ratio=0 tags=0 unit=""/0 message=invalid
+Name: min=0 max=0 pattern="^[a-z]+$" optional=true ratio=0 tags=0 unit="chars"/1 message=invalid
+forms ""
+Age 1 0 "" false 0
+Name 0 0 "^[a-z]+$" true 1

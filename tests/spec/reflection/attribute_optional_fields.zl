@@ -1,0 +1,58 @@
+// test: an omitted attribute argument takes the field's default if one is declared, else the zero value of its type (also for a nested attribute value); a @required field is given, both at compile time (Fields<T>) and at run time (TypeOf<T>().Fields)
+// status: passing
+namespace spec.reflection.attribute_optional_fields
+
+import io
+
+@attribute(targets: [reflect.Target.Field])
+struct unit {
+    name string
+    scale int = 1
+}
+
+@attribute(targets: [reflect.Target.Field])
+struct rule {
+    min      int
+    max      int
+    pattern  string
+    optional bool
+    ratio    float
+    tags     []string
+    unit     unit
+    message  string = "invalid"
+}
+
+// A @required field must be given; the others stay optional.
+@attribute(targets: [reflect.Target.Struct])
+struct entity {
+    @required table string
+    schema string
+}
+
+@entity(table: "forms")
+struct Form {
+    @rule(min: 1) Age int
+    @rule(pattern: "^[a-z]+$", optional: true, unit: unit{name: "chars"}) Name string
+}
+
+func Rules<T>(v T) string {
+    var out = ""
+    for f in reflect.Fields<T>() {
+        var r = f.Attribute<rule>()
+        if r != nil {
+            out = out + fmt.Format("{0}: min={1} max={2} pattern={3} optional={4} ratio={5} tags={6} unit={7}/{8} message={9}\n",
+                f.Name, r.min, r.max, strconv.Quote(r.pattern), r.optional, r.ratio, len(r.tags), strconv.Quote(r.unit.name), r.unit.scale, r.message)
+        }
+    }
+    return out
+}
+
+func main() {
+    print(Rules(Form{}))
+    var e = reflect.TypeOf<Form>().Attribute<entity>()
+    println(e.table, strconv.Quote(e.schema))
+    for f in reflect.TypeOf<Form>().Fields {
+        var r = f.Attribute<rule>()
+        println(f.Name, r.min, r.max, strconv.Quote(r.pattern), r.optional, r.unit.scale)
+    }
+}

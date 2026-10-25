@@ -1,0 +1,11 @@
+// error: @required can only be applied to a field of an @attribute struct (the argument must then be given)
+// status: passing
+namespace spec.reflection.attribute_required_misplaced
+
+struct Plain {
+    @required Name string
+}
+
+func main() {
+    _ = Plain{Name: "x"}
+}

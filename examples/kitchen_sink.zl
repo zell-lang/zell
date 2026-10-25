@@ -27,11 +27,11 @@ type Inventory = map[Sku]int
 
 @attribute(targets: [reflect.Target.Field])
 struct rule {
-    required bool = false
-    min      int = 0
-    max      int = 0
-    enum     string = ""
-    default  string = ""
+    required bool
+    min      int
+    max      int
+    enum     string
+    default  string
 }
 
 @attribute(targets: [reflect.Target.Struct])

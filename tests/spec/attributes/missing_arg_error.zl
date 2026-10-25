@@ -1,4 +1,4 @@
-// error: missing argument max
+// error: missing argument max for attribute @limit (the field is @required)
 // status: passing
 namespace spec.attributes.missing_arg_error
 
@@ -7,7 +7,7 @@ import io
 @attribute
 struct limit {
     min int
-    max int
+    @required max int
 }
 
 @limit(min: 1)

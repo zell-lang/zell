@@ -23,9 +23,11 @@ struct Range {
 }
 
 // A human-readable name for messages; the field name is used without it.
+// An omitted parameter takes its default or zero value; @required makes
+// this one mandatory, so a bare @Label does not compile.
 @attribute(targets: [reflect.Target.Field])
 struct Label {
-    Text string
+    @required Text string
 }
 
 // The value must look like an e-mail address.

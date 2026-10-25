@@ -6,8 +6,8 @@ import io
 
 @attribute(targets: [reflect.Target.Field])
 struct init {
-    text string = ""
-    number int = 0
+    text string
+    number int
 }
 
 struct Config {

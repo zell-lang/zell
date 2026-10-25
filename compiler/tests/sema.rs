@@ -528,7 +528,7 @@ fn attributes_are_resolved_and_evaluated() {
     err(&prog("@nope\nstruct S {}\nfunc main() {}"), "unknown attribute @nope");
     err(&prog("@attribute(targets: [Target.Field])\nstruct r { min int }\n@r(1)\nstruct S {}\nfunc main() {}"), "cannot be applied to a struct");
     err(&prog("@attribute\nstruct r { min int }\nstruct S { @r(\"x\") A int }\nfunc main() {}"), "attribute argument has type string, want int");
-    err(&prog("@attribute\nstruct r { min int }\nstruct S { @r() A int }\nfunc main() {}"), "missing argument min");
+    err(&prog("@attribute\nstruct r {\n    @required min int\n}\nstruct S { @r() A int }\nfunc main() {}"), "missing argument min");
     err(&prog("@attribute\nstruct r { min int }\nstruct S { @r(1) @r(2) A int }\nfunc main() {}"), "not repeatable");
 }
 

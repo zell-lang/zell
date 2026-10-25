@@ -467,7 +467,7 @@ written by hand), **33** (see 67), **46** (see 78).
     "expected 1, got 2". **Decision:** add `TrimSpace(s)` and make
     `Trim(s, cutset)` take a cutset as in Go. If that breaks too much,
     keep `Trim(s)` and add `TrimSpace` plus `TrimChars(s, cutset)`.
-66. ❌ **spec gap:** **every attribute field without a default is a
+66. ✅ **Fixed (2026-10-25):** as decided: an omitted argument takes the field's default, else the zero value (`Sema::user_args`, `zero_const`); the builtin `@required` on an attribute field makes it mandatory (DESIGN.md «Свои атрибуты»). Spec: `reflection/attribute_optional_fields`, `attribute_required_missing`, `attribute_required_misplaced`; the `= 0`/`= ""`/`= false` workarounds are gone from `examples/kitchen_sink.zl`. **spec gap:** **every attribute field without a default is a
     required argument**: `@rule(min: 1)` on a 5-field attribute gives four
     "missing argument" errors. DESIGN.md «Атрибуты» only says that applied
     attributes use "the arguments and the field defaults". Workaround: `= 0`

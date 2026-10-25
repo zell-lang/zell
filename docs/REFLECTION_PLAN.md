@@ -1,6 +1,6 @@
 # Reflection: what is compile-time today, what is planned
 
-Status as of 2026-10-24. Spec: DESIGN.md "Рефлексия";
+Status as of 2026-10-25. Spec: DESIGN.md "Рефлексия";
 the framework motivation is docs/FRAMEWORK.md "План: тонкое ядро,
 фреймворк в пакетах".
 
@@ -82,6 +82,34 @@ generic helpers (`reflect.Error`). Not yet: unrolling `for t in
 TypesWith<A>()` at compile time (so binding would be typed, no boxing) and
 using `p.Type` as a type argument (`json.Parse<p.Type>`), DI by
 constructor parameters of structs (fields can be used: `Fields`).
+
+### Done 2026-10-25: compile-time conditions (finishing run 1)
+
+LANGUAGE_FEEDBACK 33, 53, 66, 67; spec in DESIGN.md "Статическая
+рефлексия" ("Константы развёрнутого цикла", "Статический `switch`",
+"Запись поля") and "Свои атрибуты"; code in `compiler/src/sema/reflect_ct.rs`.
+
+- Reachability: after a static `if`/`switch` whose taken branch
+  terminates, the rest of the block is dead for that instantiation and is
+  not checked (in the abstract check it is checked muted); unused
+  variables of generic bodies come from the abstract check only.
+- Constants per field: `f.Name/Index/Exported/Embedded`,
+  `f.Attribute<A>()` (`!= nil`, `== nil`, its fields), `f.Type` in type
+  tests (`f.Type.Kind == ...`, `.Elem`/`.Key`, `f.Type == TypeOf<U>()`),
+  `f.Type.Name/FullName/Kind` as values, locals bound to them and never
+  assigned; `!`, `==`/`!=`/`<`... of constants and a deciding constant left
+  side of `&&`/`||` (the right side is then not checked). An `if` whose
+  condition folds through any of these (`ReflState::folds`) is static.
+- Static `switch`: a type switch over a value of known type in a generic
+  body keeps the matching case; a switch over a reflection constant keeps
+  the equal case.
+- `f.Set(p *T, v)`: a direct store with the field's static type.
+- Attributes: an omitted argument is the default or the zero value;
+  builtin `@required` makes a field mandatory.
+- Proof: `compiler/tests/reflection.rs`
+  `field_conditions_fold_without_run_time_lookups` (the instance reads no
+  `FieldInfo`/`TypeInfo` and makes no attribute lookup);
+  `docs/examples/validate` rejects misplaced rules at compile time.
 
 ### Remaining steps
 

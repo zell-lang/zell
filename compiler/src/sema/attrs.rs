@@ -58,6 +58,9 @@ impl<'a> Sema<'a> {
                 (Some(d), Some(ty)) => self.attr_value(d, ty),
                 _ => None,
             };
+            if !self.structs[sid].is_attribute && attrs.iter().any(|a| a.kind == AttrKind::Builtin("required".into())) {
+                self.err("@required can only be applied to a field of an @attribute struct (the argument must then be given)", f.name.span);
+            }
             if let Some(field) = self.structs[sid].fields.iter_mut().find(|x| x.name == f.name.name) {
                 field.attrs = attrs;
                 field.default = default;
@@ -195,6 +198,9 @@ impl<'a> Sema<'a> {
                 if n == "attribute" && target != "Struct" {
                     self.err("@attribute can only be applied to a struct", a.span);
                 }
+                if n == "required" && target != "Field" {
+                    self.err("@required can only be applied to a field of an @attribute struct (the argument must then be given)", a.span);
+                }
                 if (n == "allowCycle" || n == "acyclic") && target != "Struct" && target != "Enum" {
                     self.err(format!("@{n} can only be applied to a struct or an enum"), a.span);
                 }
@@ -293,13 +299,49 @@ impl<'a> Sema<'a> {
                         out.push((fname.clone(), v));
                     }
                 }
+                // Omitted: the field's default, else its zero value (filled
+                // in by code generation and `attr_const_field`), unless the
+                // field is `@required`.
                 None => match default {
                     Some(d) => out.push((fname.clone(), d.clone())),
-                    None => self.err(format!("missing argument {fname} for attribute @{}", a.path.to_string()), a.span),
+                    None if self.attr_field_required(s, i) => {
+                        self.err(format!("missing argument {fname} for attribute @{} (the field is @required)", a.path.to_string()), a.span)
+                    }
+                    None => {}
                 },
             }
         }
         out
+    }
+
+    /// True if field `i` of attribute struct `sid` is marked `@required`
+    /// (the builtin, or a `required` attribute struct in scope such as
+    /// `data.required`: the marker is the name).
+    fn attr_field_required(&self, sid: u32, i: usize) -> bool {
+        self.structs[sid as usize].fields.get(i).is_some_and(|f| {
+            f.attrs.iter().any(|a| match &a.kind {
+                AttrKind::Builtin(n) => n == "required",
+                AttrKind::User(s) => self.structs[*s as usize].name == "required",
+            })
+        })
+    }
+
+    /// The zero value of an attribute parameter type, as a constant.
+    fn zero_const(&self, ty: TypeId) -> Option<ConstValue> {
+        Some(match self.tt.get(ty).clone() {
+            Type::String => ConstValue::Str(String::new()),
+            Type::Bool => ConstValue::Bool(false),
+            Type::Int(_) => ConstValue::Int(0),
+            Type::Float64 | Type::Float32 => ConstValue::Float(0.0),
+            Type::Char => ConstValue::Char('\0'),
+            Type::Enum(d) => ConstValue::Enum(d.0, 0),
+            Type::Slice(_) => ConstValue::List(Vec::new()),
+            Type::Struct(d) if self.structs[d.0 as usize].is_attribute => {
+                let fs: Vec<(TypeId, Option<ConstValue>)> = self.structs[d.0 as usize].fields.iter().map(|f| (f.ty, f.default.clone())).collect();
+                ConstValue::List(fs.into_iter().map(|(t, d)| d.or_else(|| self.zero_const(t))).collect::<Option<Vec<_>>>()?)
+            }
+            _ => return None,
+        })
     }
 
     /// An attribute-struct argument written as a literal (`unit{name: "ms"}`):
@@ -326,14 +368,14 @@ impl<'a> Sema<'a> {
         }
         let decl: Vec<(String, TypeId, Option<ConstValue>)> = self.structs[sid as usize].fields.iter().map(|f| (f.name.clone(), f.ty, f.default.clone())).collect();
         let mut out = Vec::new();
-        for (name, fty, default) in decl {
+        for (i, (name, fty, default)) in decl.into_iter().enumerate() {
             let v = match fields.iter().find(|f| f.name.name == name) {
                 Some(f) => self.attr_value(&f.value, fty)?,
-                None => match default {
+                None => match default.or_else(|| if self.attr_field_required(sid, i) { None } else { self.zero_const(fty) }) {
                     Some(d) => d,
                     None => {
                         let n = self.structs[sid as usize].name.clone();
-                        self.err(format!("missing field {name} in attribute value {n}{{...}}"), span);
+                        self.err(format!("missing field {name} in attribute value {n}{{...}} (the field is @required)"), span);
                         return None;
                     }
                 },

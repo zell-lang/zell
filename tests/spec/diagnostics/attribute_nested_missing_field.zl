@@ -1,4 +1,4 @@
-// error: missing field name in attribute value unit{...}
+// error: missing field name in attribute value unit{...} (the field is @required)
 // status: passing
 namespace spec.diagnostics.attribute_nested_missing_field
 
@@ -6,7 +6,7 @@ import io
 
 @attribute
 struct unit {
-    name string
+    @required name string
 }
 
 @attribute

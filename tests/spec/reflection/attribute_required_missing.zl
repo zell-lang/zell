@@ -1,0 +1,15 @@
+// error: missing argument path for attribute @route (the field is @required)
+// status: passing
+namespace spec.reflection.attribute_required_missing
+
+@attribute(targets: [reflect.Target.Struct])
+struct route {
+    @required path string
+    method string = "GET"
+}
+
+@route(method: "POST")
+struct Upload {}
+
+func main() {
+}

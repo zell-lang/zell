@@ -19,7 +19,7 @@ pub(crate) enum PathRes {
 const MAX_EMBED_DEPTH: usize = 16;
 
 /// Builtin attribute names.
-pub(crate) const BUILTIN_ATTRS: &[&str] = &["attribute", "reflect", "deprecated", "inline", "test", "bench", "json", "log", "csv", "xml", "yaml", "toml", "serde", "allowCycle", "acyclic"];
+pub(crate) const BUILTIN_ATTRS: &[&str] = &["attribute", "reflect", "deprecated", "inline", "test", "bench", "json", "log", "csv", "xml", "yaml", "toml", "serde", "allowCycle", "acyclic", "required"];
 
 impl<'a> Sema<'a> {
     // -- namespace tree ------------------------------------------------------

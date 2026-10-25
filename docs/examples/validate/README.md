@@ -54,8 +54,9 @@ entry = "src/main.zl"
 
 ## src/attrs.zl: declaring attributes
 
-An attribute is a struct with `@attribute`. Its fields are its parameters,
-a field default makes a parameter optional, and `targets` restricts where
+An attribute is a struct with `@attribute`. Its fields are its parameters:
+an omitted one takes the field's default, or else its zero value, unless
+the field is marked `@required`; and `targets` restricts where
 it may appear (fields here; structs, methods, parameters, enums and
 variants are the other targets). The compiler checks each use like a
 struct literal: `@Range(Mni: 1)` or `@Range(Min: "one")` does not
@@ -92,9 +93,11 @@ struct Range {
 }
 
 // A human-readable name for messages; the field name is used without it.
+// An omitted parameter takes its default or zero value; @required makes
+// this one mandatory, so a bare @Label does not compile.
 @attribute(targets: [reflect.Target.Field])
 struct Label {
-    Text string
+    @required Text string
 }
 
 // The value must look like an e-mail address.
