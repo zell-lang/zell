@@ -1,0 +1,15 @@
+// error: wrong number of arguments in call to Task.Cancel: expected 0, got 1
+// status: passing
+namespace spec.diagnostics.task_cancel_args
+
+import io
+
+async func work() int {
+    return 1
+}
+
+async func main() {
+    var t = work()
+    t.Cancel(1)
+    println(await t)
+}

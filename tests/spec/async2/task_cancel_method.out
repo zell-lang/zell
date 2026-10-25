@@ -1,0 +1,8 @@
+slow done
+-1
+cancelled: true
+7 7
+plain done
+5
+child cancelled: true
+parent: -2

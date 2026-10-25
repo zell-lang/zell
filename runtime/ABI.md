@@ -2287,7 +2287,7 @@ carried by jobs and continuations exactly like the context of 10.8.
 
 | Function | Semantics |
 |---|---|
-| `void zell_task_cancel(zell_task *t)` | sets the cancelled flag of `t` and of all its descendants (tasks created later under a cancelled task start cancelled) and runs their **cancel hooks** |
+| `void zell_task_cancel(zell_task *t)` | sets the cancelled flag of `t` and of all its descendants (tasks created later under a cancelled task start cancelled) and runs their **cancel hooks**; `t` borrowed. Called by `CancelHandle.Cancel` (on the scope node) and by `t.Cancel()` on a `Task<T>` (on the task itself; idempotent, and a completed task's result is untouched) |
 | `bool zell_task_is_cancelled(const zell_task *t)` / `bool zell_task_cur_cancelled(void)` | the flag of `t` / of the current task (`task.IsCancelled()`) |
 | `void zell_task_set_deadline(zell_task *t, int64_t ms)` | the timer thread cancels `t` after `ms` milliseconds (`task.WithTimeout`) |
 | `zell_task *zell_task_current(void)` | the current task, +1 (or NULL) |

@@ -206,6 +206,16 @@ impl<'a> Sema<'a> {
             Ok(e) => return e,
             Err(b) => b,
         };
+        // `t.Cancel()` on a `Task<T>`: cancels that task and its descendants
+        // (DESIGN.md «Отмена»); idempotent, a no-op on a completed task.
+        if matches!(self.tt.get(base.ty), Type::Task(_)) && name.name == "Cancel" {
+            if !self.arity("Task.Cancel", args, 0, span) {
+                return self.invalid(span);
+            }
+            let tv = self.tt.task(self.tt.void);
+            let x = self.extern_id("task.rtCancel".into(), "zell_task_cancel", vec![tv], self.tt.void);
+            return mk(ExprKind::Call { callee: Callee::Extern(x), args: vec![base] }, self.tt.void, span);
+        }
         if let Some(sid) = self.struct_of(base.ty) {
             if let Some(&t) = self.gen.methods.get(&(sid, name.name.clone())) {
                 let recv = if matches!(self.tt.get(base.ty), Type::Pointer(_)) { base } else { self.addr_of(base) };

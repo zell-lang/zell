@@ -1,0 +1,62 @@
+// test: t.Cancel() cancels that task and its descendants: a Recv inside it wakes with task.ErrCancelled, which the awaiter of the Task<T!> gets; a second Cancel is a no-op, Cancel on a completed task leaves its result, and in a Task<T> a cancelled Delay wakes early and the awaiter gets the result the function returns; a child started by the cancelled task after its first suspension is cancelled too; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.task_cancel_method
+
+import io
+
+async func slow(ch task.Channel<int>) int! {
+    defer println("slow done")
+    var v = await ch.Recv()?
+    return v
+}
+async func plain() int {
+    defer println("plain done")
+    await task.Delay(10000)
+    return 5
+}
+async func child(ch task.Channel<int>) int! {
+    var v = await ch.Recv()?
+    return v
+}
+
+// The child is started after parent's first suspension, so it is
+// parent's child (tasks started before it belong to the caller, ABI.md 10.11).
+async func parent(ch task.Channel<int>) int! {
+    await task.Delay(1)
+    var c = child(ch)
+    await task.Delay(10000)
+    var v = try await c catch err {
+        println("child cancelled:", errors.Is(err, task.ErrCancelled))
+        return err
+    }
+    return v
+}
+
+async func quick() int! {
+    return 7
+}
+async func main() {
+    var ch = task.Channel<int>(0)
+    var t = slow(ch)
+    t.Cancel()
+    t.Cancel()
+    var r = try await t else -1
+    println(r)
+    try {
+        _ = await t?
+    } catch err {
+        println("cancelled:", errors.Is(err, task.ErrCancelled))
+    }
+    var q = quick()
+    var v = try await q else -1
+    q.Cancel()
+    println(try await q else -1, v)
+    var p = plain()
+    p.Cancel()
+    println(await p)
+    var pc = parent(task.Channel<int>(0))
+    await task.Delay(50)
+    pc.Cancel()
+    println("parent:", try await pc else -2)
+}
