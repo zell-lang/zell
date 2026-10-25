@@ -154,8 +154,8 @@ Next, in this order:
    namespace; go-to-definition on type aliases.
 5. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md`: generic/local type
    aliases (20), async `Drop` (27, when a `Close() Task` appears), panics:
-   unwinding of synchronous frames below a task and inlined frames in
-   backtraces (28), `Drop` for `database.sql.DB/Tx`; simplify the showcase
+   inlined frames in backtraces (28; sync-frame unwinding done 2026-10-25,
+   edace29), `Drop` for `database.sql.DB/Tx`; simplify the showcase
    repos to one package on the current syntax.
 6. **Other performance and platforms** — crypto asymmetry (Ed25519/P-256
    sign 6–8x, ChaCha, Argon2), error traces in the general case (5.8x),
