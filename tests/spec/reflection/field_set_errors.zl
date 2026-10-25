@@ -1,0 +1,17 @@
+// error: f.Set needs a *Pair (a pointer to the value of reflect.Fields<Pair>()), found Pair
+// status: passing
+namespace spec.reflection.field_set_errors
+
+struct Pair {
+    A int
+}
+
+func Zero<T>(v T) {
+    for f in reflect.Fields<T>() {
+        f.Set(v, 0)
+    }
+}
+
+func main() {
+    Zero(Pair{A: 1})
+}

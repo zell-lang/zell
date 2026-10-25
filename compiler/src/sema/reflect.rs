@@ -115,17 +115,30 @@ pub(crate) struct ReflState {
     loaded: Vec<bool>,
     /// Struct / enum / function / template ids of loaded modules by name.
     pub(crate) structs: HashMap<String, u32>,
-    enums: HashMap<String, u32>,
+    pub(crate) enums: HashMap<String, u32>,
     funcs: HashMap<String, FuncId>,
     templates: HashMap<String, u32>,
     /// Compile-time field bindings of unrolled `reflect.Fields<T>()` loops:
     /// (function-context depth, local, struct type, field index or `None`
     /// in an abstract check).
-    ct_fields: Vec<(usize, LocalId, TypeId, Option<u32>)>,
+    pub(crate) ct_fields: Vec<(usize, LocalId, TypeId, Option<u32>)>,
     /// Per compile-time field variable (depth, local): references that were
     /// not folded away (`f.Type`, passing `f` on). A variable without any
     /// is bound to nil instead of the `FieldInfo`.
     ct_uses: HashMap<(usize, LocalId), u32>,
+    /// Folds made by compile-time reflection so far (`f.Name`,
+    /// `f.Attribute<A>()`, type tests, ...): an `if` whose condition became
+    /// a constant through one of them is static (`reflect_ct.rs`).
+    pub(crate) folds: u32,
+    /// Uses of compile-time facts that are unknown in an abstract check
+    /// (a field of an abstract `Fields<T>()`, a type test on `T`).
+    pub(crate) abstract_ct: u32,
+    /// Locals bound to a compile-time reflection constant and never
+    /// assigned: (function-context depth, local) -> the constant.
+    pub(crate) ct_consts: HashMap<(usize, LocalId), hir::Expr>,
+    /// Span of the last static `if` / type switch checked abstractly (its
+    /// branches depend on a type parameter); see `Sema::stmt_list`.
+    pub(crate) abstract_stmt: Option<Span>,
     /// Static types named by `typeof`.
     full: Vec<TypeId>,
     /// Set while resolving an attribute name (builtin attribute names must
@@ -162,7 +175,7 @@ impl ReflState {
 
 /// Result of a compile-time condition.
 #[derive(Clone, Copy, PartialEq)]
-enum Ct {
+pub(crate) enum Ct {
     Known(bool),
     /// Depends on a type parameter (abstract check).
     Abstract,
@@ -512,6 +525,14 @@ impl<'a> Sema<'a> {
                 let fty = self.structs[d.0 as usize].fields[k as usize].ty;
                 return Ok(mk(ExprKind::Field { base: Box::new(v), index: k }, fty, span));
             }
+            if let (Some(_), "Set") = (ct, name.name.as_str()) {
+                self.err("f.Set(p, value) is a statement (it stores into the field), not a value", span);
+                self.check_args_loose(args);
+                return Ok(self.invalid(span));
+            }
+            if let (Some((_, _, _, None)), "Attribute") = (ct, name.name.as_str()) {
+                self.refl.abstract_ct += 1;
+            }
             // `f.Attribute<A>()` of a compile-time field: the attribute is
             // known, so the result is a constant (`nil` or a pointer to the
             // immortal attribute value), and `tag != nil` / `tag.name`
@@ -577,9 +598,11 @@ impl<'a> Sema<'a> {
                 hir::AttrKind::Builtin(n) => self.refl.structs.get(n.as_str()).copied(),
             };
             if sid == Some(asid) {
+                self.refl.folds += 1;
                 return mk(ExprKind::AttrConst { attr: Box::new(a), sid: asid }, ptr, span);
             }
         }
+        self.refl.folds += 1;
         mk(ExprKind::Nil, ptr, span)
     }
 
@@ -599,6 +622,7 @@ impl<'a> Sema<'a> {
             (None, Type::Float64 | Type::Float32) => hir::ConstValue::Float(0.0),
             _ => return None,
         };
+        self.refl.folds += 1;
         Some(mk(ExprKind::Const(v), fty, span))
     }
 
@@ -610,7 +634,13 @@ impl<'a> Sema<'a> {
             return None;
         }
         let depth = self.fns.len();
-        let (_, _, sty, Some(k)) = self.refl.ct_fields.iter().rev().find(|c| c.0 == depth && c.1 == l).copied()? else { return None };
+        let (_, _, sty, k) = self.refl.ct_fields.iter().rev().find(|c| c.0 == depth && c.1 == l).copied()?;
+        let Some(k) = k else {
+            if matches!(name.name.as_str(), "Name" | "Index" | "Exported" | "Embedded") {
+                self.refl.abstract_ct += 1;
+            }
+            return None;
+        };
         let Type::Struct(sd) = *self.tt.get(sty) else { return None };
         let field = self.structs[sd.0 as usize].fields.get(k as usize)?;
         let (fname, exported, embedded) = (field.name.clone(), field.exported, field.embedded);
@@ -624,6 +654,7 @@ impl<'a> Sema<'a> {
         };
         self.fcx().used[l.0 as usize] = true;
         self.ct_field_use(l, -1);
+        self.refl.folds += 1;
         Some(e)
     }
 
@@ -631,7 +662,7 @@ impl<'a> Sema<'a> {
 
     /// `T` of a call `reflect.TypeOf<T>()` (or `Fields<T>()` when
     /// `template` says so), if `e` is one.
-    fn reflect_targ(&mut self, e: &ast::Expr, template: &str) -> Option<TypeId> {
+    pub(crate) fn reflect_targ(&mut self, e: &ast::Expr, template: &str) -> Option<TypeId> {
         let ast::ExprKind::Call { callee, args } = &expr::strip_parens(e).kind else { return None };
         if !args.is_empty() {
             return None;
@@ -653,7 +684,7 @@ impl<'a> Sema<'a> {
     }
 
     /// The type a `.Elem` / `.Key` step leads to.
-    fn type_step(&self, t: TypeId, step: &str) -> Option<TypeId> {
+    pub(crate) fn type_step(&self, t: TypeId, step: &str) -> Option<TypeId> {
         match (self.tt.get(t), step) {
             (Type::Pointer(x) | Type::Weak(x) | Type::Slice(x) | Type::Array(x, _) | Type::Fallible(x) | Type::Task(x), "Elem") => Some(*x),
             (Type::Map(_, v), "Elem") => Some(*v),
@@ -662,37 +693,19 @@ impl<'a> Sema<'a> {
         }
     }
 
-    /// `TypeOf<T>()[.Elem|.Key]*.Kind`: `Some(Some(kind name))`, or
-    /// `Some(None)` when it depends on a type parameter.
-    fn ct_kind(&mut self, e: &ast::Expr) -> Option<Option<&'static str>> {
+    /// `TypeOf<T>()[.Elem|.Key]*.Kind` or `f.Type[.Elem|.Key]*.Kind` of a
+    /// compile-time field: `Some(Some(kind name))`, or `Some(None)` when it
+    /// depends on a type parameter.
+    pub(crate) fn ct_kind(&mut self, e: &ast::Expr) -> Option<Option<&'static str>> {
         let ast::ExprKind::Field { base, name } = &expr::strip_parens(e).kind else { return None };
         if name.name != "Kind" {
             return None;
         }
-        let mut steps = Vec::new();
-        let mut cur: &ast::Expr = base;
-        while let ast::ExprKind::Field { base: b, name: n } = &expr::strip_parens(cur).kind {
-            if n.name != "Elem" && n.name != "Key" {
-                return None;
-            }
-            steps.push(n.name.clone());
-            cur = b;
-        }
-        let mut t = self.reflect_targ(cur, "TypeOf")?;
-        if self.has_param(t) {
-            return Some(None);
-        }
-        for s in steps.iter().rev() {
-            match self.type_step(t, s) {
-                Some(x) => t = x,
-                None => return Some(Some("Invalid")),
-            }
-        }
-        Some(Some(self.kind_name(t)))
+        Some(self.ct_type_operand(base)?.map(|t| self.kind_name(t)))
     }
 
     /// The `reflect.Kind` variant named by `e` (`reflect.Kind.Struct`).
-    fn ct_kind_const(&mut self, e: &ast::Expr) -> Option<String> {
+    pub(crate) fn ct_kind_const(&mut self, e: &ast::Expr) -> Option<String> {
         let segs = Self::flatten_path(expr::strip_parens(e))?;
         if self.lookup_local(&segs[0].name, false).is_some() {
             return None;
@@ -721,67 +734,20 @@ impl<'a> Sema<'a> {
                     _ => Ct::Abstract,
                 })
             }
-            ast::ExprKind::Binary { op: op @ (B::Eq | B::Ne), left, right } => {
-                let neg = *op == B::Ne;
-                let fin = |b: bool| Ct::Known(b != neg);
-                // TypeOf<A>() == TypeOf<B>()
-                if let (Some(a), Some(b)) = (self.reflect_targ_quiet(left), self.reflect_targ_quiet(right)) {
-                    if self.has_param(a) || self.has_param(b) {
-                        return Some(Ct::Abstract);
-                    }
-                    return Some(fin(a == b));
-                }
-                let (k, c) = match self.ct_kind(left) {
-                    Some(k) => (k, self.ct_kind_const(right)?),
-                    None => (self.ct_kind(right)?, self.ct_kind_const(left)?),
-                };
-                Some(match k {
-                    Some(k) => fin(k == c),
-                    None => Ct::Abstract,
-                })
-            }
+            ast::ExprKind::Binary { op: op @ (B::Eq | B::Ne), left, right } => self.ct_eq(*op == B::Ne, left, right),
             _ => None,
         }
-    }
-
-    /// [`reflect_targ`](Self::reflect_targ) for `TypeOf` that only resolves
-    /// when the shape matches.
-    fn reflect_targ_quiet(&mut self, e: &ast::Expr) -> Option<TypeId> {
-        self.reflect_targ(e, "TypeOf")
     }
 
     /// A static `if` (see the module documentation); `None` for an
     /// ordinary `if`.
     pub(crate) fn static_if(&mut self, i: &ast::IfStmt) -> Option<StmtKind> {
         let c = self.ct_cond(&i.cond)?;
-        let else_block = |s: &mut Self| -> Option<hir::Block> {
-            i.else_.as_ref().map(|e| match &**e {
-                ast::ElseBranch::Block(b) => s.block(b),
-                ast::ElseBranch::If(ei) => {
-                    let k = s.if_stmt(ei);
-                    hir::Block { stmts: vec![Stmt { kind: k, span: ei.span }], span: ei.span }
-                }
-            })
-        };
-        Some(match c {
-            Ct::Known(true) => StmtKind::Block(self.block(&i.then)),
-            Ct::Known(false) => match else_block(self) {
-                Some(b) => StmtKind::Block(b),
-                None => StmtKind::Block(hir::Block::default()),
-            },
-            Ct::Abstract => {
-                self.gen.mute += 1;
-                let then = self.block(&i.then);
-                let else_ = else_block(self);
-                self.gen.mute -= 1;
-                let cond = mk(ExprKind::Const(hir::ConstValue::Bool(false)), self.tt.bool_, i.cond.span);
-                StmtKind::If { cond, then, else_ }
-            }
-        })
+        Some(self.static_branches(i, c))
     }
 
     /// True inside the body of a generic function instance (or its lambdas).
-    fn in_generic_body(&self) -> bool {
+    pub(crate) fn in_generic_body(&self) -> bool {
         self.fns.iter().any(|f| f.func.is_some_and(|fid| self.gen.insts.contains_key(&fid.0)))
     }
 

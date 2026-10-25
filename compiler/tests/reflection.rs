@@ -103,6 +103,30 @@ fn static_if_checks_only_the_taken_branch() {
 }
 
 #[test]
+fn field_conditions_fold_without_run_time_lookups() {
+    // Every condition below is a compile-time constant per field, so each
+    // `if` / `switch` keeps one branch: the branches that would not type
+    // check for a field (`x + 1` on a string) are not checked, and the
+    // instance reads no FieldInfo table and calls no Attribute lookup.
+    let p = ok("@attribute(targets: [reflect.Target.Field])\nstruct num {\n    min int\n}\nstruct P {\n    @num(min: 2) A int\n    B string\n    C bool\n}\n\
+func Sum<T>(v T) int {\n    var n = 0\n    for f in reflect.Fields<T>() {\n        var tag = f.Attribute<num>()\n        if tag != nil {\n            n += f.Get(v) + tag.min\n        }\n\
+        if f.Attribute<num>() == nil && f.Type.Kind == reflect.Kind.String {\n            n += len(f.Get(v))\n        }\n        if f.Type == reflect.TypeOf<bool>() && f.Name == \"C\" {\n            n += 100\n        }\n\
+        switch f.Get(v) {\n        case int x:\n            n += x + 1\n        case string s:\n            n += len(s + \"!\")\n        }\n    }\n    return n\n}\nfunc main() {\n    println(Sum(P{A: 1, B: \"ab\"}))\n}");
+    let dump = p.dump();
+    let start = dump.lines().position(|l| l.starts_with("func #") && l.contains("t.Sum<P>")).expect("instance");
+    let body: String = dump.lines().skip(start).take_while({
+        let mut first = true;
+        move |l| std::mem::take(&mut first) || !l.starts_with("func #")
+    }).collect::<Vec<_>>().join("\n");
+    for needle in ["FieldInfo.", "TypeInfo.", "IsNil", "Attribute", "if Eq(%"] {
+        let hits = body.matches(needle).count();
+        let allowed = if needle == "if Eq(%" { 3 } else { 0 };
+        assert!(hits <= allowed, "{needle} in the folded instance ({hits}x):\n{body}");
+    }
+    assert_eq!(body.matches(":*reflect.FieldInfo = nil").count() + body.matches("f = nil:*reflect.FieldInfo").count(), 3, "f bound to nil in every copy:\n{body}");
+}
+
+#[test]
 fn compile_time_reflection_errors() {
     err("struct P {\n    X int\n}\nfunc main() {\n    for f in reflect.Fields<P>() {\n        println(f.Name)\n    }\n}", "can only be used in a generic function");
     err("func G<T>(v T) {\n    for f in reflect.Fields<T>() {\n        println(f.Name)\n    }\n}\nfunc main() {\n    G(1)\n}", "needs a struct type, int is not a struct");

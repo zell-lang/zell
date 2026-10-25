@@ -47,6 +47,7 @@ mod litcheck;
 mod logtmpl;
 mod ownership;
 mod reflect;
+mod reflect_ct;
 mod reflect_with;
 mod resolve;
 mod stmt;

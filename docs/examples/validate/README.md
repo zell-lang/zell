@@ -14,9 +14,11 @@ What it shows:
 - a generic `Validate<T>(v T)` built on `reflect.Fields<T>()`, which the
   compiler unrolls into per-field code, with `f.Attribute<A>()` and
   `f.Get(v)`;
-- the static `if` on `reflect.TypeOf<F>().Kind`, so one generic function
-  handles numbers, strings, slices and nested structs;
-- `reflect.Error(msg)` as a library-level `static_assert`;
+- static `if` on compile-time conditions (`f.Attribute<A>() != nil`,
+  `f.Type.Kind`, `reflect.TypeOf<F>().Kind`), so one generic function
+  handles numbers, strings, slices and nested structs with per-field code;
+- `reflect.Error(msg)` as a library-level `static_assert`, also rejecting
+  an attribute on a field of the wrong type;
 - reading attribute values at run time from `reflect.TypeOf<T>().Fields`;
 - `reflect.TypesWith<A>()`: every type of the program with an attribute,
   and `MethodInfo.Params` + `Invoke` to call a method with arguments
@@ -109,30 +111,43 @@ own static type, and `f.Attribute<Range>()` is the attribute written on
 that field, or `nil`. The result is what you would write by hand for each
 struct, with no type inspection at run time.
 
-The helpers `size`, `describe`, `text` and `nested` are generic over the
-field type `F` and branch with a **static `if`**: a condition on
-`reflect.TypeOf<F>().Kind` is evaluated at compile time and only the
-matching branch is compiled. That is how `size` can return `len(x)` for
-strings and slices and `x` itself for integers in one function, and how
-`nested` recurses into struct fields such as `Home Address`.
+Inside the loop every question about `f` is answered at compile time,
+for each field: whether it has an attribute (`f.Attribute<Range>() !=
+nil`, or `r != nil` for a variable holding it), its kind
+(`f.Type.Kind == reflect.Kind.Struct`), its name. An `if` on such a
+condition is a **static `if`**: only the branch taken is compiled for
+that field. So the copy for `Age int` holds just the range check, typed
+for an `int`; the copy for `Newsletter bool` holds nothing; and the copy
+for `Home Address` recurses into the nested struct and `continue`s. The
+same holds for `&&`: in `f.Attribute<Email>() != nil &&
+!looksLikeEmail(f.Get(v))` the right side is compiled only for fields
+with `@Email`, so it can pass the field to a function taking a
+`string`.
 
-`Validate` itself starts with a static `if` that calls `reflect.Error` for
-a `T` that is not a struct. `reflect.Error` is a compile-time error raised
-when that branch is compiled for some `T`. With `_ = Validate(42)` in
-`main`, the build fails with:
+The helpers `size` and `describe` are generic over the field type `F` and
+branch with a static `if` on `reflect.TypeOf<F>().Kind`: `size` returns
+`x` for integers and `len(x)` for strings and slices. Once the `int`
+branch returns, the rest of the function is dead for `F = int` and is not
+compiled for it.
+
+`reflect.Error` is a compile-time error raised when the branch holding it
+is compiled for some `T`. `Validate` starts with one for a `T` that is
+not a struct; with `_ = Validate(42)` in `main` the build fails with:
 
 ```text
 error: Validate needs a struct, got int
-  --> src/rules.zl:42:9
+  --> src/rules.zl:43:9
    = note: raised by Validate<int>
 ```
 
-The condition of a static `if` can only test types (kinds, `Elem`,
-`Key`, type equality). Whether a field *has* an attribute is not a static
-condition, so `if f.Attribute<Range>() != nil` is an ordinary run-time
-test, and the code inside it is compiled for every field. That is why the
-helpers must accept any field type (`size` returns 1 for kinds it does
-not measure) rather than reject the wrong ones with `reflect.Error`.
+`fieldsOf` uses it to reject a rule written on a field it cannot apply
+to: `@Required Newsletter bool` in `main.zl` does not compile.
+
+```text
+error: @Required and @Range need a number, a string or a slice; Newsletter is bool
+  --> src/rules.zl:81:17
+   = note: raised by fieldsOf<SignUp>
+```
 
 `Check` adapts the result to `T!` code: it returns an `Invalid` error that
 carries every problem, so a caller can `?` it or pick it apart with
@@ -177,15 +192,14 @@ struct Invalid {
 // Validate returns the problems of v, in field order. Only structs can be
 // validated: for any other T the static `if` below raises reflect.Error,
 // a compile-time error naming the instantiation that caused it,
-// Validate<int> (the library's static_assert). The branch is compiled
-// only for the T it applies to, so for structs it costs nothing.
+// Validate<int> (the library's static_assert). For a struct the branch is
+// not taken, so it costs nothing; and since reflect.Error ends the
+// function, no `return` follows it.
 func Validate<T>(v T) []FieldError {
     if reflect.TypeOf<T>().Kind != reflect.Kind.Struct {
         reflect.Error("Validate needs a struct, got " + reflect.TypeOf<T>().Name)
-        return []
-    } else {
-        return fieldsOf(v, "")
     }
+    return fieldsOf(v, "")
 }
 
 // Check is Validate for code that works with T! errors.
@@ -196,6 +210,11 @@ func Check<T>(v T) void! {
     }
 }
 
+// Every condition on f below is a compile-time constant for each field:
+// whether it has an attribute, its kind, its name. A static `if` keeps only
+// the branch taken, so each copy of the loop body holds just the checks
+// that apply to that field, typed by its own type, and a rule written on
+// a field it cannot apply to is a compile error.
 func fieldsOf<T>(v T, prefix string) []FieldError {
     var out []FieldError = []
     for f in reflect.Fields<T>() {
@@ -205,45 +224,52 @@ func fieldsOf<T>(v T, prefix string) []FieldError {
         if l != nil {
             label = l.Text
         }
-        var value = f.Get(v)
-        if f.Attribute<Required>() != nil && size(value) == 0 {
+        // A nested struct is validated with its own attributes, its paths
+        // prefixed by the field name.
+        if f.Type.Kind == reflect.Kind.Struct {
+            for e in fieldsOf(f.Get(v), path + ".") {
+                out = append(out, e)
+            }
+            continue
+        }
+        var r = f.Attribute<Range>()
+        if f.Attribute<Required>() != nil || r != nil {
+            if f.Type.Kind != reflect.Kind.Int && f.Type.Kind != reflect.Kind.String && f.Type.Kind != reflect.Kind.Slice {
+                reflect.Error("@Required and @Range need a number, a string or a slice; " + f.Name + " is " + f.Type.Name)
+            }
+        }
+        if f.Attribute<Email>() != nil && f.Type.Kind != reflect.Kind.String {
+            reflect.Error("@Email needs a string field; " + f.Name + " is " + f.Type.Name)
+        }
+        if f.Attribute<Required>() != nil && size(f.Get(v)) == 0 {
             out = append(out, FieldError{Path: path, Label: label, Problem: "is required"})
             // Further rules would only repeat the same complaint.
             continue
         }
-        var r = f.Attribute<Range>()
         if r != nil {
-            var n = size(value)
+            var n = size(f.Get(v))
             if n < r.Min || n > r.Max {
-                out = append(out, FieldError{Path: path, Label: label, Problem: describe(value, r)})
+                out = append(out, FieldError{Path: path, Label: label, Problem: describe(f.Get(v), r)})
             }
         }
-        if f.Attribute<Email>() != nil && !looksLikeEmail(text(value)) {
+        if f.Attribute<Email>() != nil && !looksLikeEmail(f.Get(v)) {
             out = append(out, FieldError{
                 Path: path,
                 Label: label,
                 Problem: "is not an e-mail address",
             })
         }
-        for e in nested(value, path + ".") {
-            out = append(out, e)
-        }
     }
     return out
 }
 
-// size is what Required and Range measure. Each branch of the static
-// `if` is compiled only for the field types it matches; a field of any
-// other type (bool, enums, maps) measures 1, so it always passes.
+// size is what Required and Range measure: the number itself, or the
+// length of a string or slice (fieldsOf admits no other kind).
 func size<F>(x F) int {
     if reflect.TypeOf<F>().Kind == reflect.Kind.Int {
         return x
-    } else if reflect.TypeOf<F>().Kind == reflect.Kind.String ||
-        reflect.TypeOf<F>().Kind == reflect.Kind.Slice {
-        return len(x)
-    } else {
-        return 1
     }
+    return len(x)
 }
 
 func describe<F>(x F, r *Range) string {
@@ -263,24 +289,6 @@ func describe<F>(x F, r *Range) string {
         return fmt.Format("{0}{1} at least {2}", what, of, r.Min)
     }
     return fmt.Format("{0} between {1} and {2}", what, r.Min, r.Max)
-}
-
-func text<F>(x F) string {
-    if reflect.TypeOf<F>().Kind == reflect.Kind.String {
-        return x
-    } else {
-        return ""
-    }
-}
-
-// A nested struct field is validated with its own attributes, its paths
-// prefixed by the field name.
-func nested<F>(x F, prefix string) []FieldError {
-    if reflect.TypeOf<F>().Kind == reflect.Kind.Struct {
-        return fieldsOf(x, prefix)
-    } else {
-        return []
-    }
 }
 
 func looksLikeEmail(s string) bool {

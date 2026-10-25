@@ -1,0 +1,19 @@
+// error: f.Set(p, value) is a statement (it stores into the field), not a value
+// status: passing
+namespace spec.reflection.field_set_value
+
+struct Pair {
+    A int
+}
+
+func Fill<T>(p *T) {
+    for f in reflect.Fields<T>() {
+        var r = f.Set(p, 1)
+        _ = r
+    }
+}
+
+func main() {
+    var p = Pair{}
+    Fill(&p)
+}

@@ -15,28 +15,39 @@ impl<'a> Sema<'a> {
     }
 
     /// Statements in the current scope.
-    fn stmt_list(&mut self, stmts: &[ast::Stmt]) -> Vec<Stmt> {
+    pub(crate) fn stmt_list(&mut self, stmts: &[ast::Stmt]) -> Vec<Stmt> {
         let mut out = Vec::new();
-        for s in stmts {
-            let n = out.len();
+        let mut bound = Vec::new();
+        let mut muted = false;
+        for (i, s) in stmts.iter().enumerate() {
+            let (n, folds) = (out.len(), self.refl.folds);
             self.stmt(s, &mut out);
+            if !muted && super::reflect_ct::maybe_dead_after(s, &out, n, self.refl.abstract_stmt) {
+                muted = true;
+                self.gen.mute += 1;
+            }
+            if let ast::StmtKind::Var(v) = &s.kind {
+                bound.extend(self.ct_bind_local(v, &stmts[i + 1..], &out, folds));
+            }
             // A static `if` / `switch` (lowered to the block of the branch
             // taken) whose branch terminates: the rest of the list is dead
             // in this instantiation and is not checked, like a dropped
             // branch (DESIGN.md "Статическая рефлексия").
-            if matches!(s.kind, ast::StmtKind::If(_) | ast::StmtKind::Switch(_)) && out.len() == n + 1 {
-                if let StmtKind::Block(b) = &out[n].kind {
-                    if terminates(&b.stmts, true) {
-                        break;
-                    }
-                }
+            if super::reflect_ct::dead_after(s, &out, n) {
+                break;
             }
+        }
+        if muted {
+            self.gen.mute -= 1;
+        }
+        for k in bound {
+            self.refl.ct_consts.remove(&k);
         }
         out
     }
 
     /// A case body: its own scope, as a block.
-    fn case_body(&mut self, stmts: &[ast::Stmt], span: Span) -> hir::Block {
+    pub(crate) fn case_body(&mut self, stmts: &[ast::Stmt], span: Span) -> hir::Block {
         self.push_scope();
         let stmts = self.stmt_list(stmts);
         self.pop_scope();
@@ -59,7 +70,7 @@ impl<'a> Sema<'a> {
             }
             ast::StmtKind::Switch(sw) => {
                 let k = self.switch_stmt(sw);
-                push(out, StmtKind::Switch(k));
+                push(out, k);
             }
             ast::StmtKind::Return(es) => {
                 let r = self.return_value(es, span);
@@ -227,7 +238,7 @@ impl<'a> Sema<'a> {
         self.ide_def_local_const(c, ty);
     }
 
-    fn cond(&mut self, e: &ast::Expr, what: &str) -> hir::Expr {
+    pub(crate) fn cond(&mut self, e: &ast::Expr, what: &str) -> hir::Expr {
         let c = self.value(e, Some(self.tt.bool_));
         if c.ty != self.tt.bool_ && !self.tt.is_invalid(c.ty) {
             self.err(format!("non-boolean condition in {what}: found {}", self.tn(c.ty)), c.span);
@@ -239,16 +250,7 @@ impl<'a> Sema<'a> {
         if let Some(k) = self.static_if(i) {
             return k;
         }
-        let cond = self.cond(&i.cond, "if");
-        let then = self.block(&i.then);
-        let else_ = i.else_.as_ref().map(|e| match &**e {
-            ast::ElseBranch::Block(b) => self.block(b),
-            ast::ElseBranch::If(ei) => {
-                let k = self.if_stmt(ei);
-                hir::Block { stmts: vec![Stmt { kind: k, span: ei.span }], span: ei.span }
-            }
-        });
-        StmtKind::If { cond, then, else_ }
+        self.folded_if(i)
     }
 
     fn for_stmt(&mut self, f: &ast::ForStmt) -> StmtKind {
@@ -369,13 +371,19 @@ impl<'a> Sema<'a> {
 
     // -- switch -----------------------------------------------------------
 
-    fn switch_stmt(&mut self, sw: &ast::SwitchStmt) -> hir::Switch {
+    fn switch_stmt(&mut self, sw: &ast::SwitchStmt) -> StmtKind {
+        let folds = self.refl.folds;
         let subject = sw.subject.as_ref().map(|s| {
             let v = self.value(s, None);
             let v = self.default_type(v);
             let l = self.temp(v.ty, s.span);
             (l, v)
         });
+        if let Some((l, v)) = &subject {
+            if let Some(k) = self.static_switch(sw, *l, v, self.refl.folds > folds) {
+                return k;
+            }
+        }
         let subj = subject.as_ref().map(|(l, v)| (*l, v.ty, v.span));
         let label = self.push_label(LabelKind::Switch);
         let mut cases = Vec::new();
@@ -411,7 +419,7 @@ impl<'a> Sema<'a> {
             default = self.exhaustive_default(v.ty, &cases, sw.span);
         }
         self.pop_label();
-        hir::Switch { label, subject, cases, default, span: sw.span }
+        StmtKind::Switch(hir::Switch { label, subject, cases, default, span: sw.span })
     }
 
     fn subject_expr(&self, l: LocalId, ty: TypeId, span: Span) -> hir::Expr {
@@ -675,6 +683,9 @@ impl<'a> Sema<'a> {
         let inner = expr::strip_parens(e);
         if let ast::ExprKind::Try { .. } = inner.kind {
             return StmtKind::Expr(self.try_expr(inner, false));
+        }
+        if let Some(k) = self.ct_field_set(inner) {
+            return k;
         }
         let h = self.expr(e, None);
         if self.tt.is_fallible(h.ty) {

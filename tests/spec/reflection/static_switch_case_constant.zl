@@ -1,0 +1,22 @@
+// error: a case of a static switch (its subject is a compile-time reflection constant) must be a constant
+// status: passing
+namespace spec.reflection.static_switch_case_constant
+
+import io
+
+struct Pair {
+    A int
+}
+
+func Names<T>(v T, other string) {
+    for f in reflect.Fields<T>() {
+        switch f.Name {
+        case other:
+            println("other")
+        }
+    }
+}
+
+func main() {
+    Names(Pair{}, "A")
+}

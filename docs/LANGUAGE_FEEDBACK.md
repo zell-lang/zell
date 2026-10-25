@@ -178,7 +178,7 @@ documentation's Examples section, tested by
     `bookshelf-api`, `Memory` in `testing-guide`). Worth fixing before the
     `zell-lang/web` package, whose handlers and repositories are all like
     this.
-33. ❌ **`f.Attribute<A>() != nil` is not a static condition**, so a static
+33. ✅ **Fixed (2026-10-25):** inside an unrolled `Fields<T>()` copy, `f.Attribute<A>() != nil`/`== nil`, `f.Type.Kind`, `f.Type == reflect.TypeOf<U>()`, `f.Name == "lit"`, attribute fields and locals bound to them fold to constants, and an `if` whose condition folds through them is static (`sema/reflect_ct.rs`, DESIGN.md «Статическая рефлексия»); `validate` now rejects `@Required`/`@Range` on a `bool` and `@Email` on a non-string with `reflect.Error`. Spec: `reflection/static_field_conditions`, `reflect_error_attr_on_bool`. **`f.Attribute<A>() != nil` is not a static condition**, so a static
     `if` cannot pick it and `reflect.Error` cannot reject a misplaced
     attribute at compile time (`@Email` on an `int` field, say).
     Workaround: `validate` applies a rule only where it makes sense, at run
@@ -475,7 +475,7 @@ written by hand), **33** (see 67), **46** (see 78).
     arguments, an omitted argument takes the field's default, or else its
     zero value. A field that must be given is marked
     (`@required name string`) if that is ever needed.
-67. ❌ **ergonomics (extends 33):** **the body of a compile-time
+67. ✅ **Fixed (2026-10-25):** (a) in a generic body a type switch over a value of known static type folds to the matching case (`switch f.Get(v) { case string s: … }`), and a `switch` over a reflection constant (`switch f.Type.Kind`) to the equal case; (b) see 33; (c) `f.Set(p *T, value)` stores with the field's static type. Spec: `reflection/type_switch_fields`, `field_set`, `field_set_errors`, `field_set_type`, `field_set_value`, `static_switch_case_constant`; HIR proof `tests/reflection.rs::field_conditions_fold_without_run_time_lookups`. **ergonomics (extends 33):** **the body of a compile-time
     `reflect.Fields<T>()` loop is unrolled per field, but nothing in it
     branches on the field's type**: (a) `switch f.Get(v) { case string s:
     … }` is rejected with "type pattern string needs an interface or error

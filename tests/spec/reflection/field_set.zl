@@ -1,0 +1,51 @@
+// test: f.Set(p, value) stores into the field of *p with the field's static type; with f.Get it round-trips, and a static if picks the value per field type
+// status: passing
+namespace spec.reflection.field_set
+
+import io
+
+@attribute(targets: [reflect.Target.Field])
+struct init {
+    text string = ""
+    number int = 0
+}
+
+struct Config {
+    @init(text: "localhost") Host string
+    @init(number: 8080) Port int
+    Debug bool
+    Name string
+}
+
+// Fills the fields that are still zero from their @init defaults.
+func Defaults<T>(p *T) {
+    for f in reflect.Fields<T>() {
+        var d = f.Attribute<init>()
+        if d != nil && f.Type.Kind == reflect.Kind.String {
+            if f.Get(*p) == "" {
+                f.Set(p, d.text)
+            }
+        } else if d != nil && f.Type.Kind == reflect.Kind.Int {
+            if f.Get(*p) == 0 {
+                f.Set(p, d.number)
+            }
+        }
+    }
+}
+
+// Copies every field through Get/Set.
+func Copy<T>(src T) T {
+    var dst T
+    for f in reflect.Fields<T>() {
+        f.Set(&dst, f.Get(src))
+    }
+    return dst
+}
+
+func main() {
+    var c = Config{Port: 9000, Name: "svc"}
+    Defaults(&c)
+    println(c.Host, c.Port, c.Debug, c.Name)
+    var d = Copy(Config{Host: "h", Port: 1, Debug: true, Name: "n"})
+    println(d.Host, d.Port, d.Debug, d.Name)
+}

@@ -1,0 +1,54 @@
+// test: a type switch over f.Get(v) in an unrolled reflect.Fields<T>() loop keeps the one case whose type matches the field (an interface case matches when the field implements it), else default; a static switch over f.Type.Kind keeps the case with that kind
+// status: passing
+namespace spec.reflection.type_switch_fields
+
+import io
+
+struct Money {
+    Cents int
+
+    func String() string {
+        return fmt.Format("${0}.{1}", this.Cents / 100, this.Cents % 100)
+    }
+}
+
+interface Stringer {
+    func String() string
+}
+
+struct Item {
+    Name  string
+    Qty   int
+    Price Money
+    Ok    bool
+}
+
+func Show<T>(v T) string {
+    var out = ""
+    for f in reflect.Fields<T>() {
+        out = out + f.Name + "="
+        switch f.Get(v) {
+        case string s:
+            out = out + "\"" + s + "\""
+        case int n:
+            out = out + fmt.Format("{0}", n * 2)
+        case Stringer st:
+            out = out + st.String()
+        default:
+            out = out + "?"
+        }
+        switch f.Type.Kind {
+        case reflect.Kind.Int, reflect.Kind.String:
+            out = out + "(scalar) "
+        case reflect.Kind.Struct:
+            out = out + "(struct) "
+        default:
+            out = out + " "
+        }
+    }
+    return out
+}
+
+func main() {
+    println(Show(Item{Name: "pen", Qty: 3, Price: Money{Cents: 150}, Ok: true}))
+}

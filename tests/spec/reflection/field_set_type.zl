@@ -1,0 +1,18 @@
+// error: cannot use string as int for field A
+// status: passing
+namespace spec.reflection.field_set_type
+
+struct Pair {
+    A int
+}
+
+func Fill<T>(p *T) {
+    for f in reflect.Fields<T>() {
+        f.Set(p, "x")
+    }
+}
+
+func main() {
+    var p = Pair{}
+    Fill(&p)
+}

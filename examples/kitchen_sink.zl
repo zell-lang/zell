@@ -891,8 +891,7 @@ func Validate<T>(v T) []ValidationError {
         if r == nil {
             continue
         }
-        var value any = f.Get(v)
-        switch value {
+        switch f.Get(v) {
             case string s:
                 if r.required && s == "" {
                     out = append(out, ValidationError{Field: f.Name, Reason: "is required"})

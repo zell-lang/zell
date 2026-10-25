@@ -142,6 +142,9 @@ impl<'a> Sema<'a> {
         let ty = self.var_ty(v);
         match v {
             VarRef::Local(l) => {
+                if let Some(e) = self.ct_local_const(l, span) {
+                    return e;
+                }
                 self.ct_field_use(l, 1);
                 mk(ExprKind::Local(l), ty, span)
             }
@@ -158,6 +161,9 @@ impl<'a> Sema<'a> {
 
     /// `a`, `a.b.c`: locals, globals, namespaces, enum variants, fields.
     pub(crate) fn path_expr(&mut self, segs: &[&ast::Ident], span: Span, expected: Option<TypeId>) -> hir::Expr {
+        if let Some(e) = self.ct_type_path(segs, span) {
+            return e;
+        }
         let (mut base, consumed) = match self.lookup_local(&segs[0].name, true) {
             Some(Ok(v)) => {
                 self.ide_local_ref(segs[0]);
@@ -435,6 +441,9 @@ impl<'a> Sema<'a> {
                 if v.ty != self.tt.bool_ && !self.tt.is_invalid(v.ty) {
                     self.err(format!("operator ! is not defined on {}", self.tn(v.ty)), span);
                 }
+                if let ExprKind::Const(hir::ConstValue::Bool(b)) = v.kind {
+                    return mk(ExprKind::Const(hir::ConstValue::Bool(!b)), self.tt.bool_, span);
+                }
                 mk(ExprKind::Unary { op: UnOp::Not, operand: Box::new(v) }, self.tt.bool_, span)
             }
             ast::UnaryOp::AddrOf => {
@@ -485,9 +494,23 @@ impl<'a> Sema<'a> {
 
     fn binary(&mut self, op: ast::BinaryOp, l: &ast::Expr, r: &ast::Expr, span: Span, expected: Option<TypeId>) -> hir::Expr {
         use ast::BinaryOp as B;
+        if matches!(op, B::Eq | B::Ne) {
+            if let Some(c) = self.ct_type_test(op == B::Ne, l, r, span) {
+                return c;
+            }
+        }
         if matches!(op, B::And | B::Or) {
             let bt = self.tt.bool_;
+            let folds = self.refl.folds;
             let lv = self.value(l, Some(bt));
+            // A left side that compile-time reflection folded and that
+            // decides the result: the right side is dead and not checked
+            // (`f.Type.Kind == reflect.Kind.String && f.Get(v) == ""`).
+            if let ExprKind::Const(hir::ConstValue::Bool(a)) = lv.kind {
+                if self.refl.folds > folds && (if op == B::And { !a } else { a }) {
+                    return lv;
+                }
+            }
             let rv = self.value(r, Some(bt));
             for v in [&lv, &rv] {
                 if v.ty != bt && !self.tt.is_invalid(v.ty) {
@@ -562,6 +585,24 @@ impl<'a> Sema<'a> {
                         let negated = matches!(hop, BinOp::StrNe | BinOp::Ne);
                         return mk(ExprKind::Const(hir::ConstValue::Bool(eq != negated)), ty, span);
                     }
+                    if let (hir::ConstValue::Int(a), hir::ConstValue::Int(b)) = (a, b) {
+                        let ord = match hop {
+                            BinOp::Lt => Some(a < b),
+                            BinOp::Le => Some(a <= b),
+                            BinOp::Gt => Some(a > b),
+                            BinOp::Ge => Some(a >= b),
+                            _ => None,
+                        };
+                        if let Some(v) = ord {
+                            return mk(ExprKind::Const(hir::ConstValue::Bool(v)), ty, span);
+                        }
+                    }
+                }
+                // Plain enum variants (`f.Type.Kind == reflect.Kind.Int`).
+                if let (ExprKind::EnumLit { enum_id: a, variant: va, args: x }, ExprKind::EnumLit { enum_id: b, variant: vb, args: y }) = (&lv.kind, &rv.kind) {
+                    if a == b && x.is_empty() && y.is_empty() && matches!(hop, BinOp::Eq | BinOp::Ne) {
+                        return mk(ExprKind::Const(hir::ConstValue::Bool((va == vb) != (hop == BinOp::Ne))), ty, span);
+                    }
                 }
                 mk(ExprKind::Binary { op: hop, lhs: Box::new(lv), rhs: Box::new(rv) }, ty, span)
             }
@@ -574,6 +615,9 @@ impl<'a> Sema<'a> {
     pub(crate) fn binop_for(&mut self, op: ast::BinaryOp, l: TypeId, r: TypeId, span: Span) -> Option<(BinOp, TypeId)> {
         use ast::BinaryOp as B;
         let sym = op_symbol(op);
+        if self.tt.is_invalid(l) || self.tt.is_invalid(r) {
+            return None;
+        }
         if matches!(op, B::Shl | B::Shr) {
             if !self.tt.is_integer(l) || !self.tt.is_integer(r) {
                 self.err(format!("operator {sym} requires integer operands, found {} and {}", self.tn(l), self.tn(r)), span);

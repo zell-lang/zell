@@ -1,0 +1,51 @@
+// test: inside an unrolled reflect.Fields<T>() loop, f.Attribute<A>() != nil / == nil, f.Type.Kind, f.Type == reflect.TypeOf<U>(), f.Name == "lit" and a local bound to f.Attribute<A>() are compile-time conditions: only the branch taken is checked, so it may use the field as its own type; a condition on run-time values still works at run time
+// status: passing
+namespace spec.reflection.static_field_conditions
+
+import io
+
+@attribute(targets: [reflect.Target.Field])
+struct bonus {
+    add int
+}
+
+struct Row {
+    @bonus(add: 10) Count int
+    Title string
+    Done bool
+    Tags []string
+}
+
+func Score<T>(v T) int {
+    var n = 0
+    for f in reflect.Fields<T>() {
+        // A local bound to the attribute folds like the call itself.
+        var b = f.Attribute<bonus>()
+        if b != nil && b.add > 5 {
+            n += f.Get(v) + b.add           // only for the int field with @bonus
+        }
+        if f.Attribute<bonus>() == nil && f.Type.Kind == reflect.Kind.String {
+            n += len(f.Get(v))              // string-only code
+        }
+        if f.Type == reflect.TypeOf<bool>() {
+            if f.Get(v) {
+                n += 100
+            }
+        } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind == reflect.Kind.String {
+            n += 1000 * len(f.Get(v))
+        }
+        if f.Name == "Title" {
+            println("title field:", f.Type.Name)
+        }
+        // Not static: depends on the value, evaluated at run time.
+        if n > 20 && f.Index == 1 {
+            println("over 20 after", f.Name)
+        }
+    }
+    return n
+}
+
+func main() {
+    println(Score(Row{Count: 5, Title: "abcdefgh", Done: true, Tags: ["a", "b"]}))
+    println(Score(Row{Count: 1, Title: "x"}))
+}
