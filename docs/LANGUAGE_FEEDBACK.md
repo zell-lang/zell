@@ -580,3 +580,14 @@ written by hand), **33** (see 67), **46** (see 78).
     memory of the release build, which is worth profiling before files get
     larger. No decision needed: record it in `benchmarks/README.md` if it
     is tracked.
+81. 📘 **One `namespace` per file (decision, 2026-10-25):** the kitchen-sink
+    program listed "a second namespace in the file" as unusable; this is the
+    rule, now stated explicitly in DESIGN.md «Файлы и пространства имён»:
+    exactly one `namespace` declaration, first in the file; a namespace may
+    span several files, a nested namespace is a separate file.
+82. ❌ **Spec gap from the fix of 60:** inside a generic function,
+    `var (v, ok) = m[k]` destructures when `V` is instantiated as a 2-tuple
+    and is comma-ok otherwise, so one source line means two things.
+    Suggested decision: in a generic body the form is decided at the template
+    check from the declared type (`V` a type parameter means comma-ok,
+    always).
