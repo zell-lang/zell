@@ -153,8 +153,8 @@ func Format(secs int) string {
 ```
 
 `Total` depends on a `Source`, an interface, so tests can replace the
-real one. Interface methods are not `async` themselves: an
-implementation returns a task, here by calling an `async` function.
+real one. Its method is `async` (it returns a task), and so are the
+methods that implement it.
 
 <!-- file: src/plan.zl -->
 ```zell title="src/plan.zl"
@@ -169,25 +169,21 @@ const ErrUnknownStep = error("unknown step")
 
 // Source is the dependency. Tests pass a fake; main passes Memory.
 interface Source {
-    func Lookup(step string) Task<string!>
+    async func Lookup(step string) string!
 }
 
 // Memory is a Source backed by a map, with a small delay like real I/O.
 struct Memory {
     Steps map[string]string
 
-    func Lookup(step string) Task<string!> {
-        return lookup(this.Steps, step)
+    async func Lookup(step string) string! {
+        await task.Delay(1)
+        var (d, ok) = this.Steps[step]
+        if !ok {
+            return errors.Wrap(ErrUnknownStep, strconv.Quote(step))
+        }
+        return d
     }
-}
-
-async func lookup(steps map[string]string, step string) string! {
-    await task.Delay(1)
-    var (d, ok) = steps[step]
-    if !ok {
-        return errors.Wrap(ErrUnknownStep, strconv.Quote(step))
-    }
-    return d
 }
 
 // Total looks up every step and adds up their durations. The first
@@ -419,21 +415,17 @@ struct Fake {
     answers map[string]string
     calls   *int
 
-    func Lookup(step string) Task<string!> {
+    async func Lookup(step string) string! {
         *this.calls += 1
-        return answer(this.answers, step)
+        if step == "flaky" {
+            return error("connection reset")
+        }
+        var (d, ok) = this.answers[step]
+        if !ok {
+            return ErrUnknownStep
+        }
+        return d
     }
-}
-
-async func answer(answers map[string]string, step string) string! {
-    if step == "flaky" {
-        return error("connection reset")
-    }
-    var (d, ok) = answers[step]
-    if !ok {
-        return ErrUnknownStep
-    }
-    return d
 }
 
 func fake() Fake {

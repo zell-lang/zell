@@ -9,25 +9,21 @@ const ErrUnknownStep = error("unknown step")
 
 // Source is the dependency. Tests pass a fake; main passes Memory.
 interface Source {
-    func Lookup(step string) Task<string!>
+    async func Lookup(step string) string!
 }
 
 // Memory is a Source backed by a map, with a small delay like real I/O.
 struct Memory {
     Steps map[string]string
 
-    func Lookup(step string) Task<string!> {
-        return lookup(this.Steps, step)
+    async func Lookup(step string) string! {
+        await task.Delay(1)
+        var (d, ok) = this.Steps[step]
+        if !ok {
+            return errors.Wrap(ErrUnknownStep, strconv.Quote(step))
+        }
+        return d
     }
-}
-
-async func lookup(steps map[string]string, step string) string! {
-    await task.Delay(1)
-    var (d, ok) = steps[step]
-    if !ok {
-        return errors.Wrap(ErrUnknownStep, strconv.Quote(step))
-    }
-    return d
 }
 
 // Total looks up every step and adds up their durations. The first

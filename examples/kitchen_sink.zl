@@ -1346,14 +1346,11 @@ interface Notifier {
 
 struct MailNotifier {
     prefix string
-    func Notify(msg string) Task<int> {
-        return sendMail(this.prefix + msg)
+    // An async method implements the Task<int> interface method.
+    async func Notify(msg string) int {
+        await task.Yield()
+        return len(this.prefix + msg)
     }
-}
-
-async func sendMail(text string) int {
-    await task.Yield()
-    return len(text)
 }
 
 func fieldDefaults<T>() []string {

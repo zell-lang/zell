@@ -50,15 +50,15 @@ struct ValidationError {
     }
 }
 
-// Repository is what the handlers depend on. Its methods return tasks,
-// so a database-backed implementation (see the inventory-db example) can
-// drop in without changing a handler.
+// Repository is what the handlers depend on. Its methods are async (each
+// one returns a task), so a database-backed implementation (see the
+// inventory-db example) can drop in without changing a handler.
 interface Repository {
-    func List() Task<[]Book>
-    func Get(id int) Task<Book!>
-    func Create(in BookInput) Task<Book>
-    func Update(id int, in BookInput) Task<Book!>
-    func Delete(id int) Task<void!>
+    async func List() []Book
+    async func Get(id int) Book!
+    async func Create(in BookInput) Book
+    async func Update(id int, in BookInput) Book!
+    async func Delete(id int) void!
 }
 
 // MemoryRepo keeps books in a map. Requests are served by several worker
@@ -73,75 +73,58 @@ struct MemoryRepo {
         return new MemoryRepo{books: map[int]Book{}, nextId: 1}
     }
 
-    // Interface methods are not async, so an async implementation is a
-    // plain method that starts an async function and returns its task.
-    // The work happens in the mem* functions below.
-    func List() Task<[]Book> {
-        return memList(this)
+    async func List() []Book {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        // Map order is unspecified; sorting by key gives clients a stable
+        // order (by id, which is also creation order).
+        return maps.SortedValues(this.books)
     }
 
-    func Get(id int) Task<Book!> {
-        return memGet(this, id)
+    async func Get(id int) Book! {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        var (b, ok) = this.books[id]
+        if !ok {
+            return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
+        }
+        return b
     }
 
-    func Create(in BookInput) Task<Book> {
-        return memCreate(this, in)
+    async func Create(in BookInput) Book {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        var b = Book{
+            Id: this.nextId,
+            Title: in.Title,
+            Author: in.Author,
+            Year: in.Year,
+            Tags: in.Tags,
+        }
+        this.books[b.Id] = b
+        this.nextId += 1
+        return b
     }
 
-    func Update(id int, in BookInput) Task<Book!> {
-        return memUpdate(this, id, in)
+    async func Update(id int, in BookInput) Book! {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        var (_, ok) = this.books[id]
+        if !ok {
+            return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
+        }
+        var b = Book{Id: id, Title: in.Title, Author: in.Author, Year: in.Year, Tags: in.Tags}
+        this.books[id] = b
+        return b
     }
 
-    func Delete(id int) Task<void!> {
-        return memDelete(this, id)
+    async func Delete(id int) void! {
+        await this.mu.Lock()
+        defer this.mu.Unlock()
+        var (_, ok) = this.books[id]
+        if !ok {
+            return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
+        }
+        delete(this.books, id)
     }
-}
-
-async func memList(r *MemoryRepo) []Book {
-    await r.mu.Lock()
-    defer r.mu.Unlock()
-    // Map order is unspecified; sorting by key gives clients a stable
-    // order (by id, which is also creation order).
-    return maps.SortedValues(r.books)
-}
-
-async func memGet(r *MemoryRepo, id int) Book! {
-    await r.mu.Lock()
-    defer r.mu.Unlock()
-    var (b, ok) = r.books[id]
-    if !ok {
-        return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
-    }
-    return b
-}
-
-async func memCreate(r *MemoryRepo, in BookInput) Book {
-    await r.mu.Lock()
-    defer r.mu.Unlock()
-    var b = Book{Id: r.nextId, Title: in.Title, Author: in.Author, Year: in.Year, Tags: in.Tags}
-    r.books[b.Id] = b
-    r.nextId += 1
-    return b
-}
-
-async func memUpdate(r *MemoryRepo, id int, in BookInput) Book! {
-    await r.mu.Lock()
-    defer r.mu.Unlock()
-    var (_, ok) = r.books[id]
-    if !ok {
-        return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
-    }
-    var b = Book{Id: id, Title: in.Title, Author: in.Author, Year: in.Year, Tags: in.Tags}
-    r.books[id] = b
-    return b
-}
-
-async func memDelete(r *MemoryRepo, id int) void! {
-    await r.mu.Lock()
-    defer r.mu.Unlock()
-    var (_, ok) = r.books[id]
-    if !ok {
-        return errors.Wrap(ErrBookNotFound, fmt.Format("book {0}", id))
-    }
-    delete(r.books, id)
 }

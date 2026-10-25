@@ -58,46 +58,43 @@ struct store {
 struct fakeS3 {
     st *store
 
-    func Serve(req *net.http.Request, res *net.http.Response) Task<void!> {
-        return handle(this.st, req, res)
-    }
-}
-
-async func handle(st *store, req *net.http.Request, res *net.http.Response) void! {
-    var path = net.url.PathUnescape(req.Path)?
-    var slash = strings.Index(path[1..], "/")
-    if slash < 0 {
-        // the bucket itself: create, or ListObjectsV2
-        if req.Method == "PUT" {
-            res.Text(200, "")
-            return
-        }
-        var prefix = net.url.QueryUnescape(strings.Split(req.Query + "&prefix=", "prefix=")[1])?
-        prefix = strings.Split(prefix, "&")[0]
-        var out = "<ListBucketResult><IsTruncated>false</IsTruncated>"
-        for k in maps.SortedKeys(st.objects) {
-            if strings.HasPrefix(k, path + "/" + prefix) {
-                out += "<Contents><Key>" + k[len(path) + 1..] + "</Key><Size>" + strconv.Itoa(len(st.objects[k])) + "</Size></Contents>"
-            }
-        }
-        res.Text(200, out + "</ListBucketResult>")
-        return
-    }
-    switch req.Method {
-        case "PUT":
-            st.objects[path] = req.Body
-            st.types[path] = req.Header("Content-Type")
-            res.Text(200, "")
-        case "DELETE":
-            delete(st.objects, path)
-            res.Text(204, "")
-        default:
-            if st.objects[path] == "" {
-                res.Text(404, "<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>")
+    async func Serve(req *net.http.Request, res *net.http.Response) void! {
+        var st = this.st
+        var path = net.url.PathUnescape(req.Path)?
+        var slash = strings.Index(path[1..], "/")
+        if slash < 0 {
+            // the bucket itself: create, or ListObjectsV2
+            if req.Method == "PUT" {
+                res.Text(200, "")
                 return
             }
-            res.SetHeader("Content-Type", st.types[path])
-            res.Write(st.objects[path])
-            res.Status = 200
+            var prefix = net.url.QueryUnescape(strings.Split(req.Query + "&prefix=", "prefix=")[1])?
+            prefix = strings.Split(prefix, "&")[0]
+            var out = "<ListBucketResult><IsTruncated>false</IsTruncated>"
+            for k in maps.SortedKeys(st.objects) {
+                if strings.HasPrefix(k, path + "/" + prefix) {
+                    out += "<Contents><Key>" + k[len(path) + 1..] + "</Key><Size>" + strconv.Itoa(len(st.objects[k])) + "</Size></Contents>"
+                }
+            }
+            res.Text(200, out + "</ListBucketResult>")
+            return
+        }
+        switch req.Method {
+            case "PUT":
+                st.objects[path] = req.Body
+                st.types[path] = req.Header("Content-Type")
+                res.Text(200, "")
+            case "DELETE":
+                delete(st.objects, path)
+                res.Text(204, "")
+            default:
+                if st.objects[path] == "" {
+                    res.Text(404, "<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>")
+                    return
+                }
+                res.SetHeader("Content-Type", st.types[path])
+                res.Write(st.objects[path])
+                res.Status = 200
+        }
     }
 }

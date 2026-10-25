@@ -10,21 +10,17 @@ struct Fake {
     answers map[string]string
     calls   *int
 
-    func Lookup(step string) Task<string!> {
+    async func Lookup(step string) string! {
         *this.calls += 1
-        return answer(this.answers, step)
+        if step == "flaky" {
+            return error("connection reset")
+        }
+        var (d, ok) = this.answers[step]
+        if !ok {
+            return ErrUnknownStep
+        }
+        return d
     }
-}
-
-async func answer(answers map[string]string, step string) string! {
-    if step == "flaky" {
-        return error("connection reset")
-    }
-    var (d, ok) = answers[step]
-    if !ok {
-        return ErrUnknownStep
-    }
-    return d
 }
 
 func fake() Fake {
