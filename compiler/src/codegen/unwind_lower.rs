@@ -764,14 +764,21 @@ impl Lower {
             }
             all || (b != push && pushed.contains(&b))
         };
-        // Per landing pad: the values its part of the region uses.
+        // Per landing pad: the values its part of the region uses. Every
+        // walk below goes in block and instruction order, never in hash
+        // order: the slots' allocas (the frame layout) and the stores must
+        // not depend on the hash seed or on debug metadata (same code with
+        // and without `-g`, reproducible builds).
+        let order = blocks(self.f);
+        let lp_set: HashSet<LLVMBasicBlockRef> = calls.values().copied().collect();
+        let lpads: Vec<LLVMBasicBlockRef> = order.iter().copied().filter(|b| lp_set.contains(b)).collect();
+        let calls: Vec<(LLVMValueRef, LLVMBasicBlockRef)> = order.iter().flat_map(|&b| insts(b)).filter_map(|i| calls.get(&i).map(|lp| (i, *lp))).collect();
         let mut slots: HashMap<LLVMValueRef, LLVMValueRef> = HashMap::new();
         let mut needed: HashMap<LLVMBasicBlockRef, Vec<LLVMValueRef>> = HashMap::new();
-        let lpads: HashSet<LLVMBasicBlockRef> = calls.values().copied().collect();
         for &lp in &lpads {
             let mut vals = Vec::new();
             let reach = reachable(&[lp]);
-            for &b in &reach {
+            for &b in order.iter().filter(|b| reach.contains(b)) {
                 for i in insts(b) {
                     for k in 0..llc::LLVMGetNumOperands(i) as u32 {
                         let o = llc::LLVMGetOperand(i, k);
@@ -794,16 +801,21 @@ impl Lower {
         }
         // Where to store: before a cold call (a panic) when only such calls
         // need the value; else once, right after its definition.
-        let mut at_def: HashSet<LLVMValueRef> = HashSet::new();
-        for (&call, lp) in calls {
+        let mut at_def: Vec<LLVMValueRef> = Vec::new();
+        let mut at_set: HashSet<LLVMValueRef> = HashSet::new();
+        for &(call, lp) in &calls {
             if !self.is_cold(call) {
-                at_def.extend(needed[lp].iter().copied());
+                for v in &needed[&lp] {
+                    if at_set.insert(*v) {
+                        at_def.push(*v);
+                    }
+                }
             }
         }
-        for (&call, lp) in calls {
+        for &(call, lp) in &calls {
             llc::LLVMPositionBuilderBefore(self.b, call);
-            for v in &needed[lp] {
-                if !at_def.contains(v) {
+            for v in &needed[&lp] {
+                if !at_set.contains(v) {
                     self.store_volatile(*v, slots[v]);
                 }
             }

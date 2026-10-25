@@ -335,9 +335,22 @@ fn debug_info_flags_and_identical_code() {
     build(&src, &strip, &["--emit=obj", "--strip"]);
     // ".debug_info" in ELF and COFF, "__debug_info" (segment __DWARF) in Mach-O
     assert!(has_section(&dbg, "debug_info"), "debug build without DWARF");
-    assert!(!has_section(&rel, "debug_info"), "release build with DWARF");
     assert!(has_section(&relg, "debug_info"), "--release -g without DWARF");
-    assert!(!has_section(&strip, "debug_info"), "--strip kept DWARF");
+    // Objects always carry DWARF line tables where `.zell_lines` is built
+    // from them after the link (839dc36, ABI.md 8.2): without -g they are
+    // line tables only, so no variable is described (`nums` is a local of
+    // the values.zl fixture); the linked release executable drops the
+    // DWARF (checked below).
+    let local = |o: &Path| std::fs::read(o).unwrap().windows(5).any(|w| w == b"nums\0");
+    if src.ends_with("values.zl") {
+        assert!(local(&dbg) && local(&relg), "-g objects without variables");
+        assert!(!local(&rel), "release object with full DWARF");
+        assert!(!local(&strip), "--strip object with full DWARF");
+    }
+    if !zell::lines::supported(&zell::target::current()) {
+        assert!(!has_section(&rel, "debug_info"), "release build with DWARF");
+        assert!(!has_section(&strip, "debug_info"), "--strip kept DWARF");
+    }
     if let Some(objdump) = tool(&["llvm-objdump", "llvm-objdump-18"]) {
         assert_eq!(disasm(&objdump, &rel), disasm(&objdump, &relg), "-g changed the release code of {}", src.display());
         assert_eq!(disasm(&objdump, &dbg), disasm(&objdump, &strip), "debug info changed the -O0 code of {}", src.display());

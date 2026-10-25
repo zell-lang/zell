@@ -151,7 +151,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     `Drop` (only `Rows`), so `examples/sql.zl` still needs `defer
     tx.Rollback()` and `defer db.Close()`; give them a `Drop`.
 
-29. ❌ **Red test `compiler/tests/debug.rs::debug_info_flags_and_identical_code`**
+29. ✅ **Fixed (2026-10-25):** two causes. (1) The code differed because the unwind lowering of edace29 (`codegen/unwind_lower.rs`, `demote`) created the slots of values a landing pad reads by iterating hash sets and maps, so the order of the frame's allocas (and the escaped offsets) followed the hash seed: release builds were not even reproducible from one run to the next, `-g` or not. It now walks blocks and instructions in order. (2) The DWARF assertion was wrong since the line tables: an object always carries line tables (the executable drops them, `.zell_lines`), so the test now checks that release and `--strip` objects describe no variables, and keeps the section check for targets without line tables. **Red test `compiler/tests/debug.rs::debug_info_flags_and_identical_code`**
     since the ZLN2 line tables (`c2d65eb`): codegen now always emits DWARF
     line tables and artificial subprograms for the helpers (`rc.retain.*`,
     `any.inline`), so a `--release --emit=obj` object carries `.debug_info`
