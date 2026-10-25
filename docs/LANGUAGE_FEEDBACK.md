@@ -198,7 +198,7 @@ documentation's Examples section, tested by
     must handle its error). Workaround: rely on `Drop`, or defer a closure
     with `try ... catch`; consider allowing it with the error dropped, or a
     `defer try` form.
-39. ❌ **`testing.Equal` and `testing.True` take messages inconsistently**:
+39. ✅ **Fixed (2026-10-25):** added `testing.EqualMsg(t, got, want, msg)` (no variadics; named like `EqualFatal`), reporting `msg: got X, want Y`; `True`/`False` keep their required message; rules in `docs/guide/testing.md`. **`testing.Equal` and `testing.True` take messages inconsistently**:
     `Equal(t, got, want)` has no message argument, `True(t, cond, msg)`
     requires one. Workaround: `t.Log` the context before `Equal`.
 40. ❌ **`import net` brings `net.ErrNotFound` into scope and it clashes with

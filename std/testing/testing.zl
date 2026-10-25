@@ -269,6 +269,17 @@ func Equal<V: Comparable>(t *T, got V, want V) bool {
     return true
 }
 
+// EqualMsg is Equal with context: on failure it reports
+// "msg: got X, want Y". Every assertion that takes a message puts it first
+// in the report, like True and False.
+func EqualMsg<V: Comparable>(t *T, got V, want V, msg string) bool {
+    if got != want {
+        t.Error(msg + ": got " + show(got) + ", want " + show(want))
+        return false
+    }
+    return true
+}
+
 // Equal that ends the test on failure.
 func EqualFatal<V: Comparable>(t *T, got V, want V) {
     if got != want {

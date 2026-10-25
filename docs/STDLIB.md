@@ -66,7 +66,7 @@
 | `crypto/*` примитивы | `crypto.{hash,hmac,aes,chacha,x25519,ecdsa,ed25519,rsa,hkdf,kdf,password}` | ✅ есть hash (+ BLAKE2b), hmac, aes-gcm, aes-cbc + PKCS#7, chacha, x25519, P-256 и P-384 (ECDH/ECDSA, RFC 6979), ed25519, rsa (подпись, OAEP, генерация ключей), hkdf, kdf (PBKDF2, scrypt, Argon2d/i/id по RFC 9106), password (PHC `$argon2id$`, `Verify`, `NeedsRehash`); нет P-521, SHA-3 | `password.Hash/Verify` на Argon2 из коробки |
 | `encoding/base64`, `base32`, `hex`, `ascii85`, `pem`, `asn1` | `encoding.*` | 🟡 есть base64, hex, base32, pem (с заголовками), asn1 (DER reader/Builder поверх ридера x509); нет ascii85 | — |
 | `runtime` | `runtime` (`NumCPU`, `Version`, `GC` → нет) | 🟡 частично (`diag.Runtime()` с `HeapInUse`/`HeapRetained`/`HeapReleased`, `runtime.FreeOSMemory()`) | — |
-| `testing` | `testing` + `zell test` | ✅ есть (`@test` с `*testing.T`/без параметров, бенчмарки `@test func B(b *testing.B)`, `t.Run`, `Fatal/Error/Skip/Log`, assert-функции, `--filter/--json/--bench/-v/--parallel`, тест в отдельном процессе) | `@test`, табличные тесты, assert; нет snapshot |
+| `testing` | `testing` + `zell test` | ✅ есть (`@test` с `*testing.T`/без параметров, бенчмарки `@test func B(b *testing.B)`, `t.Run`, `Fatal/Error/Skip/Log`, assert-функции (`Equal`/`EqualMsg`/`True(t, cond, msg)`, …), `--filter/--json/--bench/-v/--parallel`, тест в отдельном процессе) | `@test`, табличные тесты, assert; нет snapshot |
 | `log` | `log` | ✅ есть | уровень Serilog: шаблоны при компиляции, sinks, enrichers |
 | `log/slog` | то же | ✅ есть | — |
 | `log/syslog` | `log.WriteTo.Syslog` | ❌ нет | — |

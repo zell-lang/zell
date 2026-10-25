@@ -11,6 +11,7 @@ struct sq {
 
 func testGood(t *testing.T) {
     testing.Equal(t, 2 + 2, 4)
+    testing.EqualMsg(t, 3, 3, "three")
     testing.NotEqual(t, "a", "b")
     testing.True(t, len("x") == 1, "len")
     testing.False(t, false, "never")
@@ -31,6 +32,7 @@ func testBad(t *testing.T) {
     testing.EqualSlices(t, [1], [2])
     testing.ErrorIs(t, error("other"), fs.ErrNotFound)
     testing.True(t, false, "must hold")
+    testing.EqualMsg(t, 5, 6, "row 2")
 }
 
 func testFatal(t *testing.T) {

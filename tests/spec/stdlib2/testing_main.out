@@ -4,6 +4,7 @@
     got [1], want [2]
     error "other" is not "No such file or directory"
     expected true: must hold
+    row 2: got 5, want 6
 --- FAIL: TestBad
     got 1, want 3
 --- FAIL: TestFatal

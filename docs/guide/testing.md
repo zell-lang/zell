@@ -55,6 +55,12 @@ func Parse(s string) int! {
 }
 ```
 
+Messages: `Equal(t, got, want)` reports `got X, want Y`;
+`EqualMsg(t, got, want, msg)` is the same with context and reports
+`msg: got X, want Y`. `True(t, cond, msg)` and `False(t, cond, msg)`
+always take the message, since a bare `expected true` says nothing; they
+report `expected true: msg`.
+
 `t.Log(msg)` prints under the test (shown for failures and with `-v`),
 `t.Error(msg)` marks it failed and continues, `t.Fatal(msg)` stops it,
 `t.Skip(msg)` skips the rest. Other assertions: `True`, `False`, `Nil`,
