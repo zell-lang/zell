@@ -2,7 +2,7 @@ SELECT t0."id", t0."name", t0."email", t0."age", t0."joined", t0."admin" FROM "u
 SELECT t0."id", t0."name", t0."email", t0."age", t0."joined", t0."admin" FROM "users" AS t0 WHERE ((((t0."age" IS NOT NULL) AND (t0."age" >= $1)) AND (NOT t0."admin")) OR starts_with(t0."name", $2))
   Ann
   Dee
-SELECT t0."id", t0."name", t0."email", t0."age", t0."joined", t0."admin" FROM "users" AS t0 WHERE (((length(?) = 0 OR substr(t0."email", -length(?)) = ?) AND (t0."joined" < ?)) AND (length(t0."name") = 3)) [@a.io @a.io @a.io <time.Time>]
+SELECT t0."id", t0."name", t0."email", t0."age", t0."joined", t0."admin" FROM "users" AS t0 WHERE (((length(?) = 0 OR substr(t0."email", -length(?)) = ?) AND (t0."joined" < ?)) AND (length(t0."name") = 3)) [@a.io @a.io @a.io 2024-03-01 00:00:00 +0000 UTC]
 SELECT t0."id", t0."name", t0."email", t0."age", t0."joined", t0."admin" FROM "users" AS t0 WHERE (((right(t0."email", length($1)) = $2) AND (t0."joined" < $3)) AND (char_length(t0."name") = 3))
 Ann
 SELECT t0."id", t0."name", t0."email", t0."age", t0."joined", t0."admin" FROM "users" AS t0 WHERE ((instr(lower(t0."name"), ?) > 0) OR (upper(t0."email") = ?))

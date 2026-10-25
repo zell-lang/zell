@@ -545,8 +545,18 @@ impl<'a> Sema<'a> {
             Type::Param(_) => true,
             Type::Slice(e) | Type::Array(e, _) => self.printable(*e),
             Type::Tuple(es) => es.iter().all(|e| self.printable(*e)),
+            Type::Struct(_) => self.has_stringer(t),
+            Type::Pointer(inner) => matches!(self.tt.get(*inner), Type::Struct(_)) && self.has_stringer(*inner),
             _ => false,
         }
+    }
+
+    /// Whether struct or enum type `t` has a method `String() string` (own
+    /// or promoted from an embedded field): `println` and the formatters
+    /// print its result (Go's `fmt.Stringer`, DESIGN.md «Вывод»).
+    pub(crate) fn has_stringer(&self, t: TypeId) -> bool {
+        matches!(self.tt.get(t), Type::Struct(_) | Type::Enum(_))
+            && self.op_method(t, "String").is_some_and(|m| m.params.is_empty() && m.ret == self.tt.string && !m.is_async)
     }
 
     /// Checks a variadic "any" argument for printing/formatting.

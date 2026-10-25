@@ -454,7 +454,7 @@ written by hand), **33** (see 67), **46** (see 78).
     its declaration span; global initializers too). Spec test
     `diagnostics/invalid_type_follow_ups` (with `// no-stderr:`, which now
     also applies to compile-fail tests).
-64. ❌ **inconsistency:** **`println` and `fmt.Format` ignore a `String()
+64. ✅ **Fixed (2026-10-25):** as decided: a struct or enum with `String() string` (own or promoted; `S` and `*S`, nil prints `nil`) prints its result in `println`, `print`, `fmt.Format` and `fmt.Sprintf` `%v`/`%s`, also inside slices, arrays, tuples and `any`; `error` keeps `Message()` (DESIGN.md «Ядро», `examples/README.md`). Spec: `basics/stringer_printing`; `data/queries` now prints a `time.Time` argument as its date instead of `<time.Time>`. **inconsistency:** **`println` and `fmt.Format` ignore a `String()
     string` method** ("value of type Money cannot be printed") even though
     `fmt.Stringer` exists (DESIGN.md mentions `implements fmt.Stringer`).
     Workaround: `.String()` written at every call site (about 15 times in the

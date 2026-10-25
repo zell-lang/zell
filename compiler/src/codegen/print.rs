@@ -90,6 +90,21 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// Formats value `x` of type `t`; owned unless it is a literal.
     pub(crate) fn stringify(&mut self, t: TypeId, x: BasicValueEnum<'ctx>) -> R<Val<'ctx>> {
+        // A `String() string` method wins (Go's fmt.Stringer).
+        if let Some((fid, path)) = self.stringer(t) {
+            let fv = self.funcs[fid.0 as usize];
+            if matches!(self.ty(t), Type::Enum(_)) {
+                return Ok(Val::owned(self.call_fn(fv, &[x.into()]).try_as_basic_value().left().unwrap()));
+            }
+            let p = self.spill(x);
+            return Ok(Val::owned(self.call_stringer(t, p, fv, &path)));
+        }
+        if let Type::Pointer(inner) = *self.ty(t) {
+            if self.stringer(inner).is_some() {
+                let f = self.tostr_fn(t)?;
+                return Ok(Val::owned(self.call_fn(f, &[x.into()]).try_as_basic_value().left().unwrap()));
+            }
+        }
         Ok(match self.ty(t).clone() {
             Type::String => {
                 self.retain_val(t, x);
@@ -190,7 +205,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 cg.b.build_conditional_branch(eq, yes, next).unwrap();
                 cg.b.position_at_end(yes);
                 let printable = matches!(cg.ty(t), Type::Int(_) | Type::Float32 | Type::Float64 | Type::Bool | Type::Char | Type::String | Type::Error | Type::Slice(_) | Type::Array(..) | Type::Tuple(_))
-                    || matches!(cg.ty(t), Type::Enum(d) if cg.prog.enums[d.0 as usize].is_plain);
+                    || matches!(cg.ty(t), Type::Enum(d) if cg.prog.enums[d.0 as usize].is_plain)
+                    || cg.stringer(t).is_some()
+                    || matches!(cg.ty(t), Type::Pointer(p) if cg.stringer(*p).is_some());
                 let r = if printable {
                     let lt = cg.llty(t);
                     let v = if cg.any_inline(t) { cg.any_word_value(t, data) } else { cg.b.build_load(lt, data, "").unwrap() };
@@ -251,6 +268,22 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 cg.b.position_at_end(some);
                 let m = cg.call_rt_v("zell_error_message", &[arg.into()]);
                 cg.b.build_return(Some(&m)).unwrap();
+                return Ok(());
+            }
+            if let Type::Pointer(inner) = ty {
+                // `*S` whose `S` has `String()`: nil, else the method's result.
+                let nil = cg.block("nil");
+                let some = cg.block("some");
+                let isn = cg.b.build_is_null(arg, "").unwrap();
+                cg.b.build_conditional_branch(isn, nil, some).unwrap();
+                cg.b.position_at_end(nil);
+                let s = cg.str_lit("nil");
+                cg.b.build_return(Some(&s)).unwrap();
+                cg.b.position_at_end(some);
+                let (fid, path) = cg.stringer(inner).unwrap();
+                let fv = cg.funcs[fid.0 as usize];
+                let r = cg.call_stringer(inner, arg, fv, &path);
+                cg.b.build_return(Some(&r)).unwrap();
                 return Ok(());
             }
             if let Type::Tuple(elems) = &ty {
@@ -326,6 +359,63 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             Ok(())
         })?;
         Ok(f)
+    }
+
+    /// The `String() string` method of struct or enum type `t` (own, or
+    /// promoted through embedded fields: the shortest path, as in sema's
+    /// `find_method`), mirroring `Sema::has_stringer`.
+    pub(crate) fn stringer(&self, t: TypeId) -> Option<(crate::hir::FuncId, Vec<u32>)> {
+        let ok = |cg: &Self, f: crate::hir::FuncId| {
+            let func = &cg.prog.funcs[f.0 as usize];
+            !func.is_async && func.params.len() == 1 && *cg.ty(func.ret) == Type::String
+        };
+        match self.ty(t) {
+            Type::Enum(d) => {
+                let (_, f) = self.prog.enums[d.0 as usize].methods.iter().find(|(n, _)| n == "String")?;
+                ok(self, *f).then(|| (*f, Vec::new()))
+            }
+            Type::Struct(d) => self.struct_stringer(d.0, 0).filter(|(f, _)| ok(self, *f)),
+            _ => None,
+        }
+    }
+
+    fn struct_stringer(&self, sid: u32, depth: usize) -> Option<(crate::hir::FuncId, Vec<u32>)> {
+        let st = &self.prog.structs[sid as usize];
+        if let Some((_, f)) = st.methods.iter().find(|(n, _)| n == "String") {
+            if !matches!(self.prog.funcs[f.0 as usize].kind, crate::hir::FuncKind::Method { is_static: true, .. }) {
+                return Some((*f, Vec::new()));
+            }
+        }
+        if depth > 8 {
+            return None;
+        }
+        let mut best: Option<(crate::hir::FuncId, Vec<u32>)> = None;
+        for (i, f) in st.fields.iter().enumerate().filter(|(_, f)| f.embedded) {
+            if let Type::Struct(d) = self.ty(f.ty) {
+                if let Some((m, mut p)) = self.struct_stringer(d.0, depth + 1) {
+                    p.insert(0, i as u32);
+                    if best.as_ref().is_none_or(|b| p.len() < b.1.len()) {
+                        best = Some((m, p));
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Calls `String()` on the struct of type `t` at `p`, through the
+    /// embedded-field `path`; the result is owned.
+    fn call_stringer(&mut self, t: TypeId, p: inkwell::values::PointerValue<'ctx>, f: FunctionValue<'ctx>, path: &[u32]) -> BasicValueEnum<'ctx> {
+        let (mut p, mut t) = (p, t);
+        for &idx in path {
+            let Type::Struct(d) = *self.ty(t) else { break };
+            let fty = self.prog.structs[d.0 as usize].fields[idx as usize].ty;
+            let st = self.llty(t).into_struct_type();
+            let fp = self.b.build_struct_gep(st, p, idx, "").unwrap();
+            p = fp;
+            t = fty;
+        }
+        self.call_fn(f, &[p.into()]).try_as_basic_value().left().unwrap()
     }
 
     /// `*acc = *acc + s` (the old accumulator is released).

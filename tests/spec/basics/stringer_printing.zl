@@ -1,0 +1,59 @@
+// test: println, print, fmt.Format and fmt.Sprintf %v/%s print the result of a String() string method (Go fmt.Stringer): on struct values and pointers (nil prints nil), enums, a method promoted from an embedded field, elements of slices and tuples, and values in any; error values keep printing Message()
+// status: passing
+// run-flags: --leak-check
+namespace spec.basics.stringer_printing
+import io
+import fmt
+struct Money {
+    cents int
+    func String() string { return fmt.Format("${0}.{1}", this.cents / 100, this.cents % 100) }
+}
+struct Wallet {
+    Money
+    owner string
+}
+enum Color { Red, Green
+    func String() string {
+        if this == Color.Red { return "red" }
+        return "green"
+    }
+}
+struct NotFound {
+    path string
+    func Message() string { return "not found: " + this.path }
+    func String() string { return "NotFound(" + this.path + ")" }
+}
+struct Box<T> {
+    v T
+    func String() string { return fmt.Format("Box({0})", this.v) }
+}
+
+func show<T>(x T) { println("show", x) }
+
+func pair() (int, string) { return (3, "x") }
+func main() {
+    var m = Money{cents: 1234}
+    println(m, &m)
+    var p *Money = nil
+    println(p)
+    var ms []Money = [m, Money{cents: 5}]
+    println(ms)
+    var cs []Color = [Color.Green]
+    println(Color.Red, cs)
+    println(Wallet{Money: m, owner: "a"})
+    var a any = m
+    println(a)
+    println(fmt.Sprintf("%v|%s", m, Color.Green), fmt.Format("<{0}>", m))
+    var t = pair()
+    println(t, t.0, t._1, t.1)
+    var n = ((1, 2.5), (m, 'c'))
+    println(n, n.0.1, n.1.0)
+    print(m, m, "z", m)
+    println()
+    var e error = NotFound{path: "a.txt"}
+    println(e)
+    var nf = NotFound{path: "b.txt"}
+    println(nf)
+    show(Box<int>{v: 2})
+    show(Box<string>{v: "s"})
+}

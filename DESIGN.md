@@ -2365,6 +2365,18 @@ func Handle(words []string) int {
 | `time` | `Now`, `Duration`, `Sleep`, `Timer`, форматирование и парсинг дат | ✓ функциями над `int` (Unix-миллисекунды, UTC): `Now`, `NowNanos`, `Sleep`, `Since`, `Format`/`Parse` (strftime-раскладка), `Year`…`Second`, `Weekday`; типы (`stdlib_src/time.zl`): `Duration` (нс; `Seconds()`, `String()` как в Go `1h2m3.5s`, `ParseDuration`, конструкторы `time.Seconds(n)`… вместо констант), `Time` (`Time.Now()`/`Current()`, `Unix`, `Date`, `Add`/`Sub`/`AddDate`, `Before`/`After`/`Equal`, `Format` по эталону Go и `Strftime`, `ParseTime`/`ParseInLocation`, `Truncate`/`Round`, `In`/`UTC`/`Local`, `Zone`, `ISOWeek`), `Location` (`UTC()`, `Local()`, `LoadLocation` из `/usr/share/zoneinfo` с POSIX-правилами после последнего перехода, `FixedZone`), раскладки `RFC3339`…, `Instant` (монотонные часы), async `NewTicker`/`NewTimer`/`After`. Имена Go, занятые int-функциями: `Since` → `Elapsed`, `Sleep` → `SleepFor`, `Parse` → `ParseTime`, `t.Month()` — `int` |
 | `errors` | `Wrap`, `Unwrap`, `Is`, `As`, `New` | ✓ всё |
 
+Печать значений (`println`, `print`, `fmt.Format` `{N}`, `fmt.Sprintf`
+`%v`/`%s`; формат примитивов — `examples/README.md`): у структуры или enum с
+методом `String() string` (своим или поднятым из встроенного поля,
+статическая диспетчеризация, в generic-коде — в каждой инстанциации)
+печатается его результат, как у `fmt.Stringer` в Go. Методы структур
+работают с указателем, поэтому правило действует и для `S`, и для `*S`
+(nil-указатель печатается `nil`, метод не вызывается); так же печатаются
+элементы срезов, массивов, кортежей и значение в `any`. Значение типа
+`error` печатает `Message()`, даже если у динамического типа есть
+`String()`. Map и прочие структуры по-прежнему не печатаются (`value of
+type T cannot be printed`).
+
 Уровень 2 (`docs/STDLIB.md`; Zell в `compiler/src/sema/stdlib_src/`, C —
 `runtime/ABI.md` §21): `regex` (синтаксис RE2, ленивый DFA + Pike VM,
 линейное время; `regex.Pattern("литерал")` проверяется при компиляции),

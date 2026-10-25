@@ -58,6 +58,10 @@ The `.out` files depend on these rules; the runtime must follow them.
 - Slices and arrays: Go style, `[1 2 3]`, nested `[[1 2] [3 4]]`.
 - Tuples: `(3 x)`, elements separated by one space, nested `((1 2) z)`.
 - Plain enum values: the variant name (`Color.Green` prints `Green`).
+- A struct or enum with a method `String() string` (own or promoted from an
+  embedded field; for structs also through `*S`, where nil prints `nil`):
+  the result of `String()`, like Go's `fmt.Stringer`, also inside slices,
+  arrays, tuples and `any`.
 - Any value whose static type is `error` (or a struct used through the
   `error` interface): the result of its `Message()`.
 - `fmt.Format(tmpl, args...)`: each `{N}` is replaced by argument `N`
