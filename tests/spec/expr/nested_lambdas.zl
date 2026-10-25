@@ -1,0 +1,89 @@
+// test: a lambda passed to a call inside a tree is a Lambda node (its parameters continue the numbering of the outer ones); the call is a function or method marked @expr.call; the nested lambda reads outer parameters and captured values, Compile() evaluates it with the values captured when the tree was built
+// status: passing
+// run-flags: --leak-check
+namespace spec.expr.nested_lambdas
+
+import io
+
+struct Order {
+    Total float
+    Qty   int
+}
+
+struct User {
+    Name   string
+    Limit  int
+    Orders []*Order
+}
+
+// Any reports whether p holds for an element of xs (in memory; a
+// translator reads the Call node `spec.expr.nested_lambdas.Any`).
+@expr.call
+func Any<E>(xs []E, p func(E) bool) bool {
+    for x in xs {
+        if p(x) {
+            return true
+        }
+    }
+    return false
+}
+
+struct Group<T> {
+    Key   string
+    items []*T
+
+    @expr.call
+    func Count() int {
+        return len(this.items)
+    }
+
+    @expr.call
+    func Sum(f func(*T) float) float {
+        var s = 0.0
+        for x in this.items {
+            s += f(x)
+        }
+        return s
+    }
+}
+
+func describe(n *expr.Node) string {
+    switch *n {
+    case expr.Node.Lambda(first, names, body, _):
+        return fmt.Format("lambda@{0}{1}[{2}]", first, names, describe(body))
+    case expr.Node.Param(i, _):
+        return fmt.Format("p{0}", i)
+    case expr.Node.Call(fname, args, _):
+        var parts []string = []
+        for a in args {
+            parts = append(parts, describe(a))
+        }
+        return fname + "(" + strings.Join(parts, " ") + ")"
+    }
+    var parts []string = []
+    for c in expr.Children(n) {
+        parts = append(parts, describe(c))
+    }
+    if len(parts) == 0 {
+        return "."
+    }
+    return "{" + strings.Join(parts, " ") + "}"
+}
+
+func main() {
+    var min = 50.0
+    var p expr<func(*User) bool> = u => Any(u.Orders, o => o.Total * 2 > min && o.Qty < u.Limit)
+    println(p)
+    println(describe(p.Root()))
+    var ann = new User{Name: "Ann", Limit: 3, Orders: [new Order{Total: 30, Qty: 2}]}
+    var keep = p.Compile()
+    min = 100.0
+    println(keep(ann), p.Compile()(ann))
+    var q expr<func(*User) bool> = u => Any(u.Orders, o => o.Total * 2 > min && o.Qty < u.Limit)
+    println(q.Compile()(ann), expr.Values(q.Root()))
+
+    var g expr<func(Group<Order>) (string, int, float)> = g => (g.Key, g.Count(), g.Sum(o => o.Total * float(o.Qty)))
+    println(g)
+    println(describe(g.Root()))
+    println(g.Compile()(Group<Order>{Key: "k", items: ann.Orders}))
+}

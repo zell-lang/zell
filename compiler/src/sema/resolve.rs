@@ -780,7 +780,7 @@ impl<'a> Sema<'a> {
                     }
                 }
                 // `t`, `p.Type`, `m.Args` ... of an unrolled descriptor loop.
-                if generics.is_empty() && path.segments.len() <= 2 {
+                if generics.is_empty() && (path.segments.len() <= 2 || path.segments[1].name == "Type") {
                     if let Some(ty) = self.ct_desc_type(path) {
                         return ty;
                     }

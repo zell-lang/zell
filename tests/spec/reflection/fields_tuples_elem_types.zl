@@ -1,0 +1,60 @@
+// test: reflect.Fields<T>() unrolls over the elements of a tuple type (_0, _1, ... with f.Get/f.Set and f.Type), and f.Type.Elem / f.Type.Key (also p.Type.Elem) are descriptor types: the element types of a field's slice, pointer or map type as type arguments and in var declarations
+// status: passing
+// run-flags: --leak-check
+namespace spec.reflection.fields_tuples_elem_types
+
+import io
+
+struct Order {
+    Id    int
+    Total float
+}
+
+struct Shop {
+    Orders []*Order
+    Owner  *Order
+    Index  map[string]int
+    Name   string
+}
+
+// Fills a tuple (or struct) R from loosely typed values, element by element.
+func fill<R>(vals []any) R {
+    var r R
+    for f in reflect.Fields<R>() {
+        switch vals[f.Index] {
+        case f.Type v:
+            f.Set(&r, v)
+        }
+    }
+    return r
+}
+
+func shape<T>() {
+    for f in reflect.Fields<T>() {
+        if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind == reflect.Kind.Pointer {
+            var zero f.Type.Elem.Elem
+            println(f.Name, "many", reflect.TypeOf<f.Type.Elem.Elem>().Name, zero.Id)
+        } else if f.Type.Kind == reflect.Kind.Pointer {
+            println(f.Name, "one", reflect.TypeOf<f.Type.Elem>().Name)
+        } else if f.Type.Kind == reflect.Kind.Map {
+            var k f.Type.Key
+            var v f.Type.Elem
+            println(f.Name, "map", k == "", v)
+        }
+    }
+}
+
+func names<T>() {
+    for f in reflect.Fields<T>() {
+        println(f.Name, f.Index, f.Type.Name)
+    }
+}
+
+func main() {
+    var t = fill<(string, int, bool)>(["a", 2, true])
+    println(t)
+    var t2 = fill<(int, (string, float))>([1, ("x", 2.5)])
+    println(t2)
+    names<(int, string)>()
+    shape<Shop>()
+}

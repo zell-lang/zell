@@ -1,6 +1,6 @@
-// error: a nested lambda is not allowed in an expression tree
+// error: a nested lambda is only allowed as an argument of a call in an expression tree
 // status: passing
-// test: a lambda inside an expression tree
+// test: a lambda inside an expression tree that is not an argument of a call (a lambda as the tree's result)
 namespace spec.expr.err_nested_lambda
 
 import io
@@ -10,9 +10,7 @@ struct User {
     Age int
 }
 
-func older(u *User) bool { return u.Age > 40 }
-
 func main() {
-    var p expr<func(*User) bool> = u => slices.ContainsFunc([1, 2], x => x == u.Age)
+    var p expr<func(*User) func() int> = u => () => u.Age
     println(p)
 }

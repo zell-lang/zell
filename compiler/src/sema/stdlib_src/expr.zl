@@ -8,6 +8,13 @@
 // a filter engine) translates the tree without any compiler hook.
 namespace expr
 
+// @expr.call on a function or method: it may be called inside an
+// expression tree (a Call node named by its full name without type
+// arguments, the receiver of a method first: `data.Group.Count`). A
+// translator gives it meaning; Compile() calls it.
+@attribute(targets: [reflect.Target.Func])
+struct call {}
+
 // Operators of Binary and Unary nodes.
 enum Op {
     Add
@@ -80,6 +87,14 @@ enum Node {
     Tuple(elems []*Node, t *reflect.TypeInfo)
     // `T{A: x, B: y}`: a struct literal result (projections).
     Struct(t *reflect.TypeInfo, fields []FieldInit)
+    // A conversion `T(x)`; also the implicit one to an interface (a
+    // lambda returning `any`).
+    Convert(operand *Node, t *reflect.TypeInfo)
+    // `base[index]`.
+    Index(base *Node, index *Node, t *reflect.TypeInfo)
+    // A lambda passed to a call in the tree (`data.Any(u.Orders, o => ...)`):
+    // its parameters are Param(first), Param(first + 1), ... in `body`.
+    Lambda(first int, names []string, body *Node, t *reflect.TypeInfo)
 }
 
 // The constant structure of one lambda site (immortal, in read-only data):
@@ -108,12 +123,40 @@ struct Expr<F> {
         return this.fns.0
     }
 
+    // The constant node structure of the lambda site: the same for every
+    // evaluation of one lambda, so a translator can cache its result by
+    // it (nil for a tree built by a combinator).
+    func Site() *Site {
+        return this.site
+    }
+
+    // Value of slot `k` in this evaluation (`Captured.index`; Slots maps
+    // the value nodes to their slots).
+    func Value(k int) any {
+        if this.site == nil {
+            return nil
+        }
+        var vals = this.fns.1
+        return vals(k)
+    }
+
+    // The slot of every Const and Captured node, in Walk order (empty for
+    // a tree built by a combinator).
+    func Slots() []int {
+        if this.site == nil {
+            return []
+        }
+        var d = decoder{site: this.site, vals: this.fns.1, types: this.fns.2, pos: 0, slots: []}
+        _ = d.node()
+        return d.slots
+    }
+
     // The root node (decoded from the site; a new tree on every call).
     func Root() *Node {
         if this.site == nil {
             return this.root
         }
-        var d = decoder{site: this.site, vals: this.fns.1, types: this.fns.2, pos: 0}
+        var d = decoder{site: this.site, vals: this.fns.1, types: this.fns.2, pos: 0, slots: []}
         return d.node()
     }
 
@@ -161,6 +204,7 @@ struct decoder {
     vals func(int) any
     types func(int) *reflect.TypeInfo
     pos int
+    slots []int
 
     func next() int {
         var v = this.site.ops[this.pos]
@@ -185,10 +229,13 @@ struct decoder {
             var base = this.node()
             return mk(Node.Field(base, name, idx, t, owner))
         case 2:
-            return mk(Node.Const(this.vals(this.next()), t))
+            var k = this.next()
+            this.slots = append(this.slots, k)
+            return mk(Node.Const(this.vals(k), t))
         case 3:
             var slot = this.next()
             var name = this.str()
+            this.slots = append(this.slots, slot)
             return mk(Node.Captured(slot, name, this.vals(slot), t))
         case 4:
             var op = opOf(this.next())
@@ -228,6 +275,23 @@ struct decoder {
                 fields = append(fields, FieldInit{Index: idx, Name: name, Value: v})
             }
             return mk(Node.Struct(t, fields))
+        case 10:
+            var x = this.node()
+            return mk(Node.Convert(x, t))
+        case 11:
+            var b = this.node()
+            var i = this.node()
+            return mk(Node.Index(b, i, t))
+        case 12:
+            var first = this.next()
+            var n = this.next()
+            var names []string = []
+            for i in 0..n {
+                names = append(names, this.str())
+                _ = this.next()
+            }
+            var body = this.node()
+            return mk(Node.Lambda(first, names, body, t))
         }
         panic("expr: corrupt tree site")
     }
@@ -271,6 +335,9 @@ func TypeOf(n *Node) *reflect.TypeInfo {
     case Node.IsNil(_, _): return reflect.TypeOf<bool>()
     case Node.Tuple(_, t): return t
     case Node.Struct(t, _): return t
+    case Node.Convert(_, t): return t
+    case Node.Index(_, _, t): return t
+    case Node.Lambda(_, _, _, t): return t
     }
     return nil
 }
@@ -300,6 +367,9 @@ func Children(n *Node) []*Node {
             out = append(out, f.Value)
         }
         return out
+    case Node.Convert(x, _): return [x]
+    case Node.Index(b, i, _): return [b, i]
+    case Node.Lambda(_, _, body, _): return [body]
     }
     return []
 }
@@ -370,6 +440,32 @@ func Format(n *Node, names []string) string {
             parts = append(parts, f.Name + ": " + Format(f.Value, names))
         }
         return t.Name + "{" + strings.Join(parts, ", ") + "}"
+    case Node.Convert(x, t):
+        if t.Kind == reflect.Kind.Any || t.Kind == reflect.Kind.Interface {
+            return Format(x, names)
+        }
+        return t.Name + "(" + Format(x, names) + ")"
+    case Node.Index(b, i, _):
+        return formatOperand(b, names, 7, false) + "[" + Format(i, names) + "]"
+    case Node.Lambda(first, lnames, body, _):
+        var ns []string = []
+        for i in 0..first {
+            if i < len(names) {
+                ns = append(ns, names[i])
+            } else {
+                ns = append(ns, fmt.Format("p{0}", i))
+            }
+        }
+        for n in lnames {
+            ns = append(ns, n)
+        }
+        var head = ""
+        if len(lnames) == 1 {
+            head = lnames[0]
+        } else {
+            head = "(" + strings.Join(lnames, ", ") + ")"
+        }
+        return head + " => " + Format(body, ns)
     }
     return "?"
 }

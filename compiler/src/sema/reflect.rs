@@ -535,8 +535,7 @@ impl<'a> Sema<'a> {
                     self.err(format!("f.Get needs a value of type {} (the type of reflect.Fields<{}>()), found {}", self.tn(sty), self.tn(sty), self.tn(v.ty)), v.span);
                     return Ok(self.invalid(span));
                 }
-                let Type::Struct(d) = *self.tt.get(sty) else { return Ok(self.invalid(span)) };
-                let fty = self.structs[d.0 as usize].fields[k as usize].ty;
+                let Some((_, fty, _, _)) = self.ct_member(sty, k) else { return Ok(self.invalid(span)) };
                 return Ok(mk(ExprKind::Field { base: Box::new(v), index: k }, fty, span));
             }
             if let (Some(_), "Set") = (ct, name.name.as_str()) {
@@ -664,9 +663,7 @@ impl<'a> Sema<'a> {
             }
             return None;
         };
-        let Type::Struct(sd) = *self.tt.get(sty) else { return None };
-        let field = self.structs[sd.0 as usize].fields.get(k as usize)?;
-        let (fname, exported, embedded) = (field.name.clone(), field.exported, field.embedded);
+        let (fname, _, exported, embedded) = self.ct_member(sty, k)?;
         let span = name.span;
         let e = match name.name.as_str() {
             "Name" => mk(ExprKind::Const(hir::ConstValue::Str(fname)), self.tt.string, span),
@@ -798,11 +795,12 @@ impl<'a> Sema<'a> {
             return Some(empty());
         }
         let abstract_ = self.has_param(t);
-        let nfields = match *self.tt.get(t) {
+        let nfields = match self.tt.get(t) {
             Type::Struct(d) if !abstract_ => self.structs[d.0 as usize].fields.len(),
+            Type::Tuple(xs) if !abstract_ => xs.len(),
             _ if abstract_ => 0,
             _ => {
-                self.err(format!("reflect.Fields<T>() needs a struct type, {} is not a struct", self.tn(t)), iter.span);
+                self.err(format!("reflect.Fields<T>() needs a struct type, {} is not a struct (nor a tuple)", self.tn(t)), iter.span);
                 return Some(empty());
             }
         };

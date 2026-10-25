@@ -1,0 +1,66 @@
+// test: in a generic call the result type of expr<func(*T) R> is inferred from the lambda body (Select<R>-style APIs), a result converted to any is a Convert node, every parameter-free subexpression is a slot (calls, indexing, conversions), operators of types with Compare/Equals (time.Time) are Binary nodes, conversions and indexing of parameters are Convert and Index nodes
+// status: passing
+// run-flags: --leak-check
+namespace spec.expr.inference_and_slots
+
+import io
+
+struct User {
+    Name   string
+    Age    int
+    Joined time.Time
+    Tags   []string
+}
+
+struct Query<T> {
+    n int
+
+    // Generic methods of generic structs infer R from the lambda too.
+    func Select<R>(f expr<func(*T) R>) expr<func(*T) R> {
+        return f
+    }
+}
+
+func Sel<T, R>(f expr<func(*T) R>) expr<func(*T) R> {
+    return f
+}
+
+func Keys<T>(f expr<func(*T) any>) expr<func(*T) any> {
+    return f
+}
+
+func cutoff() time.Time {
+    return time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC())
+}
+
+func kind(n *expr.Node) string {
+    switch *n {
+    case expr.Node.Convert(x, t): return "Convert(" + kind(x) + " to " + t.Name + ")"
+    case expr.Node.Index(b, i, _): return "Index(" + kind(b) + ", " + kind(i) + ")"
+    case expr.Node.Binary(op, l, r, _): return "Binary(" + kind(l) + " " + op.Symbol() + " " + kind(r) + ")"
+    case expr.Node.Captured(_, name, v, t): return fmt.Format("Captured({0}={1} {2})", name, v, t.Name)
+    case expr.Node.Const(v, _): return fmt.Format("Const({0})", v)
+    case expr.Node.Field(_, name, _, _, _): return "Field(" + name + ")"
+    case expr.Node.Tuple(xs, t): return fmt.Format("Tuple/{0} {1}", len(xs), t.Name)
+    }
+    return "?"
+}
+
+func main() {
+    var q = Query<User>{n: 0}
+    var s = q.Select((u) => (u.Name, float(u.Age) * 1.5))
+    println(s, kind(s.Root()))
+    var s2 = Sel((u *User) => u.Age + 1)
+    var u = new User{Name: "Ann", Age: 30, Joined: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC()), Tags: ["0", "y"]}
+    println(s2, s2.Compile()(u))
+    var k = Keys<User>((x) => x.Name)
+    println(k, kind(k.Root()))
+
+    var ids = [7, 8]
+    var p expr<func(*User) bool> = u => u.Joined < cutoff() && ids[1] > u.Age / 4 && u.Tags[0] == strconv.Itoa(ids[0] - 7)
+    println(p)
+    println(kind(p.Root()))
+    println(p.Compile()(u), p.Slots())
+    var eq expr<func(*User) bool> = u => u.Joined == cutoff()
+    println(kind(eq.Root()), eq.Compile()(u))
+}

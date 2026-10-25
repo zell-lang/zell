@@ -444,6 +444,11 @@ impl<'a> Sema<'a> {
                 (CtDesc::Type(t), 1) => Some(t),
                 (CtDesc::Abstract, _) => return Some(invalid),
                 (_, 2) => self.desc_member_type(d, &segs[1].name).map(|x| x.unwrap_or(invalid)),
+                // `p.Type.Elem`, `m.Result.Key`, ...
+                (_, n) if n > 2 && segs[2..].iter().all(|s| s.name == "Elem" || s.name == "Key") => self.desc_member_type(d, &segs[1].name).map(|x| match x {
+                    Some(t) => self.type_steps_pub(t, segs[2..].iter().map(|s| s.name.as_str())).unwrap_or(invalid),
+                    None => invalid,
+                }),
                 _ => None,
             };
             return Some(match t {
@@ -454,10 +459,18 @@ impl<'a> Sema<'a> {
                 }
             });
         }
-        if segs.len() == 2 && segs[1].name == "Type" {
+        // `f.Type`, `f.Type.Elem`, `f.Type.Elem.Key`, ...
+        if segs.len() >= 2 && segs[1].name == "Type" && segs[2..].iter().all(|s| s.name == "Elem" || s.name == "Key") {
             if let Some((_, sty, k)) = self.ct_field_named(first) {
-                return Some(match k {
-                    Some(k) => self.ct_field_ty(sty, k).unwrap_or(invalid),
+                return Some(match k.and_then(|k| self.ct_field_ty(sty, k)) {
+                    Some(t) => match self.type_steps_pub(t, segs[2..].iter().map(|s| s.name.as_str())) {
+                        Some(x) if !self.tt.is_invalid(x) => x,
+                        Some(_) => {
+                            self.err(format!("{}: the field type {} has no such element type", path.to_string(), self.tn(t)), path.span);
+                            invalid
+                        }
+                        None => invalid,
+                    },
                     None => invalid,
                 });
             }

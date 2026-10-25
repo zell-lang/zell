@@ -52,7 +52,7 @@ impl<'a> Sema<'a> {
     /// type `p` (`func(T) U`) once the type parameters in its parameter
     /// types are inferred: a function type whose parameters are known (the
     /// result is inferred from the lambda's body).
-    fn lambda_hint(&mut self, a: &ast::Expr, p: &ast::TypeExpr, names: &[String], binds: &[Option<TypeId>]) -> Option<TypeId> {
+    fn lambda_hint(&mut self, a: &ast::Expr, p: &ast::TypeExpr, names: &[String], binds: &[Option<TypeId>], outer: &[(String, TypeId)]) -> Option<TypeId> {
         if !untyped_lambda(a) {
             return None;
         }
@@ -66,6 +66,8 @@ impl<'a> Sema<'a> {
             return None;
         }
         let n = self.gen.tenv.len();
+        // a method of a generic struct instance: the struct's bindings
+        self.gen.tenv.extend(outer.iter().cloned());
         for (name, b) in names.iter().zip(binds) {
             if let Some(b) = b {
                 self.gen.tenv.push((name.clone(), *b));
@@ -80,6 +82,11 @@ impl<'a> Sema<'a> {
         }
         let void = self.tt.void;
         Some(self.tt.func(ps, void))
+    }
+
+    /// `expr<F>` written as a parameter type.
+    fn is_expr_type(p: &ast::TypeExpr) -> bool {
+        matches!(&p.kind, ast::TypeKind::Named { path, generics } if path.segments.len() == 1 && path.segments[0].name == "expr" && generics.len() == 1)
     }
 
     /// Unifies written parameter type `p` with argument type `actual`,
@@ -155,6 +162,7 @@ impl<'a> Sema<'a> {
         let tm = &self.gen.templates[t as usize];
         let names: Vec<String> = tm.generics.iter().map(|g| g.name.name.clone()).collect();
         let fname = tm.name.clone();
+        let outer = tm.outer.clone();
         let mut binds: Vec<Option<TypeId>> = vec![None; names.len()];
         let mut bad = false;
         for pass in 0..2 {
@@ -166,11 +174,22 @@ impl<'a> Sema<'a> {
                 if untyped != (pass == 1) {
                     continue;
                 }
-                let hint = bare_param(&p.ty, &names).and_then(|k| binds[k]).or_else(|| self.lambda_hint(a, &p.ty, &names, &binds));
+                let hint = bare_param(&p.ty, &names).and_then(|k| binds[k]).or_else(|| self.lambda_hint(a, &p.ty, &names, &binds, &outer));
                 if hint.is_none() && matches!(expr::strip_parens(a).kind, ast::ExprKind::Nil) {
                     continue;
                 }
-                let v = self.value(a, hint);
+                // `expr<F>`: the lambda becomes a tree; its result type
+                // binds the type parameters of F's result.
+                let v = match (hint, Self::is_expr_type(&p.ty), &expr::strip_parens(a).kind) {
+                    (Some(h), true, ast::ExprKind::Lambda { .. }) => self.expr_tree_infer(a, h),
+                    (None, true, ast::ExprKind::Lambda { params, .. }) if !untyped => {
+                        let ps: Vec<TypeId> = params.iter().map(|x| self.resolve_type(&x.ty)).collect();
+                        let void = self.tt.void;
+                        let h = self.tt.func(ps, void);
+                        self.expr_tree_infer(a, h)
+                    }
+                    _ => self.value(a, hint),
+                };
                 let v = self.default_type(v);
                 bad |= self.tt.is_invalid(v.ty);
                 if let Err((k, x, y)) = self.unify(&p.ty, v.ty, &names, &mut binds) {
@@ -463,7 +482,7 @@ impl<'a> Sema<'a> {
     pub(crate) fn struct_lit_struct(&mut self, path: &ast::Path, generics: &[ast::TypeExpr], expected: Option<TypeId>, span: Span) -> Option<u32> {
         let segs: Vec<&ast::Ident> = path.segments.iter().collect();
         // `t{...}` of an unrolled `TypesWith` loop.
-        if generics.is_empty() && segs.len() <= 2 {
+        if generics.is_empty() && (segs.len() <= 2 || segs[1].name == "Type") {
             if let Some(ty) = self.ct_desc_type(path) {
                 if let Type::Struct(d) = *self.tt.get(ty) {
                     return Some(d.0);

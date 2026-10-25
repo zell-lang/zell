@@ -1,0 +1,7 @@
+u => (u.Name, float(u.Age) * 1.5) Tuple/2 (string, float)
+u => u.Age + 1 31
+x => x.Name Convert(Field(Name) to any)
+u => u.Joined < spec.expr.inference_and_slots.cutoff() && ids[1] > u.Age / 4 && u.Tags[0] == strconv.Itoa((ids[0] - 7))
+Binary(Binary(Binary(Field(Joined) < Captured(spec.expr.inference_and_slots.cutoff()=2024-03-01 00:00:00 +0000 UTC Time)) && Binary(Captured(ids[1]=8 int) > Binary(Field(Age) / Const(4)))) && Binary(Index(Field(Tags), Const(0)) == Captured(strconv.Itoa((ids[0] - 7))=0 string)))
+true [0 1 2 3 4]
+Binary(Field(Joined) == Captured(spec.expr.inference_and_slots.cutoff()=2024-03-01 00:00:00 +0000 UTC Time)) false

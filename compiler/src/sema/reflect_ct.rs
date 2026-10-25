@@ -54,8 +54,18 @@ impl<'a> Sema<'a> {
 
     /// Type of field `k` of struct type `sty`.
     pub(crate) fn ct_field_ty(&self, sty: TypeId, k: u32) -> Option<TypeId> {
-        let Type::Struct(d) = *self.tt.get(sty) else { return None };
-        self.structs[d.0 as usize].fields.get(k as usize).map(|f| f.ty)
+        self.ct_member(sty, k).map(|m| m.1)
+    }
+
+    /// Field `k` of the struct or tuple type `sty` of an unrolled
+    /// `reflect.Fields<T>()`: (name, type, exported, embedded); tuple
+    /// elements are `_0`, `_1`, ...
+    pub(crate) fn ct_member(&self, sty: TypeId, k: u32) -> Option<(String, TypeId, bool, bool)> {
+        match self.tt.get(sty) {
+            Type::Struct(d) => self.structs[d.0 as usize].fields.get(k as usize).map(|f| (f.name.clone(), f.ty, f.exported, f.embedded)),
+            Type::Tuple(xs) => xs.get(k as usize).map(|t| (format!("_{k}"), *t, true, false)),
+            _ => None,
+        }
     }
 
     /// The type a compile-time type expression denotes:
@@ -404,9 +414,7 @@ impl<'a> Sema<'a> {
             self.value(&args[1], None);
             return empty;
         }
-        let Type::Struct(d) = *self.tt.get(sty) else { return empty };
-        let field = &self.structs[d.0 as usize].fields[k as usize];
-        let (fty, fname) = (field.ty, field.name.clone());
+        let Some((fname, fty, _, _)) = self.ct_member(sty, k) else { return empty };
         let value = self.expr_to(&args[1], fty, Ctx::Field(fname));
         let span = target.span;
         let place = match target.kind {
