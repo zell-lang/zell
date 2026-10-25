@@ -139,7 +139,7 @@ TESTS   := $(patsubst tests/%.c,$(BUILD)/tests/%,$(wildcard tests/test_*.c))
 # sanitizer allocator lock inherited from a worker thread (intermittent hang).
 TASK_TEST_ENV ?=
 
-.PHONY: all test clean asan tsan test-wine test-cross fuzz-json
+.PHONY: all test clean asan tsan tsan-lib test-wine test-cross fuzz-json
 
 ifeq ($(CROSS)$(LTO),1)
 all: $(LIB)
@@ -263,6 +263,11 @@ tsan:
 	  TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(CURDIR)/tests/tsan.supp" \
 	    ZELL_NO_BACKTRACE=1 ./build/tsan/tests/$$t; \
 	done; echo "TSAN TESTS PASSED"
+
+# build/tsan/libzell_rt.a: the runtime under ThreadSanitizer, for Zell
+# programs built with ZELL_SANITIZE=thread (scripts/tsan-run.sh).
+tsan-lib:
+	$(MAKE) BUILD=build/tsan CFLAGS_EXTRA="-fsanitize=thread" build/tsan/libzell_rt.a
 
 # libFuzzer target for encoding.json (tests/fuzz/fuzz_json.c) under ASan+UBSan,
 # the runtime rebuilt with the same sanitizers in build/fuzz. The corpus

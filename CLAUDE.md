@@ -27,6 +27,7 @@ and every change must match it or update it.
 ```sh
 ./scripts/setup.sh                 # once: llvm-18-dev, clang, lld (Ubuntu)
 make -C runtime && make -C runtime test     # C runtime (-Werror), `make asan` for sanitizers
+SCALE=small scripts/tsan-run.sh benchmarks/channel_pingpong/main.zl  # Zell program + runtime under TSan (docs/TOOLING.md)
 make -C runtime CROSS=x86_64-w64-mingw32 test-wine  # Windows runtime (mingw-w64, -Werror) + C tests under wine
 make -C runtime CROSS=aarch64-linux-gnu test-cross  # linux-arm64 runtime + C tests under qemu (also CROSS=x86_64-linux-musl)
 make -C runtime CROSS=aarch64-apple-darwin          # macOS: compile check against runtime/stub-sdk/macos (no SDK here)
