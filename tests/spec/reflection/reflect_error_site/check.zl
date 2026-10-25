@@ -1,0 +1,12 @@
+// error: instantiated here (tests/spec/reflection/reflect_error_site/main.zl:11:13)
+// status: passing
+namespace spec.reflection.reflect_error_site.check
+
+// A library generic: reflect.Error is its last statement, no return after it.
+func Validate<T>(x T) string {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
+        return "ok"
+    } else {
+        reflect.Error("Validate needs a struct, got " + reflect.TypeOf<T>().Name)
+    }
+}

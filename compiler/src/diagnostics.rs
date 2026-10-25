@@ -85,15 +85,19 @@ pub struct Diagnostic {
     pub code: Option<&'static str>,
     /// Quick fixes, alternatives in order of preference.
     pub fixes: Vec<Fix>,
+    /// Notes about locations in other files: (text, file index, span),
+    /// rendered as `= note: text (path:line:col)` by
+    /// [`Diagnostics::render_all_files`].
+    pub related: Vec<(String, usize, Span)>,
 }
 
 impl Diagnostic {
     pub fn error(message: impl Into<String>, span: Span) -> Diagnostic {
-        Diagnostic { severity: Severity::Error, message: message.into(), span, notes: vec![], file: 0, code: None, fixes: vec![] }
+        Diagnostic { severity: Severity::Error, message: message.into(), span, notes: vec![], file: 0, code: None, fixes: vec![], related: vec![] }
     }
 
     pub fn warning(message: impl Into<String>, span: Span) -> Diagnostic {
-        Diagnostic { severity: Severity::Warning, message: message.into(), span, notes: vec![], file: 0, code: None, fixes: vec![] }
+        Diagnostic { severity: Severity::Warning, message: message.into(), span, notes: vec![], file: 0, code: None, fixes: vec![], related: vec![] }
     }
 
     /// Sets the stable code (see [`codes`]).
@@ -135,6 +139,11 @@ impl Diagnostic {
     ///    |     ^
     /// ```
     pub fn render(&self, file: &SourceFile) -> String {
+        self.render_in(file, &[])
+    }
+
+    /// [`Diagnostic::render`] with the files [`Diagnostic::related`] refers to.
+    pub fn render_in(&self, file: &SourceFile, files: &[SourceFile]) -> String {
         let (line, col) = file.line_col(self.span.start);
         let sev = match self.code.filter(|c| c.starts_with('L')) {
             Some(code) => format!("{}[{code}]", self.severity.label()),
@@ -156,6 +165,16 @@ impl Diagnostic {
                 Some(s) => {
                     let (l, c) = file.line_col(s.start);
                     out.push_str(&format!("{:w$} = note: {note} ({}:{l}:{c})\n", "", file.path, w = width));
+                }
+                None => out.push_str(&format!("{:w$} = note: {note}\n", "", w = width)),
+            }
+        }
+        for (note, fi, span) in &self.related {
+            let f = if files.is_empty() && *fi == self.file { Some(file) } else { files.get(*fi) };
+            match f {
+                Some(f) => {
+                    let (l, c) = f.line_col(span.start);
+                    out.push_str(&format!("{:w$} = note: {note} ({}:{l}:{c})\n", "", f.path, w = width));
                 }
                 None => out.push_str(&format!("{:w$} = note: {note}\n", "", w = width)),
             }
@@ -216,7 +235,7 @@ impl Diagnostics {
         self.items
             .iter()
             .map(|d| match files.get(d.file) {
-                Some(f) => d.render(f),
+                Some(f) => d.render_in(f, files),
                 None => format!("{d}\n"),
             })
             .collect::<Vec<_>>()

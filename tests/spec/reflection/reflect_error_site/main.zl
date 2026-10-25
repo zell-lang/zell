@@ -1,0 +1,12 @@
+// error: instantiated here (tests/spec/reflection/reflect_error_site/main.zl:11:13)
+// status: passing
+namespace spec.reflection.reflect_error_site
+
+import io
+
+struct P {}
+
+func main() {
+    println(check.Validate(P{}))
+    println(check.Validate(1))
+}

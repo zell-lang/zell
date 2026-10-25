@@ -1,0 +1,19 @@
+// test: reflect.Error is a terminating statement: a generic needs no return after it, and a branch dropped by a static if builds and runs
+// status: passing
+namespace spec.reflection.reflect_error_terminates
+
+import io
+
+func Kind<T>(x T) string {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Int {
+        return "int"
+    } else if reflect.TypeOf<T>().Kind == reflect.Kind.String {
+        return "string"
+    } else {
+        reflect.Error("Kind: unsupported type " + reflect.TypeOf<T>().Name)
+    }
+}
+
+func main() {
+    println(Kind(1), Kind("a"))
+}

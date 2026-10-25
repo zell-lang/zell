@@ -132,22 +132,25 @@ impl<'a> Sema<'a> {
         }
     }
 
-    /// `reflect.Error(msg)` at a reachable call site: reports `msg`.
-    pub(crate) fn reflect_error_call(&mut self, f: FuncId, args: &[hir::Expr], span: Span) {
+    /// `reflect.Error(msg)` at a reachable call site: reports `msg`, with
+    /// the call sites that instantiated the enclosing generic. Returns
+    /// true for a `reflect.Error` call (it is lowered as a terminating
+    /// `panic`, so no `return` is needed after it).
+    pub(crate) fn reflect_error_call(&mut self, f: FuncId, args: &[hir::Expr], span: Span) -> bool {
         if !self.refl.loaded_reflect() || self.refl.func("Error") != Some(f) {
-            return;
+            return false;
         }
         // The innermost named (non-lambda) function being checked.
         let owner = self.fns.iter().rev().find_map(|c| c.func.filter(|fid| !matches!(self.funcs[fid.0 as usize].kind, hir::FuncKind::Lambda { .. })));
         let abstract_ = owner.is_some_and(|fid| self.gen.insts.get(&fid.0).is_some_and(|i| i.note.is_none()));
         if abstract_ || self.gen.mute > 0 {
-            return;
+            return true;
         }
         let Some(msg) = args.first().and_then(|a| self.const_string(a)) else {
             if args.len() == 1 {
                 self.err("reflect.Error needs a constant string message (literals, constants and their concatenation, f.Name, reflect.TypeOf<T>().Name, attribute fields)", span);
             }
-            return;
+            return true;
         };
         let by = match owner {
             Some(fid) => {
@@ -159,7 +162,11 @@ impl<'a> Sema<'a> {
             }
             None => "a global initializer".to_string(),
         };
-        self.err_note(msg, span, format!("raised by {by}"), None);
+        let sites = owner.and_then(|fid| self.gen.insts.get(&fid.0)).map(|i| i.sites.clone()).unwrap_or_default();
+        let mut d = Diagnostic::error(msg, span).with_note(format!("raised by {by}"), None).in_file(self.cur_file);
+        d.related = sites.into_iter().map(|(fi, s)| ("instantiated here".to_string(), fi, s)).collect();
+        self.push_diag(d);
+        true
     }
 
     /// The value of a compile-time string expression, if `e` is one.

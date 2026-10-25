@@ -183,7 +183,7 @@ documentation's Examples section, tested by
     attribute at compile time (`@Email` on an `int` field, say).
     Workaround: `validate` applies a rule only where it makes sense, at run
     time, and documents the rest.
-34. ❌ **`reflect.Error` is not a terminating statement**, and its diagnostic
+34. ✅ **Fixed (2026-10-25):** `reflect.Error(msg)` is lowered as a terminating `panic` (never runs: reachable means a compile error), and its diagnostic adds `instantiated here (file:line:col)` for the call that created the instance and the outer ones (`InstFunc::sites`, `Diagnostic::related`). **`reflect.Error` is not a terminating statement**, and its diagnostic
     points at the `reflect.Error` call inside the library, not at the call
     site that instantiated it. Workaround: a dummy `return` after it; the
     message names the type (`Validate needs a struct, got int`) to make up

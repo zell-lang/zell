@@ -114,6 +114,9 @@ pub(crate) struct InstFunc {
     /// `in instantiation of Max<string>` (none for abstract instances).
     pub note: Option<String>,
     pub depth: u32,
+    /// Where it was instantiated: the call site (file, span), then the
+    /// sites of the instances that call lies in (outermost last).
+    pub sites: Vec<(usize, Span)>,
 }
 
 /// A constraint check postponed until method signatures are known.
@@ -539,6 +542,20 @@ impl<'a> Sema<'a> {
         true
     }
 
+    /// Instantiation sites for an instance created by the code at `span`
+    /// of the current file (see [`InstFunc::sites`]).
+    fn inst_sites(&self, span: Span) -> Vec<(usize, Span)> {
+        let mut sites = Vec::new();
+        if span != Span::DUMMY {
+            sites.push((self.cur_file, span));
+        }
+        let owner = self.fns.iter().rev().find_map(|c| c.func.filter(|fid| !matches!(self.funcs[fid.0 as usize].kind, FuncKind::Lambda { .. })));
+        if let Some(i) = owner.and_then(|fid| self.gen.insts.get(&fid.0)) {
+            sites.extend(i.sites.iter().copied());
+        }
+        sites
+    }
+
     fn note_for(&self, name: &str, args: &[TypeId]) -> Option<String> {
         (!args.iter().any(|a| self.has_param(*a))).then(|| format!("in instantiation of {name}"))
     }
@@ -586,6 +603,7 @@ impl<'a> Sema<'a> {
         let hns = self.inst_hir_ns(t, self.cur_ns);
         let node = self.unit_new_node();
         let unit_prev = self.unit_enter(node);
+        let sites = self.inst_sites(span);
         let saved = self.enter(t, env.clone(), note.clone());
         let (kind, src, local) = match owner {
             Some(s) => (FuncKind::Method { struct_id: s, is_static: decl.is_static }, FuncSrc::Method(decl, s), format!("{}.{name}", self.structs[s as usize].name)),
@@ -601,7 +619,7 @@ impl<'a> Sema<'a> {
         self.gen.cache.insert(key, Inst::Func(fid));
         self.unit_bind(node, units::MemoKey::Inst(Inst::Func(fid).into()));
         self.unit_bind_func(node, fid);
-        self.gen.insts.insert(fid.0, InstFunc { env, file: self.cur_file, ns: self.cur_ns, root, note, depth: self.gen.depth });
+        self.gen.insts.insert(fid.0, InstFunc { env, file: self.cur_file, ns: self.cur_ns, root, note, depth: self.gen.depth, sites });
         self.resolve_func_sig(fid.0 as usize);
         self.leave(saved);
         self.unit_leave(unit_prev);
@@ -630,6 +648,7 @@ impl<'a> Sema<'a> {
         let hns = self.inst_hir_ns(t, self.cur_ns);
         let node = self.unit_new_node();
         let unit_prev = self.unit_enter(node);
+        let sites = self.inst_sites(span);
         let saved = self.enter(t, env.clone(), note.clone());
         let sid = self.structs.len() as u32;
         self.structs.push(hir::Struct {
@@ -678,7 +697,7 @@ impl<'a> Sema<'a> {
             self.funcs[fid.0 as usize].namespace = hns;
             self.structs[sid as usize].methods.push((m.name.name.clone(), fid));
             self.unit_bind_func(node, fid);
-            self.gen.insts.insert(fid.0, InstFunc { env: env.clone(), file: self.cur_file, ns: self.cur_ns, root, note: note.clone(), depth: self.gen.depth });
+            self.gen.insts.insert(fid.0, InstFunc { env: env.clone(), file: self.cur_file, ns: self.cur_ns, root, note: note.clone(), depth: self.gen.depth, sites: sites.clone() });
             self.resolve_func_sig(fid.0 as usize);
         }
         if self.gen.sigs_ready && !decl.implements.is_empty() {
