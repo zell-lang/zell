@@ -259,7 +259,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
 50. ❌ **Assertion failures have no `file:line`** (`got 6000, want 600`), and
     `testing.T` has no `Helper()`, `Cleanup()` or `TempDir()`. Workaround:
     a subtest per table row, so the failing row is named.
-51. ❌ **No assertion for a `T!` result**: every test of a fallible function
+51. ❌ **Needs a spec decision (2026-10-25):** `testing.Ok(t, f())` cannot be written: DESIGN.md «Игнорирование и обязательность» forbids passing an unhandled `T!` as an argument, and the closure form fails the same rule and inference. Options: a `T!`-typed parameter form, or a `t.Must(f())` intrinsic. **No assertion for a `T!` result**: every test of a fallible function
     writes `try ... catch err { t.Fatal(...) }`. Workaround: per-package
     helpers (`mustParse`, `parseError` in `testing-guide`); consider
     `testing.Ok(t, f())` returning the value and `testing.Fails(t, f())`
@@ -280,3 +280,20 @@ and marked so; 5, 23, 28 (sync frames below a task; `sql.DB/Tx` without
 `void!` close (38) is rejected by design, with a message that proposes a
 closure. 42 and 44 are runtime bugs (a losing `Recv` in `task.Any` swallows
 the next `Send`; arenas crash in `zell_retain` past ~12 000 objects).
+
+## Found while fixing the items above (2026-10-25)
+
+53. ❌ **A statement after a static `if` whose then-branch returns is still
+    "reachable"**: `if Kind == Struct { return "ok" }; reflect.Error(...)`
+    fires the error for valid types; only an explicit `else` works.
+    Reachability after a folded static `if` should treat the fall-through as
+    dead when the taken branch terminates.
+54. ❌ **`Diagnostic::related` is not forwarded to LSP `relatedInformation`**
+    (added for `reflect.Error` "instantiated here" notes, item 34).
+55. ❌ **Unused-import tracking has one flag per import**: `import crypto`
+    used only through a child namespace (`hash.X`) and similar parent-import
+    cases may still be reported as unused; not verified, worth a spec test.
+56. ❌ **`task.WithTimeout(ms, f)` is easy to misread as a delayed start**:
+    `WithTimeout(60, () => ch.Send(x))` on a buffered channel runs at once.
+    Documentation gap: the async guide should show "delay an action" as
+    `await task.Delay(ms)` in a spawned function and name the difference.
