@@ -1,52 +1,54 @@
 # Language and framework gaps found while writing the showcase projects
 
+Status (2026-10-25): ✅ done · ❌ open · 📘 kept as specified (decision, no change) · ⏳ ready for the spec · ❓ not re-verified
+
 Collected on 2026-10-23 while writing `zell-lang/zconf` and
 `zell-lang/example-web-service` against master `6ff3eae`. Each item is a
 real obstacle met in ordinary application code, with the workaround used;
 they are the next inputs for DESIGN.md / stdlib / `zell test` work.
 
 ## Language
-1. **No comma-ok map lookup**: `var (v, ok) = m[k]` and `k in m` do not exist;
+1. ✅ **No comma-ok map lookup**: `var (v, ok) = m[k]` and `k in m` do not exist;
    libraries keep a parallel `map[string]bool`. Spec decision needed (Go
    semantics are the default per CLAUDE.md).
-2. **A method chain cannot start a line with `.`**; the dot must end the
+2. ✅ **A method chain cannot start a line with `.`**; the dot must end the
    previous line (the lexer's automatic `;`). Go has the same rule, but it is
    the single most common surprise for C#/Kotlin users — consider allowing a
    leading `.` when the previous line ends an expression.
-3. **`enum` is a keyword and cannot be an attribute field name** (only `default`
+3. ✅ **`enum` is a keyword and cannot be an attribute field name** (only `default`
    is special-cased), so `@Conf(enum: "a,b")` had to become `oneOf:`.
-4. **Lower-case attribute structs are private to their package**: user
+4. 📘 **Lower-case attribute structs are private to their package**: user
    libraries must capitalise (`@zconf.Conf`), while std uses `@json`, `@cli.flag`.
-5. **Still open (verified 2026-10-25; the diagnostic now explains the wrapper):** **`async func` in an interface is accepted but never satisfied**, with a
+5. ❌ **Still open (verified 2026-10-25; the diagnostic now explains the wrapper):** **`async func` in an interface is accepted but never satisfied**, with a
    contradictory message ("method Get has type func(int) int!, want func(int)
    int!"); workaround: `func X() Task<T!>` delegating to a private async method.
-6. **Fixed (verified 2026-10-25):** **`defer this.mu.Unlock()` on a value `task.Mutex` field is rejected**
+6. ✅ **Fixed (verified 2026-10-25):** **`defer this.mu.Unlock()` on a value `task.Mutex` field is rejected**
    ("interior pointer"); the field has to be `*task.Mutex`.
-7. **Fixed (verified 2026-10-25):** **Suspicious trace locations** in release builds (a framework DI lookup pointing
+7. ✅ **Fixed (verified 2026-10-25):** **Suspicious trace locations** in release builds (a framework DI lookup pointing
    at a test file line; the framework has since moved out, see item 17).
 
 ## Standard library
-8. **Fixed (verified 2026-10-25):** **No `os.Environ()`** — zconf reads `/proc/self/environ` (Linux-only, misses
+8. ✅ **Fixed (verified 2026-10-25):** **No `os.Environ()`** — zconf reads `/proc/self/environ` (Linux-only, misses
    `os.Setenv` after start).
-9. **Fixed (verified 2026-10-25):** **`errors.Is`/`As` ignore a struct's `Unwrap()` method** — only `errors.Wrap`
+9. ✅ **Fixed (verified 2026-10-25):** **`errors.Is`/`As` ignore a struct's `Unwrap()` method** — only `errors.Wrap`
    chains are followed.
-10. **Fixed (verified 2026-10-25):** **The built-in attribute name `json` shadows the `encoding.json` namespace**
+10. ✅ **Fixed (verified 2026-10-25):** **The built-in attribute name `json` shadows the `encoding.json` namespace**
     inside a package (`json.Value` → "Value is not a static method of struct
     json"); same for `yaml`, `toml`. Users write `encoding.json.Value`.
-11. **Fixed (2026-10-24):** `json.Value`, `yaml.Value` and `toml.Value` all
+11. ✅ **Fixed (2026-10-24):** `json.Value`, `yaml.Value` and `toml.Value` all
     have `IsObject()`/`IsArray()`; the format-native names (`IsMap`/`IsSeq`,
     `IsTable`) stay as synonyms.
-12. `math.Max` is float-only; `slices.Map` over ORM `ToList()` yields `*Row`.
+12. ❓ `math.Max` is float-only; `slices.Map` over ORM `ToList()` yields `*Row`.
 
 ## Tooling
-13. **Fixed (verified 2026-10-25):** **`zell test` does not support `async @test`** (`func(*testing.T)
+13. ✅ **Fixed (verified 2026-10-25):** **`zell test` does not support `async @test`** (`func(*testing.T)
     Task<void>` is not accepted); async examples with `// Output:` were used.
-14. **Fixed (verified 2026-10-25):** **`zell test` builds only the package's own `src/`, not its dependencies**
+14. ✅ **Fixed (verified 2026-10-25):** **`zell test` builds only the package's own `src/`, not its dependencies**
     (`compiler/src/testrun.rs:97-102`): a package importing a git dependency
     cannot be tested, which forced the `server/` split in the web service.
-15. **Fixed (verified 2026-10-25):** **A dependency's `*_test.zl` files are compiled into dependents** (zconf's
+15. ✅ **Fixed (verified 2026-10-25):** **A dependency's `*_test.zl` files are compiled into dependents** (zconf's
     test-only `Database` struct → "ambiguous name Database" downstream).
-16. `zell init --help` is an "unknown option".
+16. ❓ `zell init --help` is an "unknown option".
 
 ## Framework (`web`)
 
@@ -55,7 +57,7 @@ tree (sources: git tag `web-in-tree`); it returns as the package
 `zell-lang/web` after `reflect.TypesWith<A>()`. Item 17 and the note below
 describe the in-tree version.
 
-17. **Fixed (2026-10-24):** `app.MapError<E>(status)` maps a domain error
+17. ✅ **Fixed (2026-10-24):** `app.MapError<E>(status)` maps a domain error
     type (also through wrappers) to a status once per application, and
     `app.OnError(func(*Context, error) *ProblemDetails)` sees every error
     first; unknown errors already answered a generic `"internal error"`
@@ -65,22 +67,22 @@ Not an obstacle but noted: OpenAPI 3.1 generation, `web.TestServer`, DI,
 request id / tracing / metrics middleware all worked as documented.
 
 ## Added while writing `example-cli` and `example-worker` (same day)
-18. **Fixed (verified 2026-10-25):** **`zell test` leaks an internal symbol**: in a package with `src/main.zl` it
+18. ✅ **Fixed (verified 2026-10-25):** **`zell test` leaks an internal symbol**: in a package with `src/main.zl` it
     prints `warning[L0007]: function zellUserMain__ is never used` — the lint
     must skip compiler-generated names.
-19. **Fixed:** `cli.App.Out/Errors` writers and `cli.ExitCoder` (2026-10-23);
+19. ✅ **Fixed:** `cli.App.Out/Errors` writers and `cli.ExitCoder` (2026-10-23);
     since 2026-10-24 `Run` finds the `ExitCoder` through wrappers too
     (`lookup(x)?("ctx")`, `errors.Wrap`, `Unwrap()` methods).
-20. **No type aliases** (`type Op = func(*Node) string!`): long function types
+20. ✅ **No type aliases** (`type Op = func(*Node) string!`): long function types
     are repeated at every use. Spec decision.
-21. **`in` is a reserved word** — `var in = …` fails; common flag name. Spec
+21. ✅ **`in` is a reserved word** — `var in = …` fails; common flag name. Spec
     decision (contextual keyword?).
-22. **Fixed (verified 2026-10-25):** **`strings` lacks `ContainsAny`, `IndexAny`, `ReplaceAll`**; `Replace`'s doc
+22. ✅ **Fixed (verified 2026-10-25):** **`strings` lacks `ContainsAny`, `IndexAny`, `ReplaceAll`**; `Replace`'s doc
     should say whether it replaces every occurrence.
-23. **`encoding.json.Value` / `yaml.Value` are read-only**: no `Set`/`Put` or
+23. ❌ **`encoding.json.Value` / `yaml.Value` are read-only**: no `Set`/`Put` or
     mutable builder beyond `NewObject(keys, values)`; only `toml.Document.Set`
     exists. Editing a document means converting to one's own tree.
-24. **Fixed (verified 2026-10-25):** **The default logger prints error traces with absolute paths over several
+24. ✅ **Fixed (verified 2026-10-25):** **The default logger prints error traces with absolute paths over several
     lines** — noisy in service logs; relative paths (or one line) by default.
 
 ## Decisions (2026-10-23, maintainer)
@@ -98,7 +100,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
 | 20 | **Type aliases**: `type Name = Type` is a transparent alias (no new nominal type), usable in the stdlib too. |
 | 21 | **`in` becomes a contextual keyword**: a keyword only in `for … in …`; an ordinary identifier elsewhere. |
 
-25. **Done (2026-10-24):** panic backtraces print `file:line function` from the
+25. ✅ **Done (2026-10-24):** panic backtraces print `file:line function` from the
     `.zell_lines` table (runtime/ABI.md 8.2, DESIGN.md "Паника"), stripped
     `--release` included; ELF only, macOS/Windows still symbols+offsets.
     **Panic backtraces show symbols+offsets, not source lines**
@@ -107,7 +109,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     (works stripped, no DWARF reader at run time), used by the panic printer and
     by error traces.
 
-26. **Fixed (2026-10-24): `compiler/tests/reflection.rs::no_reflection_without_use`.**
+26. ✅ **Fixed (2026-10-24): `compiler/tests/reflection.rs::no_reflection_without_use`.**
     Stdlib interface method signatures were resolved eagerly from the module
     summaries: `net.http.Handler.Serve(req *Request, …)` forced the `Request`
     template, whose fields pulled in `net.sock`, `time`, `log` … down to
@@ -116,7 +118,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     interfaces with default methods are forced when the default's `this`
     is typed. `println(1)` no longer loads `reflect`.
 
-27. **Ready for the spec (2026-10-25: `sql.Rows.Close()` already returns `Task<void!>`):** **Asynchronous destructors (`await using` analogue).** Synchronous
+27. ⏳ **Ready for the spec (2026-10-25: `sql.Rows.Close()` already returns `Task<void!>`):** **Asynchronous destructors (`await using` analogue).** Synchronous
     `using` is already covered by `Drop` (DESIGN.md "Деструкторы"): no
     `defer f.Close()` is needed, and the examples should stop writing it.
     Proposed design when a `Close() Task<…>` first appears in the stdlib:
@@ -129,7 +131,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     first and `Drop` is then a no-op. Not needed yet: every stdlib `Close()`
     is synchronous.
 
-28. **Done (2026-10-24): a panic ends its task, not the process.**
+28. ✅ **Done (2026-10-24): a panic ends its task, not the process.**
     DESIGN.md "Паника", ABI.md 8.1: the runtime destroys the task's
     coroutine frames (defers run, locals and `Drop`s released) and
     completes the task as panicked; `Task<T!>` awaiters get an error
@@ -148,7 +150,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     `Drop` (only `Rows`), so `examples/sql.zl` still needs `defer
     tx.Rollback()` and `defer db.Close()`; give them a `Drop`.
 
-29. **Red test `compiler/tests/debug.rs::debug_info_flags_and_identical_code`**
+29. ❌ **Red test `compiler/tests/debug.rs::debug_info_flags_and_identical_code`**
     since the ZLN2 line tables (`c2d65eb`): codegen now always emits DWARF
     line tables and artificial subprograms for the helpers (`rc.retain.*`,
     `any.inline`), so a `--release --emit=obj` object carries `.debug_info`
@@ -163,53 +165,53 @@ documentation's Examples section, tested by
 `compiler/tests/doc_examples.rs`). Batch 1 (`wordfreq`, `todo-cli`,
 `bookshelf-api`, `inventory-db`, `validate`):
 
-30. **`zell test` scans only `src/`**: there is no `tests/` directory for
+30. ❌ **`zell test` scans only `src/`**: there is no `tests/` directory for
     integration tests. Workaround: test files live in `src/` as
     `*_test.zl`, in a namespace of their own (`validate.tests`) to test
     through exported names only.
-31. **A syntax error in a `_test.zl` file prints only "no tests found in
+31. ❌ **A syntax error in a `_test.zl` file prints only "no tests found in
     ./src"**: the runner skips files that do not parse, without the
     diagnostic. Workaround: `zell check` the file to see the error.
-32. **An `async` method does not satisfy an interface method returning
+32. ❌ **An `async` method does not satisfy an interface method returning
     `Task<T>`** (see item 5): every implementation is a plain method that
     returns the task of a private `async` function (`MemoryRepo` in
     `bookshelf-api`, `Memory` in `testing-guide`). Worth fixing before the
     `zell-lang/web` package, whose handlers and repositories are all like
     this.
-33. **`f.Attribute<A>() != nil` is not a static condition**, so a static
+33. ❌ **`f.Attribute<A>() != nil` is not a static condition**, so a static
     `if` cannot pick it and `reflect.Error` cannot reject a misplaced
     attribute at compile time (`@Email` on an `int` field, say).
     Workaround: `validate` applies a rule only where it makes sense, at run
     time, and documents the rest.
-34. **`reflect.Error` is not a terminating statement**, and its diagnostic
+34. ❌ **`reflect.Error` is not a terminating statement**, and its diagnostic
     points at the `reflect.Error` call inside the library, not at the call
     site that instantiated it. Workaround: a dummy `return` after it; the
     message names the type (`Validate needs a struct, got int`) to make up
     for the location.
-35. **`fmt.Format` has no alignment or width** (`{0,-10}` in C#).
+35. ❌ **`fmt.Format` has no alignment or width** (`{0,-10}` in C#).
     Workaround: `fmt.Sprintf("%-10s", ...)` or `text.table`.
-36. **`strings.Builder` lacks `WriteRune`**. Workaround:
+36. ❌ **`strings.Builder` lacks `WriteRune`**. Workaround:
     `b.WriteString(string(r))`.
-37. **No indented JSON output** (`json.MarshalIndent`). Workaround: the
+37. ❌ **No indented JSON output** (`json.MarshalIndent`). Workaround: the
     examples print compact JSON.
-38. **`defer f.Close()` on a `void!` method is rejected** (a deferred call
+38. ❌ **`defer f.Close()` on a `void!` method is rejected** (a deferred call
     must handle its error). Workaround: rely on `Drop`, or defer a closure
     with `try ... catch`; consider allowing it with the error dropped, or a
     `defer try` form.
-39. **`testing.Equal` and `testing.True` take messages inconsistently**:
+39. ❌ **`testing.Equal` and `testing.True` take messages inconsistently**:
     `Equal(t, got, want)` has no message argument, `True(t, cond, msg)`
     requires one. Workaround: `t.Log` the context before `Equal`.
-40. **`import net` brings `net.ErrNotFound` into scope and it clashes with
+40. ❌ **`import net` brings `net.ErrNotFound` into scope and it clashes with
     a local `ErrNotFound`**. Workaround: rename the local sentinel
     (`ErrBookNotFound`) or use `net.` names without the import.
-41. **Relative namespace references fail from a sibling namespace**
+41. ❌ **Relative namespace references fail from a sibling namespace**
     (`model.X` written in `app.api` for `app.model.X`). Workaround: import
     the full path (`import app.model`).
 
 Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
 `workspace`, `testing-guide`):
 
-42. **Fixed (2026-10-25)** (the runtime bug; `select` stays a spec gap): cause: a coroutine runs as part of its caller's task until its first suspension, so the `Recv` it started hooked its cancellation on the caller (or nowhere, before `main` first suspended), and cancelling the losing coroutine's task never reached the queued wait; `zell_task_lazy` now moves the hooks linked since the ramp's `zell_coro_enter` mark onto the new task, and `task.Any` cancels its losers before it completes. **No `select`, and `task.Any` over a `Recv` loses values.** The
+42. ✅ **Fixed (2026-10-25)** (the runtime bug; `select` stays a spec gap): cause: a coroutine runs as part of its caller's task until its first suspension, so the `Recv` it started hooked its cancellation on the caller (or nowhere, before `main` first suspended), and cancelling the losing coroutine's task never reached the queued wait; `zell_task_lazy` now moves the hooks linked since the ramp's `zell_coro_enter` mark onto the new task, and `task.Any` cancels its losers before it completes. **No `select`, and `task.Any` over a `Recv` loses values.** The
     stand-in for `select { case v := <-ch: ... case <-time.After(d): ... }`
     is `await task.Any(ch.Recv(), task.Delay(d))` in a loop, but the losing
     `Recv` is cancelled while staying registered as a receiver: the next
@@ -219,7 +221,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     a spec gap (`select` over channel operations and timers). Workaround in
     `jobrunner/src/service.zl`: one task owns the only `Recv` and cancels a
     scope; the timer wait runs in that scope.
-43. **As specified, not changed (2026-10-25):** DESIGN.md «Асинхронность» says `Delay` and `Send` wake at once in a cancelled context but cannot return an error (check `task.CheckCancelled()?`), while `Recv` returns `task.ErrCancelled`; making `Send` `Task<void!>` would be a language change. **In a cancelled context, `Send` returns at once without an error**
+43. 📘 **As specified, not changed (2026-10-25):** DESIGN.md «Асинхронность» says `Delay` and `Send` wake at once in a cancelled context but cannot return an error (check `task.CheckCancelled()?`), while `Recv` returns `task.ErrCancelled`; making `Send` `Task<void!>` would be a language change. **In a cancelled context, `Send` returns at once without an error**
     (it is `Task<void>`), so a producer cannot tell whether the value was
     delivered, and every receive with no value ready fails: a result
     collector running in the cancelled context stops at once and the
@@ -227,42 +229,42 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     pool takes the jobs' `task.Context` as a parameter and runs only the
     jobs in it (`task.RunWith(run, ...)`). Consider `Send` returning
     `Task<void!>`.
-44. **Fixed (2026-10-25):** cause: a `for` loop's copy of its sequence lived until function exit and was released after the locals (the `Arena` included), and `Free` returned chunks to the system, so releasing a slice of arena pointers read freed memory; now the copy is released at the loop's end, scoped temporaries go before locals, and `Free` keeps its chunks as spares (ABI.md 3.6). **Arenas crash with many or large allocations.** Repro: `a.New<P>()`
+44. ✅ **Fixed (2026-10-25):** cause: a `for` loop's copy of its sequence lived until function exit and was released after the locals (the `Arena` included), and `Free` returned chunks to the system, so releasing a slice of arena pointers read freed memory; now the copy is released at the loop's end, scoped temporaries go before locals, and `Free` keeps its chunks as spares (ABI.md 3.6). **Arenas crash with many or large allocations.** Repro: `a.New<P>()`
     20 000 times into a `[]*P`, then `for p in ps { sum += p.X }` ends in
     SIGSEGV in `zell_retain` (`runtime/src/mem.c:305`); 8 000 objects
     work. `a.Alloc<Particle>(50000)` crashes the same way, and two frames
     of 1000 `a.New` objects crash under `--leak-check` only. Likely
     allocations beyond the first 64 KB chunk are not recognised as arena
     records. Workaround in `scene-graph`: one `a.Alloc<T>(1000)` per frame.
-45. **Error frames created in standard library functions carry the
+45. ❌ **Error frames created in standard library functions carry the
     caller's file name**: `strconv.Atoi` failing in `g.zl` gives frames
     `g.zl:17 strconv.fail`, `g.zl:17 strconv.Atoi` (line 17 of the std
     file, in a 16-line `g.zl`). Workaround in `errors-deep-dive`: convert
     std errors at the boundary (`number` turns the parse error into a
     `ValidationError`), so their frames are never printed.
-46. **`return f()` in a `T!` function, where `f()` is also `T!`, is
+46. ❌ **`return f()` in a `T!` function, where `f()` is also `T!`, is
     rejected** ("result of type V! must be handled"); it has to be `return
     f()?`. Go and Rust return the result as is. Workaround: `?`.
-47. **`zell test` does not understand a workspace root**: without a path it
+47. ❌ **`zell test` does not understand a workspace root**: without a path it
     compiles the whole tree as one package and fails with "namespace
     `mapper` is outside package `geo`"; `-p name` is not accepted
     (`--workspace` neither). Workaround: `zell test <member dir>` for each
     member; `doc_examples.rs` does that for a root with `[workspace]`.
-48. **`import geo` followed only by qualified uses (`geo.Hello()`) is an
+48. ❌ **`import geo` followed only by qualified uses (`geo.Hello()`) is an
     "unused import" error.** Workaround: drop the import (a direct
     dependency is reachable by its full name) or use the names unqualified.
-49. **`import os.signal` does not make `signal.X` available**; the
+49. ❌ **`import os.signal` does not make `signal.X` available**; the
     namespace is reached as `signal.Name` after `import os`, unlike every
     other sub-namespace. Workaround: `import os`.
-50. **Assertion failures have no `file:line`** (`got 6000, want 600`), and
+50. ❌ **Assertion failures have no `file:line`** (`got 6000, want 600`), and
     `testing.T` has no `Helper()`, `Cleanup()` or `TempDir()`. Workaround:
     a subtest per table row, so the failing row is named.
-51. **No assertion for a `T!` result**: every test of a fallible function
+51. ❌ **No assertion for a `T!` result**: every test of a fallible function
     writes `try ... catch err { t.Fatal(...) }`. Workaround: per-package
     helpers (`mustParse`, `parseError` in `testing-guide`); consider
     `testing.Ok(t, f())` returning the value and `testing.Fails(t, f())`
     returning the error.
-52. **Implicit namespaces report "unused import"**: `import task`, `import os`,
+52. ❌ **Implicit namespaces report "unused import"**: `import task`, `import os`,
     `import errors`, `import strings` are errors ("unused import") because those
     namespaces are implicit, while `println` is unknown without `import io`.
     Either accept (and ignore) an explicit import of an implicit namespace, or
