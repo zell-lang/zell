@@ -1,7 +1,7 @@
 /* task_sync.c - task.Channel<T> and task.Mutex (ABI.md 10.6, 10.7): a
  * channel with a ring buffer and FIFO queues of waiting senders and
  * receivers, each woken exactly once, and a mutex that lives inline in the
- * Zell struct (three words) and hands ownership to the oldest waiter. The
+ * Zell struct (three words) with Go's barging and starvation rules. The
  * waits are plain tasks (task.c) whose slots hold the queue links, and the
  * element a sender waits with. The C API of 10.6/10.7 (zell_chan_*,
  * zell_mutex_*) is built on the same code. */
@@ -441,86 +441,159 @@ int64_t zell_chan_len(const zell_chan *c) {
 
 /* ======================================================================
  * Mutex: three words inline in the Zell struct (10.6): m[0] is the state,
- * m[1] and m[2] the head and tail of the FIFO of waiting tasks (linked
+ * m[1] and m[2] the head and tail of the queue of waiting tasks (linked
  * through their slots). State bits: 0 locked, 1 the guard of the queue, 2
- * waiters queued (set with the queue under the guard); higher bits are
- * reserved (R5: barging with a starvation threshold extends the word,
- * keeping 0 = free and 1 = locked with nothing else to do). Lock of a free
- * mutex is one compare-and-swap 0 -> 1 and returns the immortal done task;
- * Unlock of a mutex nobody waits for is one compare-and-swap 1 -> 0. The
- * compiler inlines both (ABI.md 10.6) and calls the functions below only
- * when the CAS fails. Unlock hands the lock to the oldest waiter by
- * completing its task, which runs next on the unlocking worker.
+ * waiters queued, 3 woken (a dequeued waiter is on its way to retry, so
+ * Unlock wakes nobody else), 4 starving (FIFO hand-off); higher bits are
+ * reserved. 0 is free with nothing to do on Lock and 1 is locked with
+ * nothing to do on Unlock: the compiler inlines Lock as a compare-and-swap
+ * 0 -> 1 and Unlock as 1 -> 0 (ABI.md 10.6) and calls the functions below
+ * only when the CAS fails.
  *
- * Invariant: the locked bit is set only from a state with the guard clear
- * (a CAS from 0, the free unguarded state), or by the guard's holder. A
- * slow Lock that takes the guard and finds the mutex freed meanwhile
- * (state == guard) stores LOCKED with a plain store, so a fast Lock or
- * TryLock that CASed the locked bit in under the guard would be lost: two
- * owners, and the second Unlock panics "unlock of unlocked mutex". The
- * waiters bit is set only while locked, so a free mutex is 0 or guarded.
+ * Go's sync.Mutex rules (DESIGN.md "Асинхронность"). Normal mode: Unlock
+ * frees the mutex and wakes the oldest waiter without handing it over; the
+ * waiter retries in a job (mu_retry) and a running task may take the
+ * mutex first (barging, also after up to MU_SPINS spins in Lock); a waiter
+ * that loses re-queues at the head, so it stays the oldest. A waiter that
+ * has waited more than MU_STARVE_NS when it loses sets the starving bit:
+ * Unlock then hands ownership to the oldest waiter (the mutex stays locked)
+ * and new Locks queue at the tail, until the queue drains or the waiter
+ * that receives the mutex waited less than MU_STARVE_NS.
+ *
+ * Invariant: the locked bit is set only by a CAS from a state with the
+ * guard and starving bits clear, or by the guard's holder, and the
+ * guarded word changes only by its holder's stores (every other writer
+ * CASes from an unguarded state). A free mutex with the starving bit set
+ * does not occur: starving is set only while locked with a waiter queued,
+ * and a hand-off keeps the mutex locked.
  * ====================================================================== */
 
-enum { MU_LOCKED = 1, MU_GUARD = 2, MU_WAITERS = 4 };
+enum { MU_LOCKED = 1, MU_GUARD = 2, MU_WAITERS = 4, MU_WOKEN = 8, MU_STARVING = 16 };
+#define MU_SPINS 100                 /* CAS attempts of a contended Lock before it queues */
+#define MU_STARVE_NS 1000000         /* a waiter this old switches the mutex to FIFO hand-off */
 
-static inline void mu_guard(int64_t *m) {
+/* A waiter's slot: the queue link, when it first queued, and the mutex
+ * (for the retry job). */
+typedef struct mu_wait {
+    zell_task *next;
+    int64_t since;
+    int64_t *m;
+} mu_wait;
+
+static inline mu_wait *mu_w(zell_task *t) { return (mu_wait *)zell__task_slot(t); }
+
+/* Takes the guard and returns the state with the guard set. */
+static inline int64_t mu_guard(int64_t *m) {
     for (int spins = 0;; spins++) {
         int64_t s = __atomic_load_n(m, __ATOMIC_RELAXED);
-        if (!(s & MU_GUARD) && __atomic_compare_exchange_n(m, &s, s | MU_GUARD, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+        if (!(s & MU_GUARD) && __atomic_compare_exchange_n(m, &s, s | MU_GUARD, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return s | MU_GUARD;
         if (spins > 64) zell__plat_yield();
     }
 }
 
-static inline zell_task **mu_next(zell_task *t) { return zell__task_slot(t); }
+/* Stores the new state s, which drops the guard (guard holder only). */
+static inline void mu_store(int64_t *m, int64_t s) { __atomic_store_n(m, s & ~(int64_t)MU_GUARD, __ATOMIC_RELEASE); }
+
+/* Barging: takes the mutex when it is free, unguarded and not starving. */
+static inline bool mu_try_take(int64_t *m, int64_t s) {
+    return !(s & (MU_LOCKED | MU_GUARD | MU_STARVING)) &&
+           __atomic_compare_exchange_n(m, &s, s | MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+static zell_task *mu_pop(int64_t *m) {
+    zell_task *t = (zell_task *)(intptr_t)m[1];
+    m[1] = (int64_t)(intptr_t)mu_w(t)->next;
+    if (!m[1]) m[2] = 0;
+    return t;
+}
+
+/* The retry of a woken waiter t (a job; t carries the queue's reference). */
+static void mu_retry(void *arg) {
+    zell_task *t = arg;
+    int64_t *m = mu_w(t)->m;
+    int64_t s = mu_guard(m) & ~(int64_t)MU_WOKEN;
+    if (!(s & MU_LOCKED)) {
+        mu_store(m, s | MU_LOCKED);   /* starving is clear: the mutex was free */
+        zell_task_complete(t, NULL);
+        zell_release(t);
+        return;
+    }
+    /* lost to a barging task: back to the head, still the oldest */
+    if (zell__plat_mono_ns() - mu_w(t)->since > MU_STARVE_NS) s |= MU_STARVING;
+    mu_w(t)->next = (zell_task *)(intptr_t)m[1];
+    if (!m[1]) m[2] = (int64_t)(intptr_t)t;
+    m[1] = (int64_t)(intptr_t)t;
+    mu_store(m, s | MU_WAITERS);
+}
 
 zell_task *zell_task_mutex_lock(int64_t *m) {
     if (!m) zell_panic_nil();
     int64_t s = __atomic_load_n(m, __ATOMIC_RELAXED);
-    if (s == 0 && __atomic_compare_exchange_n(m, &s, MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-        return zell_task_done();   /* only from free and unguarded (the invariant above) */
-    mu_guard(m);
-    s = __atomic_load_n(m, __ATOMIC_RELAXED);
-    if (!(s & MU_LOCKED)) {   /* freed while we waited for the guard */
-        __atomic_store_n(m, MU_LOCKED, __ATOMIC_RELEASE);
+    if (mu_try_take(m, s)) return zell_task_done();
+    /* Spin while another worker may release it soon (Go's canSpin). */
+    if (!(s & MU_STARVING) && zell__sched_can_spin()) {
+        for (int i = 0; i < MU_SPINS; i++) {
+            zell__plat_cpu_relax();
+            s = __atomic_load_n(m, __ATOMIC_RELAXED);
+            if (s & MU_STARVING) break;
+            if (mu_try_take(m, s)) return zell_task_done();
+        }
+    }
+    s = mu_guard(m);
+    if (!(s & MU_LOCKED)) {   /* free (so not starving) */
+        mu_store(m, s | MU_LOCKED);
         return zell_task_done();
     }
-    zell_task *t = zell__task_new_slot(0, NULL, 0, (int64_t)sizeof(zell_task *));
+    zell_task *t = zell__task_new_slot(0, NULL, 0, (int64_t)sizeof(mu_wait));
     zell_retain(t);   /* the queue's reference */
-    *mu_next(t) = NULL;
+    mu_wait *w = mu_w(t);
+    w->next = NULL;
+    w->since = zell__plat_mono_ns();
+    w->m = m;
     zell_task *tail = (zell_task *)(intptr_t)m[2];
-    if (tail) *mu_next(tail) = t; else m[1] = (int64_t)(intptr_t)t;
+    if (tail) mu_w(tail)->next = t; else m[1] = (int64_t)(intptr_t)t;
     m[2] = (int64_t)(intptr_t)t;
-    __atomic_store_n(m, MU_LOCKED | MU_WAITERS, __ATOMIC_RELEASE);   /* guard off */
+    mu_store(m, s | MU_WAITERS);
     return t;
 }
 
 bool zell_task_mutex_try_lock(int64_t *m) {
     if (!m) zell_panic_nil();
-    /* A guarded state is locked or about to be: the guard of a free mutex
-     * is held only by a slow Lock, which then takes it (the invariant). */
-    int64_t s = 0;
-    return __atomic_compare_exchange_n(m, &s, MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+    /* Free and not starving; a guarded state counts as taken (its holder
+     * may be a slow Lock about to take it). */
+    for (;;) {
+        int64_t s = __atomic_load_n(m, __ATOMIC_RELAXED);
+        if (s & (MU_LOCKED | MU_GUARD | MU_STARVING)) return false;
+        if (__atomic_compare_exchange_n(m, &s, s | MU_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return true;
+    }
 }
 
 void zell_task_mutex_unlock(int64_t *m) {
     if (!m) zell_panic_nil();
-    mu_guard(m);
-    int64_t s = __atomic_load_n(m, __ATOMIC_RELAXED);
+    int64_t s = mu_guard(m);
     if (!(s & MU_LOCKED)) {
-        __atomic_store_n(m, s & ~(int64_t)MU_GUARD, __ATOMIC_RELEASE);
+        mu_store(m, s);
         zell_panic("unlock of unlocked mutex");
     }
-    zell_task *t = (zell_task *)(intptr_t)m[1];
-    if (!t) {
-        __atomic_store_n(m, 0, __ATOMIC_RELEASE);   /* unlocked, guard off */
+    if (s & MU_STARVING) {
+        /* FIFO hand-off: the oldest waiter owns it from now on */
+        zell_task *t = mu_pop(m);
+        if (!m[1] || zell__plat_mono_ns() - mu_w(t)->since < MU_STARVE_NS) s &= ~(int64_t)MU_STARVING;
+        if (!m[1]) s &= ~(int64_t)MU_WAITERS;
+        mu_store(m, s);   /* still locked */
+        zell_task_complete(t, NULL);
+        zell_release(t);
         return;
     }
-    m[1] = (int64_t)(intptr_t)*mu_next(t);
-    if (!m[1]) m[2] = 0;
-    /* ownership passes to t; guard off */
-    __atomic_store_n(m, m[1] ? MU_LOCKED | MU_WAITERS : MU_LOCKED, __ATOMIC_RELEASE);
-    zell_task_complete(t, NULL);
-    zell_release(t);
+    s &= ~(int64_t)MU_LOCKED;
+    if (!m[1] || (s & MU_WOKEN)) {   /* nobody to wake, or a woken waiter will retry */
+        mu_store(m, s);
+        return;
+    }
+    zell_task *t = mu_pop(m);
+    if (!m[1]) s &= ~(int64_t)MU_WAITERS;
+    mu_store(m, s | MU_WOKEN);
+    zell__sched_post_plain(mu_retry, t, true);
 }
 
 /* Releases the waiters of a mutex that is dropped while tasks wait on it
@@ -528,7 +601,7 @@ void zell_task_mutex_unlock(int64_t *m) {
 static void mutex_words_drop(int64_t *m) {
     zell_task *t = (zell_task *)(intptr_t)m[1];
     while (t) {
-        zell_task *n = *mu_next(t);
+        zell_task *n = mu_w(t)->next;
         zell_release(t);
         t = n;
     }

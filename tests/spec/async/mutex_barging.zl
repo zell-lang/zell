@@ -1,0 +1,72 @@
+// test: Mutex under hammering (DESIGN.md "Асинхронность", Go's sync.Mutex rules): tasks that re-lock at once, tasks that yield inside the critical section, TryLock and a late waiter; mutual exclusion and completion hold, the order is not specified
+// status: passing
+// run-flags: --leak-check
+namespace spec.async.mutex_barging
+
+import io
+
+struct Shared {
+    Mu      task.Mutex
+    N       int
+    Inside  int
+    Overlap int
+}
+
+func enter(s *Shared) {
+    s.Inside += 1
+    if s.Inside != 1 {
+        s.Overlap += 1
+    }
+}
+
+// Re-takes the mutex right after every Unlock, without suspending.
+async func Hammer(s *Shared, times int) {
+    await task.Yield()
+    for _ in 0..times {
+        await s.Mu.Lock()
+        enter(s)
+        s.N += 1
+        s.Inside -= 1
+        s.Mu.Unlock()
+    }
+}
+
+// Holds the mutex across a suspension.
+async func Yielder(s *Shared, times int) {
+    await task.Yield()
+    for _ in 0..times {
+        await s.Mu.Lock()
+        enter(s)
+        var v = s.N
+        await task.Yield()
+        s.N = v + 1
+        s.Inside -= 1
+        s.Mu.Unlock()
+    }
+}
+
+async func main() {
+    var s = new Shared{}
+    var ts []Task<void> = []
+    for _ in 0..6 {
+        ts = append(ts, Hammer(s, 20000))
+    }
+    for _ in 0..2 {
+        ts = append(ts, Yielder(s, 500))
+    }
+    // A late waiter gets the mutex while the others keep re-taking it.
+    await task.Delay(1)
+    await s.Mu.Lock()
+    enter(s)
+    s.N += 1
+    var held = s.Mu.TryLock()
+    s.Inside -= 1
+    s.Mu.Unlock()
+    println("late waiter done, TryLock while held:", held)
+    for t in ts {
+        await t
+    }
+    println(s.N, "overlaps:", s.Overlap)
+    println("free again:", s.Mu.TryLock())
+    s.Mu.Unlock()
+}

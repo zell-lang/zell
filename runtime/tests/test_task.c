@@ -512,8 +512,9 @@ TEST(inline_abi_words) {
     assert(!zell_task_is_done(w) && m[0] == 5 && m[1] == (int64_t)(intptr_t)w);   /* locked | waiters */
     int64_t one = 1;
     assert(!__atomic_compare_exchange_n(&m[0], &one, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));   /* inline Unlock: waiters, slow path */
-    zell_task_mutex_unlock(m);   /* hands the lock to w */
-    assert(zell_task_is_done(w) && m[0] == 1 && m[1] == 0 && m[2] == 0);
+    zell_task_mutex_unlock(m);   /* frees it and wakes w, which retries in a job */
+    zell_task_await(w);
+    assert(m[0] == 1 && m[1] == 0 && m[2] == 0);   /* w owns it, nothing else to do */
     one = 1;
     assert(__atomic_compare_exchange_n(&m[0], &one, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED) && m[0] == 0);   /* inline Unlock */
     assert(zell_task_mutex_try_lock(m) && m[0] == 1);
@@ -1100,16 +1101,17 @@ TEST(mutex_contention_1k) {
     zell_release(call_done);
     assert(cguarded == N * 50);
     /* free again: TryLock succeeds once, a Lock of a free mutex is done at
-     * once (the shared immortal task), waiters queue in FIFO order */
+     * once (the shared immortal task), waiters are woken oldest first */
     zell_task *free_lock = zell_mutex_lock_async(cmu);
     assert(zell_task_is_done(free_lock));
     assert(!zell_mutex_try_lock(cmu));
     zell_task *w1 = zell_mutex_lock_async(cmu), *w2 = zell_mutex_lock_async(cmu);
     assert(!zell_task_is_done(w1) && !zell_task_is_done(w2));
     zell_mutex_unlock(cmu);
-    assert(zell_task_is_done(w1) && !zell_task_is_done(w2));
+    zell_task_await(w1);   /* woken first; nobody barges here */
+    assert(!zell_task_is_done(w2));
     zell_mutex_unlock(cmu);
-    assert(zell_task_is_done(w2));
+    zell_task_await(w2);
     zell_mutex_unlock(cmu);
     assert(zell_mutex_try_lock(cmu));
     zell_mutex_unlock(cmu);
@@ -1151,8 +1153,8 @@ TEST(mutex_fast_path_respects_guard) {
     pthread_join(th, &r);
     zell_task *t = r;
     assert(!zell_task_is_done(t));   /* queued behind the owner */
-    zell_task_mutex_unlock(gm);      /* hands it to t */
-    assert(zell_task_is_done(t));
+    zell_task_mutex_unlock(gm);      /* wakes t, which takes it */
+    zell_task_await(t);
     zell_task_mutex_unlock(gm);
     assert(gm[0] == 0 && gm[1] == 0 && gm[2] == 0);
     zell_release(t);
@@ -1292,7 +1294,256 @@ TEST(yield_ring_tail) {
     zell_task_await(zell_task_yield());
 }
 
+/* ---- mutex: Go's sync.Mutex rules (DESIGN.md "Асинхронность", ABI.md
+ * 10.6): barging, a woken waiter that loses stays the oldest, FIFO
+ * hand-off in starvation mode, races, one worker, no starvation ---- */
+
+static void sleep_us(long us) {
+    struct timespec d = { 0, us * 1000 };
+    nanosleep(&d, NULL);
+}
+
+enum { MU_STARVING_BIT = 16 };   /* ABI.md 10.6 */
+
+static int64_t bm[3];
+static zell_task *bw1, *bw2, *bjob_done;
+static int bbarged;
+
+/* On a worker: Unlock wakes bw1 (its retry goes to this worker's run-next
+ * slot) without handing it over, so this running job takes it first. */
+static void barge_job(void *arg) {
+    (void)arg;
+    assert(zell_task_mutex_lock(bm) == &zell_task_done_task);
+    bw1 = zell_task_mutex_lock(bm);
+    bw2 = zell_task_mutex_lock(bm);
+    zell_task_mutex_unlock(bm);
+    bbarged = zell_task_mutex_try_lock(bm);
+    if (bbarged) assert(!zell_task_is_done(bw1));
+    zell_task_complete(bjob_done, NULL);
+}
+
+TEST(mutex_barging) {
+    int barged = 0;
+    for (int round = 0; round < 50; round++) {
+        bm[0] = bm[1] = bm[2] = 0;
+        bjob_done = zell_task_new_plain(0, NULL);
+        zell_sched_post(barge_job, NULL);
+        zell_task_await(bjob_done);
+        zell_release(bjob_done);
+        if (bbarged) { barged++; zell_task_mutex_unlock(bm); }
+        /* bw1 lost the race (or never raced) and re-queued at the head */
+        zell_task_await(bw1);
+        assert(!zell_task_is_done(bw2));
+        zell_task_mutex_unlock(bm);
+        zell_task_await(bw2);
+        zell_task_mutex_unlock(bm);
+        assert(bm[0] == 0 && bm[1] == 0 && bm[2] == 0);
+        zell_release(bw1);
+        zell_release(bw2);
+    }
+    assert(barged > 0);   /* a stolen retry may win a round, never all 50 */
+}
+
+TEST(mutex_starvation_fifo) {
+    int64_t m[3] = { 0, 0, 0 };
+    assert(zell_task_mutex_lock(m) == &zell_task_done_task);
+    zell_task *w[5];
+    for (int i = 0; i < 5; i++) { w[i] = zell_task_mutex_lock(m); assert(!zell_task_is_done(w[i])); }
+    sleep_us(3000);
+    /* What a woken waiter that waited > 1 ms does when it loses the race. */
+    __atomic_or_fetch(&m[0], MU_STARVING_BIT, __ATOMIC_SEQ_CST);
+    assert(!zell_task_mutex_try_lock(m));        /* nobody barges */
+    zell_task *late = zell_task_mutex_lock(m);   /* queues at the tail */
+    assert(!zell_task_is_done(late));
+    for (int i = 0; i < 5; i++) {
+        zell_task_mutex_unlock(m);               /* hands it to the oldest, synchronously */
+        assert(zell_task_is_done(w[i]));
+        for (int j = i + 1; j < 5; j++) assert(!zell_task_is_done(w[j]));
+        assert(!zell_task_is_done(late));
+        assert((m[0] & 1) && (m[0] & MU_STARVING_BIT));
+        assert(!zell_task_mutex_try_lock(m));
+    }
+    zell_task_mutex_unlock(m);                   /* to late: the queue drained */
+    assert(zell_task_is_done(late) && m[0] == 1 && m[1] == 0 && m[2] == 0);
+    zell_task_mutex_unlock(m);
+    assert(m[0] == 0);
+    for (int i = 0; i < 5; i++) zell_release(w[i]);
+    zell_release(late);
+
+    /* A waiter that waited less than 1 ms ends starvation mode. */
+    assert(zell_task_mutex_lock(m) == &zell_task_done_task);
+    zell_task *a = zell_task_mutex_lock(m), *b = zell_task_mutex_lock(m);
+    __atomic_or_fetch(&m[0], MU_STARVING_BIT, __ATOMIC_SEQ_CST);
+    zell_task_mutex_unlock(m);
+    assert(zell_task_is_done(a) && !zell_task_is_done(b) && !(m[0] & MU_STARVING_BIT));
+    zell_task_mutex_unlock(m);   /* normal mode: wakes b */
+    zell_task_await(b);
+    zell_task_mutex_unlock(m);
+    assert(m[0] == 0);
+    zell_release(a);
+    zell_release(b);
+}
+
+/* Lock/unlock races: continuation-style racers (as compiled code awaits),
+ * a fresh mutex per round, which must end free with an empty queue. With
+ * `yield`, the critical section yields the thread in the middle. */
+static int64_t rm[3];
+static int64_t rcount, rdone, rracers;
+static zell_task *rall;
+static int ryield;
+
+typedef struct { int64_t left, seen; } racer;
+
+static void racer_step(void *arg);
+
+static void racer_finish(void *arg) {
+    racer *r = arg;
+    assert(rcount == r->seen);   /* nobody else got in */
+    rcount = r->seen + 1;
+    zell_task_mutex_unlock(rm);
+    if (--r->left == 0) {
+        int64_t all = rracers;   /* read before the add: the last add ends the round */
+        if (__atomic_add_fetch(&rdone, 1, __ATOMIC_ACQ_REL) == all) zell_task_complete(rall, NULL);
+        return;
+    }
+    racer_step(arg);
+}
+
+static void racer_locked(void *arg) {
+    racer *r = arg;
+    r->seen = rcount;
+    if (ryield) zell_task_add_continuation(zell_task_yield(), racer_finish, arg);
+    else racer_finish(arg);
+}
+
+static void racer_step(void *arg) {
+    zell_task *t = zell_task_mutex_lock(rm);
+    bool wait = zell_task_add_continuation(t, racer_locked, arg);
+    zell_release(t);
+    if (!wait) racer_locked(arg);
+}
+
+static void race_round(int64_t racers, int64_t iters, int yield) {
+    static racer rs[16];
+    assert(racers <= 16);
+    rm[0] = rm[1] = rm[2] = 0;
+    rcount = rdone = 0;
+    rracers = racers;
+    ryield = yield;
+    rall = zell_task_new_plain(0, NULL);
+    for (int64_t i = 0; i < racers; i++) { rs[i].left = iters; zell_sched_post(racer_step, &rs[i]); }
+    zell_task_await(rall);
+    zell_release(rall);
+    assert(rcount == racers * iters);
+    assert(rm[0] == 0 && rm[1] == 0 && rm[2] == 0);
+}
+
+TEST(mutex_race_rounds) {
+    for (int round = 0; round < 1000; round++) race_round(4, 8, round & 1);
+}
+
+/* ---- children with their own worker count (a fresh process: ABI.md
+ * 10.5 fixes the pool size at start) ---- */
+
+static int64_t sm[3];
+static int sstop;
+static int64_t shostiles_done;
+
+/* Re-takes the mutex in a loop with TryLock, which barges ahead of every
+ * woken waiter in normal mode. */
+static void hostile(void *arg) {
+    (void)arg;
+    while (!__atomic_load_n(&sstop, __ATOMIC_ACQUIRE)) {
+        if (zell_task_mutex_try_lock(sm)) {
+            for (int k = 0; k < 50; k++) zell__plat_cpu_relax();
+            zell_task_mutex_unlock(sm);
+        }
+    }
+    __atomic_add_fetch(&shostiles_done, 1, __ATOMIC_ACQ_REL);
+}
+
+/* 15 hostile workers out of 16: a waiter still gets the mutex about 1 ms
+ * after it queued (starvation mode), plus scheduling slack. */
+static void child_starve(void) {
+    int64_t n = zell_sched_workers() - 1;
+    if (n > 15) n = 15;
+    for (int64_t i = 0; i < n; i++) zell_sched_post(hostile, NULL);
+    sleep_us(5000);
+    int64_t worst = 0;
+    for (int i = 0; i < 20; i++) {
+        int64_t t0 = now_ns();
+        zell_task *t = zell_task_mutex_lock(sm);
+        while (!zell_task_is_done(t)) {
+            if (now_ns() - t0 >= 2000000000) {
+                fprintf(stderr, "waiter stuck: state %lld\n", (long long)__atomic_load_n(&sm[0], __ATOMIC_SEQ_CST));
+                abort();
+            }
+            sched_yield();
+        }
+        int64_t waited = now_ns() - t0;
+        if (waited > worst) worst = waited;
+        zell_task_mutex_unlock(sm);
+        zell_release(t);
+        sleep_us(1000);
+    }
+    __atomic_store_n(&sstop, 1, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&shostiles_done, __ATOMIC_ACQUIRE) < n) sched_yield();
+    fprintf(stderr, "workers %lld, worst wait %.2f ms\n", (long long)(n + 1), (double)worst / 1e6);
+    assert(worst < 250000000);   /* 1 ms threshold + slack (sanitizers, wine, a loaded machine) */
+}
+
+/* One worker: nobody spins, the woken waiter's retry runs after the
+ * unlocking job; the critical section yields the only thread. */
+static void child_one_worker(void) {
+    assert(zell_sched_workers() == 1);
+    for (int round = 0; round < 50; round++) race_round(8, 50, 1);
+}
+
+static int mutex_child(const char *mode, int argc, char **argv) {
+    bool starve = strcmp(mode, "starve") == 0;
+    setenv("ZELL_WORKERS", starve ? "16" : "1", 1);
+    int64_t live = zell_live_objects();
+    zell_runtime_init(argc, argv);
+    if (starve) child_starve(); else child_one_worker();
+    zell_runtime_shutdown();
+    assert(zell_live_objects() == live);
+    return 0;
+}
+
+static char *test_argv0;
+
+#if !defined(_WIN32)
+#define MUTEX_CHILD(name, mode) static void name(void) { \
+        setenv("ZELL_TEST_MUTEX", mode, 1); \
+        char *a[] = { test_argv0, NULL }; \
+        execv(test_argv0, a); \
+        _exit(99); }
+#else
+#define MUTEX_CHILD(name, mode) static void name(void) { \
+        char *a[] = { "test_task", NULL }; \
+        _exit(mutex_child(mode, 1, a)); }
+#endif
+MUTEX_CHILD(spawn_child_starve, "starve")
+MUTEX_CHILD(spawn_child_one_worker, "one")
+
+TEST(mutex_no_starvation_16_workers) {
+    char buf[1024];
+    int rc = run_child(spawn_child_starve, buf, sizeof buf);
+    printf("    %s", buf);
+    assert(rc == 0);
+}
+
+TEST(mutex_one_worker_yield) {
+    char buf[1024];
+    int rc = run_child(spawn_child_one_worker, buf, sizeof buf);
+    if (rc != 0) printf("    %s\n", buf);
+    assert(rc == 0);
+}
+
 int main(int argc, char **argv) {
+    const char *child = getenv("ZELL_TEST_MUTEX");
+    if (child) return mutex_child(child, argc, argv);
+    test_argv0 = argv[0];
     printf("test_task\n");
     setenv("ZELL_WORKERS", "3", 1);
     int64_t live = zell_live_objects();
@@ -1335,6 +1586,11 @@ int main(int argc, char **argv) {
     RUN(channel_cancel_races_completion);
     RUN(mutex_contention_1k);
     RUN(mutex_fast_path_respects_guard);
+    RUN(mutex_barging);
+    RUN(mutex_starvation_fifo);
+    RUN(mutex_race_rounds);
+    RUN(mutex_no_starvation_16_workers);
+    RUN(mutex_one_worker_yield);
     RUN(drop_in_job_teardown_starts_task);
 
     zell_runtime_shutdown();

@@ -527,8 +527,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// `&m.state`, ABI.md 10.6) with the uncontended case inline: Lock is
     /// a CAS of the state word 0 -> 1 (acquire) that yields the immortal
     /// `zell_task_done_task`, Unlock a CAS 1 -> 0 (release: locked, no
-    /// waiters, no guard). A failed CAS (or a nil pointer, which the
-    /// runtime reports) takes the runtime call.
+    /// waiters, no woken waiter, not starving, no guard). A failed CAS (or
+    /// a nil pointer, which the runtime reports) takes the runtime call.
     pub(crate) fn mutex_intrinsic(&mut self, x: crate::hir::ExternId, args: &[Expr]) -> R<Option<Val<'ctx>>> {
         let lock = match self.prog.externs[x.0 as usize].symbol.as_str() {
             "zell_task_mutex_lock" => true,

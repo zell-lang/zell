@@ -1343,10 +1343,16 @@ built as `*_async` variants that return a `zell_task *`.
     if no other parked worker does so already (the run-next watcher): it
     takes the slot when it wakes if the slot still holds the record it
     saw, and doubles its timeout (20 us up to 1 ms) while the slots it
-    sees keep moving. Every other worker parks without a timeout. A
-    run-next post wakes a parked worker by the rule above, which then
-    spins and watches, so a stuck slot is taken within ~20 us when a
-    worker was parked plainly, and within ~2 ms in the worst case.
+    sees keep moving. A run-next post wakes a parked worker by the rule
+    above, which then spins and watches, so a stuck slot is taken within
+    ~20 us when a worker was parked plainly, and within ~2 ms in the worst
+    case. A post made while a spinner held the token wakes nobody, and a
+    spinner that then takes other work leaves it behind (e.g. a mutex
+    waiter's retry, 10.6, behind a job that keeps re-taking the mutex), so
+    every park has a timeout: with no watcher, the parking worker is the
+    sentry and looks again after 1 ms; the others after 10 ms, which
+    replaces a sentry that went to work. Both double their timeout while
+    the whole pool is idle (up to 64 ms and 1 s).
   - **Network polling (netpoll, 10.9)**, when the I/O pollers are shared
     (epoll): an out-of-work worker polls the network with timeout 0 after
     the global queue and before stealing (and the spinning worker every 64
@@ -1786,37 +1792,62 @@ words, all zero when unlocked, that the runtime owns:
 struct Mutex { state int; waitHead int; waitTail int }
   state    bit 0: locked; bit 1: the guard (a short spin lock) of the queue;
            bit 2: waiters queued (set together with the queue, under the guard);
-           bits 3-63 reserved (0)
-  waitHead, waitTail: the FIFO of waiting tasks, linked through their slots
+           bit 3: woken (a dequeued waiter is on its way to retry; Unlock wakes nobody else);
+           bit 4: starving (FIFO hand-off mode);
+           bits 5-63 reserved (0)
+  waitHead, waitTail: the queue of waiting tasks, oldest first, linked through their slots
 ```
 
-The locked bit is set only by a CAS from `state == 0` (free, unguarded)
-or by the guard's holder: a guarded free mutex belongs to the slow `Lock`
-holding the guard. The waiters bit is set only while the mutex is locked,
-so a free mutex is 0 (or guarded by a slow `Lock`).
+The rules are Go's `sync.Mutex` (DESIGN.md "Асинхронность"). **Normal
+mode:** `Unlock` clears the locked bit and, unless a woken waiter is
+already on its way, dequeues the oldest waiter, sets the woken bit and
+posts its retry as a job (run-next of the unlocking worker, 10.1); the
+retry takes the mutex if it is still free, completing the waiter's task,
+or puts the waiter back at the **head** of the queue (it stays the
+oldest). Meanwhile any running task may take the free mutex (barging); a
+contended `Lock` on a worker spins first (up to 100 CAS attempts with a
+`pause` between them, only with more than one worker, no more threads
+than cores and nothing else queued on its worker). **Starvation mode:** a
+waiter that has waited more than 1 ms when it loses a retry sets the
+starving bit; from then on `Unlock` hands ownership directly to the oldest
+waiter (the mutex stays locked, its task completes and runs next on the
+unlocking worker), and `Lock`/`TryLock` neither barge nor spin: new
+waiters queue at the tail. The mode ends when the queue drains or when the
+waiter receiving the mutex waited less than 1 ms.
+
+The locked bit is set only by a CAS from a state with the guard and
+starving bits clear, or by the guard's holder; the guarded word changes
+only by its holder's stores. A free mutex is never starving (starving is
+set only while locked with a waiter queued, and a hand-off keeps it
+locked), but it may carry the waiters and woken bits, so a free mutex is
+not always 0.
 
 **Inline fast paths.** The compiler emits `Mutex.Lock` as a CAS of `state`
 0 -> 1 (acquire) that yields `&zell_task_done_task` (the immortal done task,
 10.2, whose `await` then takes the inline done path), and `Mutex.Unlock` as
-a CAS 1 -> 0 (release): locked, nobody waiting, no guard. A failed CAS (or
-a nil pointer) calls `zell_task_mutex_lock` / `zell_task_mutex_unlock`.
-`TryLock` stays a call (the same CAS 0 -> 1). An extension of the word (R5
-of `docs/ASYNC_PLAN.md`: barging with a starvation bit) must keep `0` = free
-with nothing to do on Lock and `1` = locked with nothing to do on Unlock, or
-change these inline sequences with it.
+a CAS 1 -> 0 (release): locked, nobody waiting or woken, not starving, no
+guard. A failed CAS (or a nil pointer) calls `zell_task_mutex_lock` /
+`zell_task_mutex_unlock`, which barge, spin, queue, wake and hand off as
+above. `TryLock` stays a call. The word keeps `0` = free with nothing to do
+on Lock and `1` = locked with nothing to do on Unlock, so the inline
+sequences did not change with the barging rules; a free mutex with
+queued or woken waiters (4, 8, 12) makes the inline Lock fail over to the
+runtime, which barges.
 
 The compiled code passes `&m.state` (so the three words must stay in this
-order, 8 bytes each). It is **async-aware**: waiters are tasks, and
-unlocking hands ownership directly to the oldest waiter (FIFO, fair, no
-barging), whose continuation then runs next on the unlocking worker (10.1).
-It is not re-entrant. A `Mutex` must not be copied while in use, and one
-dropped with waiters leaks them (they never complete anyway).
+order, 8 bytes each). It is **async-aware**: waiters are tasks, woken
+oldest first (normal mode) or handed the lock in FIFO order (starvation
+mode). `Lock` is not cancellable. It is not re-entrant. A `Mutex` must not
+be copied while in use, and one dropped with waiters leaks them (they
+never complete anyway); a woken waiter's retry reads the words, so a
+`Mutex` must also outlive its last `Unlock`'s retry (it does whenever its
+waiters hold a reference to it).
 
 | Function | Semantics |
 |---|---|
-| `zell_task *zell_task_mutex_lock(int64_t *m)` | `Task<void>` that completes once the caller **owns** the lock. A free mutex is taken with one compare-and-swap and `zell_task_done()` is returned (no allocation; the `await` takes the 10.3 fast path). Otherwise a waiter task is queued, +1 |
-| `bool zell_task_mutex_try_lock(int64_t *m)` | takes the lock if it is free |
-| `void zell_task_mutex_unlock(int64_t *m)` | releases the lock or completes the oldest waiter's task, which owns it from then on. Panics `unlock of unlocked mutex` |
+| `zell_task *zell_task_mutex_lock(int64_t *m)` | `Task<void>` that completes once the caller **owns** the lock. A free mutex (not starving) is taken with one compare-and-swap, after a short spin on a contended one, and `zell_task_done()` is returned (no allocation; the `await` takes the 10.3 fast path). Otherwise a waiter task is queued at the tail, +1 |
+| `bool zell_task_mutex_try_lock(int64_t *m)` | takes the lock if it is free and not starving (a guarded word counts as taken) |
+| `void zell_task_mutex_unlock(int64_t *m)` | releases the lock and wakes the oldest waiter to retry (normal mode), or completes the oldest waiter's task, which owns it from then on (starvation mode). Panics `unlock of unlocked mutex` |
 
 **C API**: `zell_mutex *` is an opaque refcounted object around the same
 three words (released waiters when dropped).
@@ -1827,7 +1858,7 @@ three words (released waiters when dropped).
 | `zell_task *zell_mutex_lock_async(m)` | `zell_task_mutex_lock` on the object's words |
 | `zell_mutex_lock(m)` | blocking lock (`lock_async` + `zell_task_await`), for non-async code |
 | `bool zell_mutex_try_lock(m)` | takes the lock if it is free |
-| `zell_mutex_unlock(m)` | releases the lock or hands it to the next waiter. Panics `unlock of unlocked mutex` |
+| `zell_mutex_unlock(m)` | `zell_task_mutex_unlock` on the object's words. Panics `unlock of unlocked mutex` |
 
 ### 10.7 Channels
 

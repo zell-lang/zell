@@ -34,7 +34,9 @@
  * same for RUNNEXT_GRACE_NS is taken), and one parked worker that waits
  * with a timeout (q_watcher, WATCH_MIN_NS doubling to WATCH_MAX_NS) and
  * takes the slot it saw if it is unchanged when it wakes. That is the
- * guarantee for a job that never yields after posting to run-next.
+ * guarantee for a job that never yields after posting to run-next; the
+ * other parks have timeouts too (the sentry, worker_main), for posts that
+ * woke nobody because a spinner then took other work.
  *
  * Network polling (netpoll, ABI.md 10.9), when task_io.c installs
  * zell__netpoll_hooks (shared pollers: epoll): readiness is picked up by
@@ -92,6 +94,10 @@ typedef struct job {
 enum { RN_EMPTY = 0, RN_FULL = 1, RN_BUSY = 2, RN_MASK = 3, RN_SEQ = 4 };
 #define WATCH_MIN_NS 20000         /* the parked run-next watcher's first timeout */
 #define WATCH_MAX_NS 1000000       /* ... doubled while the slots it sees keep moving, up to this */
+#define SENTRY_NS 1000000          /* the parked sentry's timeout while some worker runs */
+#define SENTRY_MAX_NS 64000000     /* ... doubled up to this while the whole pool is idle */
+#define PARK_NS 10000000           /* the other parked workers' timeout while some worker runs */
+#define PARK_MAX_NS 1000000000     /* ... doubled up to this while the whole pool is idle */
 
 typedef struct worker {
     /* The ring: the owner stores records at `tail`; the owner and thieves
@@ -117,6 +123,8 @@ typedef struct worker {
     uint32_t cand_val;             /* ... that slot's rn_state when first seen */
     int64_t cand_t;                /* ... monotonic ns of the second sighting (0: not yet) */
     int64_t watch_ns;              /* the watcher's current timeout */
+    int64_t sentry_ns;             /* the sentry's current timeout */
+    int64_t park_ns;               /* a plain park's current timeout */
     int spare;
     int alive;                     /* under q_mu: the slot is in use */
     int64_t live_tasks;            /* tasks made minus tasks dropped on this thread (diag; summed by zell__live_tasks) */
@@ -626,10 +634,12 @@ static void *worker_main(void *arg) {
     t_is_worker = 1;
     zell__rc_thread_eligible();     /* biased refcounts (rc.c) */
     zell__plat_thread_stack_init(); /* frame walks of the CPU profiler */
+    bool sentry_woke = false;   /* back from a park timeout: park again without spinning */
     for (;;) {
         jobrec j;
         PROF_START();
         if (find_work(w, &j)) {
+            sentry_woke = false;
             stop_spinning(w);
             PROF_T(findwork);
             run_job(&j);
@@ -641,7 +651,7 @@ static void *worker_main(void *arg) {
         if (zell__heap_needs_collect()) { zell__heap_collect(0); continue; }
         if (zell__rc_pending()) { zell__rc_poll(); continue; }
         /* Poll before parking, if nobody else does (the token). */
-        if (!w->spinning && q_nworkers > 1 && take_spin_token()) {
+        if (!w->spinning && !sentry_woke && q_nworkers > 1 && take_spin_token()) {
             w->spinning = 1;
             w->spin_until = zell__plat_mono_ns() + SPIN_NS;
             w->cand = -1;
@@ -681,9 +691,10 @@ static void *worker_main(void *arg) {
          * runs a job that will not yield. One parked worker (q_watcher)
          * waits with a timeout and takes the slot if it still holds the
          * same record when it wakes; the timeout doubles while the slots
-         * it sees keep moving. Everybody else parks plainly. */
+         * it sees keep moving. Everybody else parks below. */
         uint32_t wv = 0;
         int64_t wp = q_watcher ? -1 : first_runnext_full(w, &wv);
+        sentry_woke = false;
         if (wp >= 0) {
             q_watcher = w;
             STAT(watch);
@@ -742,12 +753,30 @@ static void *worker_main(void *arg) {
         zell__rc_park(0);
         if (zell__cycles_park) zell__cycles_park();   /* weak: the collector is linked */
         STAT(park);
-        zell__plat_cond_wait(&q_cv, &q_mu);
+        /* Every park has a timeout. A post to a run-next slot or ring made
+         * while a spinner held the token wakes nobody (wake_one leaves it
+         * to the spinner), and a spinner that then takes other work leaves
+         * the post behind an owner that may never yield (a mutex waiter's
+         * retry behind a loop that re-takes the mutex, ABI.md 10.6). With
+         * nobody watching, this worker is the sentry and looks again after
+         * SENTRY_NS; the others after PARK_NS, so a sentry that went to
+         * work is replaced. Both back off while the whole pool is idle. */
+        bool sentry = q_watcher == NULL;
+        if (sentry) q_watcher = w;
+        bool timed_out = !zell__plat_cond_wait_ns(&q_cv, &q_mu, sentry ? w->sentry_ns : w->park_ns);
+        if (sentry && q_watcher == w) q_watcher = NULL;
         __atomic_sub_fetch(&q_idle, 1, __ATOMIC_SEQ_CST);
         if (q_wake_pending > 0) {   /* the waker reserved the spinning token for us */
             q_wake_pending--;
             w->spinning = 1;
             w->spin_until = zell__plat_mono_ns() + SPIN_NS;
+            w->sentry_ns = SENTRY_NS;
+            w->park_ns = PARK_NS;
+        } else if (timed_out) {
+            sentry_woke = true;
+            bool all_idle = __atomic_load_n(&q_idle, __ATOMIC_RELAXED) + 1 + q_blocked >= q_alive;
+            if (sentry) w->sentry_ns = !all_idle ? SENTRY_NS : w->sentry_ns < SENTRY_MAX_NS ? w->sentry_ns * 2 : SENTRY_MAX_NS;
+            else w->park_ns = !all_idle ? PARK_NS : w->park_ns < PARK_MAX_NS ? w->park_ns * 2 : PARK_MAX_NS;
         }
         zell__plat_mutex_unlock(&q_mu);
         zell__rc_unpark();
@@ -781,6 +810,8 @@ static bool spawn_worker_locked(int spare) {
     w->spinning = 0;
     w->tick = w->rn_streak = 0;
     w->watch_ns = WATCH_MIN_NS;
+    w->sentry_ns = SENTRY_NS;
+    w->park_ns = PARK_NS;
     w->cand = -1;
     if (!zell__plat_thread_start_detached(worker_main, w)) zell_panic("cannot create worker thread");
     __atomic_add_fetch(&q_alive, 1, __ATOMIC_SEQ_CST);
@@ -973,6 +1004,13 @@ void zell_sched_post(zell_resume_fn fn, void *arg) {
     zell_retain(t_ctx);
     zell_retain(t_cur);
     sched_post_ctx(fn, arg, t_ctx, t_cur, false);
+}
+
+void zell__sched_post_plain(zell_resume_fn fn, void *arg, bool next) { sched_post_ctx(fn, arg, NULL, NULL, next); }
+
+bool zell__sched_can_spin(void) {
+    worker *w = t_w;
+    return w && q_nworkers > 1 && __atomic_load_n(&q_alive, __ATOMIC_RELAXED) <= q_ncpu && ring_len(w) == 0 && !runnext_full(w);
 }
 
 int64_t zell_sched_workers(void) {

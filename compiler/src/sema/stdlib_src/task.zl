@@ -8,8 +8,10 @@
 namespace task
 
 // Mutex is an async mutual-exclusion lock. The zero value is unlocked;
-// `await m.Lock()` waits until the caller owns it, `m.Unlock()` hands it
-// to the oldest waiter (FIFO). Not re-entrant. The three words belong to
+// `await m.Lock()` waits until the caller owns it, `m.Unlock()` frees it
+// and wakes the oldest waiter, Go's sync.Mutex rules (DESIGN.md
+// "Асинхронность"): a running task may take it first, and a waiter that
+// waited more than 1 ms switches it to FIFO hand-off. Not re-entrant. The three words belong to
 // the runtime (ABI.md 10.6): the lock state and the queue of waiting
 // tasks; a Mutex is not copied while in use.
 struct Mutex {
@@ -17,17 +19,18 @@ struct Mutex {
     waitHead int
     waitTail int
 
-    // Lock waits until the mutex is free and takes it (FIFO among waiters).
+    // Lock waits until the mutex is free and takes it (no starvation, no order).
     func Lock() Task<void> {
         return rtMutexLock(&this.state)
     }
 
-    // TryLock takes the mutex if it is free; reports whether it did.
+    // TryLock takes the mutex if it is free (and not in FIFO hand-off); reports whether it did.
     func TryLock() bool {
         return rtMutexTryLock(&this.state)
     }
 
-    // Unlock releases the mutex, handing it to the oldest waiter; it panics if not locked.
+    // Unlock releases the mutex and wakes the oldest waiter (or hands it over
+    // in FIFO hand-off); it panics if not locked.
     func Unlock() {
         rtMutexUnlock(&this.state)
     }

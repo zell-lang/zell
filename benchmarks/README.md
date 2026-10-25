@@ -683,7 +683,7 @@ Open items (larger than a safe fix in this pass):
   in and spins before queueing. An uncontended `Lock` still allocates a
   completed task (`Delay(0)`): 100 ns vs 16 ns. A barging/spinning mode
   (or handing ownership only after a starvation threshold, as Go does) and
-  a non-allocating fast path are open.
+  a non-allocating fast path are open. (Both done: C4 and R5, 2026-10-25.)
 - **No `select`.** `task.Any` cancels the losers, so waiting on whichever
   of N channels is ready costs N new receives per event, and a loser that
   already took a value must still be awaited. A `select` statement or
@@ -911,6 +911,31 @@ channel_pingpong and select_many (no I/O) are unchanged within noise.
 What is left of the async_io CPU gap is outside the scheduler: `sendto`
 is 59% of samples (as in Go), nftables 11% (host), the runtime's own code
 16% with `worker_main` under 1%.
+
+## Barging mutex (2026-10-25, docs/ASYNC_PLAN.md R5, same machine as wave 2)
+
+`task.Mutex` moved to Go's `sync.Mutex` rules (DESIGN.md "Асинхронность",
+ABI.md 10.6): `Unlock` wakes the oldest waiter without handing over, a
+running task barges, a contended `Lock` spins up to 100 CAS attempts, and a
+waiter older than 1 ms switches the mutex to FIFO hand-off. Medians of 3,
+`ZELL_WORKERS` / `GOMAXPROCS` = 1 / 4 / 16; wall ms, CPU (user+sys) s,
+context switches (voluntary+involuntary):
+
+| mutex_contention | before (0d93b0e) | after | Go |
+|---|---|---|---|
+| contended wall, W=1 / 4 / 16 | 37 / 527 / 515 | 37 / 103 / 105 | 35 / 193 / 201 |
+| uncontended wall, W=1 / 4 / 16 | 36 / 37 / 36 | 36 / 37 / 36 | 35 / 34 / 35 |
+| CPU, W=1 / 4 / 16 | 0.07 / 1.07 / 1.05 | 0.07 / 0.24 / 0.24 | 0.07 / 0.64 / 0.64 |
+| context switches, W=1 / 4 / 16 | 8 / 13.5k / 10.2k | 11 / 1.8k / 4.7k | 72 / 4.4k / 12.3k |
+
+Contended is 0.52x Go at 16 workers (was 2.6x). channel_pingpong,
+fanout_fanin, select_many and spawn_tasks are unchanged within noise
+(wall, CPU and context switches). The scheduler gained a sentry: every
+park now has a timeout (1 ms for the one worker watching, 10 ms for the
+others, backing off while the pool is idle), because a run-next post made
+while a spinner held the token, which then took other work, could wait
+forever behind a job that never yields (found by the new 16-worker
+starvation test in `runtime/tests/test_task.c`).
 
 ## json_codec on .NET
 

@@ -191,6 +191,16 @@ Expected gains are derived from the profile shares and counts above;
   10M increments in 72 ms; with 16 workers FIFO forces 9.99M suspensions.
 - Expected: contended 624 -> ~200 ms (1.0-1.3x Go). Without the spec change
   only the spin helps (est. -15%). Risk medium. Size 4-6 h.
+- Done (2026-10-25; spec approved 2026-10-24). State bits 3 woken and 4
+  starving next to locked/guard/waiters (ABI.md 10.6, inline CASes
+  unchanged); `Unlock` posts the oldest waiter's retry to run-next, a
+  loser re-queues at the head, > 1 ms sets starving (FIFO hand-off until
+  the queue drains or a waiter < 1 ms gets it). Contended 515 -> 105 ms at
+  16 workers (Go 201), CPU 1.05 -> 0.24 s; nothing else moved
+  (`benchmarks/README.md` "Barging mutex"). The new starvation test found
+  a lost wake-up in the scheduler (a run-next post made under another
+  spinner's token, stranded behind a never-yielding job): every park now
+  has a timeout (the sentry, ABI.md 10.1).
 
 ### C1. `async func main` on a worker (codegen main entry + runtime)
 - Change: `codegen/mod.rs:925-947` calls a new `zell_task_run_main(ramp, res)`

@@ -115,8 +115,11 @@ async func main() {
 ## Shared state: Mutex and WaitGroup
 
 Prefer channels for passing data between tasks; when tasks share a
-value, protect it with `task.Mutex` (its zero value is unlocked; waiters
-get it in FIFO order). `task.WaitGroup` waits for a group of tasks.
+value, protect it with `task.Mutex` (its zero value is unlocked). It
+follows Go's `sync.Mutex`: `Unlock` wakes the oldest waiter, but a running
+task may take the mutex first, so the order of acquisition is not
+guaranteed; a waiter that has waited more than 1 ms switches the mutex to
+FIFO hand-off until the queue drains, so nobody starves. `task.WaitGroup` waits for a group of tasks.
 `sync` adds `RwMutex`, `Semaphore`, `Once`, `Barrier` and atomics.
 
 ```zell
@@ -328,13 +331,13 @@ runtime channel/mutex pass):
 |---|---|---|
 | a suspended task (memory) | ~0.8 KB | ~2.6 KB per parked goroutine |
 | `async` call that does not suspend | ~55 ns | ~1 ns function call |
-| uncontended `task.Mutex` lock + unlock | ~6 ns | ~4 ns `sync.Mutex` |
-| contended `task.Mutex` (8 tasks), per increment | ~55 ns | ~20 ns |
+| uncontended `task.Mutex` lock + unlock | ~4 ns | ~4 ns `sync.Mutex` |
+| contended `task.Mutex` (8 tasks), per increment | ~11 ns | ~20 ns |
 | unbuffered channel message (ping-pong) | ~130 ns | ~90 ns |
 | resuming a suspended `await` | ~75 ns | ~6 ns goroutine switch |
 
 Tasks are cheap to keep around in large numbers, and a hand-off between
-tasks (a channel message, a mutex passed to a waiter) runs the woken task
+tasks (a channel message, a woken mutex waiter) runs the woken task
 next on the same worker without a queue in between; resuming after an
 `await` is still the expensive part next to a plain call, so prefer
 batching work per message and buffered channels on hot paths.

@@ -111,6 +111,13 @@ ZELL_HIDDEN int64_t zell__task_result_size(const zell_task *t);
 ZELL_HIDDEN void zell__task_lock(zell_task *t);
 ZELL_HIDDEN void zell__task_unlock(zell_task *t);
 ZELL_HIDDEN void zell__task_mark_done(zell_task *t);
+/* The mutex's scheduler hooks (task_sync.c, ABI.md 10.6): posts fn(arg)
+ * with no context and no current task, to this worker's run-next slot
+ * (`next`) or its ring tail (the global queue off a worker); and whether a
+ * contended Lock may spin before parking (a worker, more than one worker,
+ * no more threads than cores, nothing else queued on this worker). */
+ZELL_HIDDEN void zell__sched_post_plain(zell_resume_fn fn, void *arg, bool next);
+ZELL_HIDDEN bool zell__sched_can_spin(void);
 /* Stops the resolver pool (std_net.c); called by zell__io_stop. Queued
  * lookups are dropped without completing, like pending I/O waits. */
 ZELL_HIDDEN void zell__net_stop(void);
