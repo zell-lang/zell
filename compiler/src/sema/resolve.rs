@@ -518,12 +518,36 @@ impl<'a> Sema<'a> {
             self.mark_ns_import_used(r);
             return Some(PathRes::Member(Member::Ns(r)));
         }
+        if let Some(ns) = self.enclosing_child_ns(n) {
+            return Some(PathRes::Member(Member::Ns(ns)));
+        }
         if let Some(s) = self.builtin_attr_type(n) {
             return Some(PathRes::Member(Member::Struct(s)));
         }
         if let (Some(ns), true) = (private, report) {
             let path = self.nss[ns].path.clone();
             self.err(format!("{n} is private to namespace {path} (only capitalised names are exported)"), name.span);
+        }
+        None
+    }
+
+    /// A relative namespace reference (DESIGN.md «Правила импорта»): a
+    /// head that is neither local nor imported names a child namespace of
+    /// an enclosing namespace, innermost first (`model.X` in `app.api` is
+    /// `app.model.X`). The own namespace, imports and roots were searched
+    /// by the caller (a root wins: `errors.New` in `spec.errors.x` stays
+    /// the std `errors`); std code keeps its own rules.
+    fn enclosing_child_ns(&self, n: &str) -> Option<NsIdx> {
+        if self.nss[self.cur_ns].is_std {
+            return None;
+        }
+        let mut path = self.nss[self.cur_ns].path.as_str();
+        while let Some(p) = path.rfind('.') {
+            path = &path[..p];
+            let ns = *self.ns_index.get(path)?;
+            if let Some(&(Member::Ns(c), _, _)) = self.nss[ns].members.get(n) {
+                return Some(c);
+            }
         }
         None
     }

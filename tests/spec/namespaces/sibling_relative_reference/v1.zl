@@ -1,0 +1,12 @@
+// test: a path head that is not local or imported resolves against the enclosing namespaces, innermost first: model.X in app.api is app.model.X (DESIGN.md «Правила импорта»)
+// status: passing
+namespace spec.ns.sibling.api.v1
+
+func Name() string {
+    var u = model.Make(7)
+    return "v1 " + Describe(u.Id) + " " + api.Describe(1)
+}
+
+func Describe(id int) string {
+    return "local"
+}

@@ -205,7 +205,7 @@ documentation's Examples section, tested by
 40. ❌ **`import net` brings `net.ErrNotFound` into scope and it clashes with
     a local `ErrNotFound`**. Workaround: rename the local sentinel
     (`ErrBookNotFound`) or use `net.` names without the import.
-41. ❌ **Relative namespace references fail from a sibling namespace**
+41. ✅ **Fixed (2026-10-25):** cause: a path head was looked up in the own namespace, imports and roots only; it now also names child namespaces of the enclosing namespaces, innermost first, after imports and roots (DESIGN.md «Правила импорта», `namespaces/sibling_relative_reference`). **Relative namespace references fail from a sibling namespace**
     (`model.X` written in `app.api` for `app.model.X`). Workaround: import
     the full path (`import app.model`).
 

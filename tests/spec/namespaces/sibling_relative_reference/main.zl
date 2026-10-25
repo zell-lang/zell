@@ -1,0 +1,10 @@
+// test: a path head that is not local or imported resolves against the enclosing namespaces, innermost first: model.X in app.api is app.model.X (DESIGN.md «Правила импорта»)
+// status: passing
+namespace spec.ns.sibling
+
+import io
+
+func main() {
+    println(api.Describe(3))
+    println(api.v1.Name())
+}
