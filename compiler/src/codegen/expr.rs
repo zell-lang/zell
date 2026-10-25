@@ -744,7 +744,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     /// Declaration of a stdlib extern per `zell_rt.h` §14.
-    fn extern_decl(&mut self, x: ExternId) -> FunctionValue<'ctx> {
+    pub(crate) fn extern_decl(&mut self, x: ExternId) -> FunctionValue<'ctx> {
         let ex = &self.prog.externs[x.0 as usize];
         if let Some(f) = self.module.get_function(&ex.symbol) {
             return f;
@@ -792,6 +792,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// runtime are "created" at the call, see [`super::trace`]).
     fn extern_call(&mut self, x: ExternId, args: &[Expr], at: u32) -> R<Val<'ctx>> {
         if let Some(v) = self.math_intrinsic(x, args)? {
+            return Ok(v);
+        }
+        if let Some(v) = self.mutex_intrinsic(x, args)? {
             return Ok(v);
         }
         let f = self.extern_decl(x);

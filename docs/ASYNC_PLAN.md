@@ -289,6 +289,14 @@ Expected gains are derived from the profile shares and counts above;
   with the runtime call only on the slow path.
 - Moves: mutex uncontended (71 vs 34 ms: 3 calls per iteration), every `await`
   of a completed task. Expected uncontended -> <= 1.3x Go. Risk low. Size 3 h.
+- Done (2026-10-25). `await t` tests `state` (+24, acquire) inline and takes
+  the result at +224 when `panic_msg` (+200) is NULL (ABI.md 10.2 "Task
+  layout"); 40M awaits of done tasks 82 -> 33 ms. `Mutex.Lock` / `Unlock`
+  are a CAS 0 -> 1 / 1 -> 0 of the state word, for which the runtime now
+  keeps a waiters bit (bit 2) next to locked and guard (ABI.md 10.6, the
+  word R5 extends): mutex uncontended 75 -> 37 ms (Go 36, 1.03x),
+  contended unchanged (FIFO hand-off, R5).
+
 Not pursued: cheaper local pinning (measured 0); fewer biased-RC atomics in
 frames (frames are not refcounted; the hot `zell_release` is task objects,
 removed by C2/R2); a malloc-free global queue (after C1 the global queue

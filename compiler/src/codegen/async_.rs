@@ -523,6 +523,70 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_int_compare(IntPredicate::EQ, st, self.ctx.i32_type().const_int(TASK_DONE, false), "done").unwrap()
     }
 
+    /// `Mutex.Lock` / `Unlock` (`zell_task_mutex_lock` / `_unlock` on
+    /// `&m.state`, ABI.md 10.6) with the uncontended case inline: Lock is
+    /// a CAS of the state word 0 -> 1 (acquire) that yields the immortal
+    /// `zell_task_done_task`, Unlock a CAS 1 -> 0 (release: locked, no
+    /// waiters, no guard). A failed CAS (or a nil pointer, which the
+    /// runtime reports) takes the runtime call.
+    pub(crate) fn mutex_intrinsic(&mut self, x: crate::hir::ExternId, args: &[Expr]) -> R<Option<Val<'ctx>>> {
+        let lock = match self.prog.externs[x.0 as usize].symbol.as_str() {
+            "zell_task_mutex_lock" => true,
+            "zell_task_mutex_unlock" => false,
+            _ => return Ok(None),
+        };
+        if args.len() != 1 {
+            return Ok(None);
+        }
+        let f = self.extern_decl(x);
+        let d = self.depth();
+        let v = self.operand(&args[0], false)?;
+        self.hold(args[0].ty, v);
+        let m = v.get().into_pointer_value();
+        let i64t = self.i64_ty();
+        let cas = self.block("mu.cas");
+        let fast = self.block("mu.fast");
+        let slow = self.block("mu.slow");
+        let join = self.block("mu.done");
+        let nn = self.b.build_is_not_null(m, "").unwrap();
+        self.b.build_conditional_branch(nn, cas, slow).unwrap();
+        self.b.position_at_end(cas);
+        let (from, to, ord) = if lock { (0, 1, inkwell::AtomicOrdering::Acquire) } else { (1, 0, inkwell::AtomicOrdering::Release) };
+        let r = self.b.build_cmpxchg(m, i64t.const_int(from, false), i64t.const_int(to, false), ord, inkwell::AtomicOrdering::Monotonic).unwrap();
+        let ok = self.b.build_extract_value(r, 1, "mu.ok").unwrap().into_int_value();
+        self.b.build_conditional_branch(ok, fast, slow).unwrap();
+        self.b.position_at_end(fast);
+        let done = if lock { Some(self.task_done_global()) } else { None };
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(slow);
+        let rv = self.call_c(f, &[m.into()]);
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        self.release_temps_from(d);
+        Ok(Some(match (done, rv) {
+            (Some(a), Some(b)) => {
+                let phi = self.b.build_phi(self.ptr_ty(), "mu.task").unwrap();
+                phi.add_incoming(&[(&a, fast), (&b, slow_end)]);
+                Val::owned(phi.as_basic_value())
+            }
+            _ => Val::void(),
+        }))
+    }
+
+    /// The immortal done `Task<void>` (`zell_task_done_task`, ABI.md 10.2).
+    fn task_done_global(&mut self) -> PointerValue<'ctx> {
+        let g = match self.module.get_global("zell_task_done_task") {
+            Some(g) => g,
+            None => {
+                let g = self.module.add_global(self.ctx.i8_type(), None, "zell_task_done_task");
+                g.set_linkage(inkwell::module::Linkage::External);
+                g
+            }
+        };
+        g.as_pointer_value()
+    }
+
     /// The result slot of done task `t` ([`Self::task_result_rt`]) with the
     /// common case inline (ABI.md 10.2 "Task layout"): a done task that did
     /// not panic has its result at `t + TASK_SLOT_OFF`, which is what

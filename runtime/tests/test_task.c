@@ -493,6 +493,35 @@ TEST(refcounted_result) {
     zell_release(s);
 }
 
+/* ---- the words compiled code reads and CASes inline (ABI.md 10.2
+ * "Task layout", 10.6) ---- */
+
+extern const int64_t zell_debug_task_layout[4];
+
+TEST(inline_abi_words) {
+    assert(zell_debug_task_layout[1] == 24 && zell_debug_task_layout[2] == 224 && zell_debug_task_layout[3] == 1);
+    const unsigned char *d = (const unsigned char *)&zell_task_done_task;
+    int32_t st;
+    memcpy(&st, d + 24, sizeof st);
+    assert(zell_task_done() == &zell_task_done_task && st == 1 && *(void *const *)(d + 200) == NULL);
+    assert(zell_task_result(zell_task_done()) == d + 224);
+
+    int64_t m[3] = {0, 0, 0};
+    assert(zell_task_mutex_lock(m) == &zell_task_done_task && m[0] == 1);   /* free: 0 -> 1 */
+    zell_task *w = zell_task_mutex_lock(m);
+    assert(!zell_task_is_done(w) && m[0] == 5 && m[1] == (int64_t)(intptr_t)w);   /* locked | waiters */
+    int64_t one = 1;
+    assert(!__atomic_compare_exchange_n(&m[0], &one, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));   /* inline Unlock: waiters, slow path */
+    zell_task_mutex_unlock(m);   /* hands the lock to w */
+    assert(zell_task_is_done(w) && m[0] == 1 && m[1] == 0 && m[2] == 0);
+    one = 1;
+    assert(__atomic_compare_exchange_n(&m[0], &one, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED) && m[0] == 0);   /* inline Unlock */
+    assert(zell_task_mutex_try_lock(m) && m[0] == 1);
+    zell_task_mutex_unlock(m);
+    assert(m[0] == 0);
+    zell_release(w);
+}
+
 /* ---- mutex ---- */
 
 static zell_mutex *mu;
@@ -1291,6 +1320,7 @@ int main(int argc, char **argv) {
     RUN(runnext_stolen_from_busy_worker);
     RUN(runnext_taken_while_pool_parks);
     RUN(refcounted_result);
+    RUN(inline_abi_words);
     RUN(mutex);
     RUN(channel_unbuffered);
     RUN(channel_buffered);

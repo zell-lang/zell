@@ -1417,7 +1417,7 @@ built as `*_async` variants that return a `zell_task *`.
 | `zell_task *zell_task_spawn(zell_task_fn fn, void *ctx)` | creates a task (8-byte POD result slot) and posts `fn(task, ctx)` to the pool. `typedef void (*zell_task_fn)(zell_task *task, void *ctx)`. `fn` must call `zell_task_complete(task, ...)`, either before returning or later. The job holds its own reference only **until `fn` returns**, so to complete later `fn` must `zell_retain(task)`. Returns +1 |
 | `zell_task_spawn_ex(fn, ctx, result_size, result_ops)` | the same, with an explicit result type |
 | `zell_task *zell_task_delay(int64_t ms)` | `task.Delay(ms)`: a `Task<void>` completed by a timer thread after `ms` milliseconds (monotonic clock). `ms <= 0` returns `zell_task_done()`. +1 |
-| `zell_task *zell_task_done(void)` | the **immortal completed `Task<void>`**: what an operation that did not have to wait returns (`Delay(0)`, `Mutex.Lock` of a free mutex). Awaiting it takes the `zell_task_is_done` fast path of 10.3; retain and release are no-ops; it is never cancelled (it is done) and must never be completed. +1 nominally |
+| `zell_task *zell_task_done(void)` / `extern struct zell_task zell_task_done_task` | the **immortal completed `Task<void>`** (the function returns the object's address; compiled code uses the symbol, 10.6): what an operation that did not have to wait returns (`Delay(0)`, `Mutex.Lock` of a free mutex). Awaiting it takes the `zell_task_is_done` fast path of 10.3; retain and release are no-ops; it is never cancelled (it is done) and must never be completed. +1 nominally |
 | `zell_task *zell_task_all(zell_task *const *tasks, int64_t n)` | `Task<void>` that completes once every task in the array has completed. `n == 0` returns a completed task. Read the individual results from the input tasks. +1 |
 | `zell_task *zell_task_any(zell_task *const *tasks, int64_t n)` | task whose 8-byte result is the `int64_t` **index** of the first input to complete. `n` must be at least 1. +1 |
 
@@ -1784,13 +1784,26 @@ words, all zero when unlocked, that the runtime owns:
 
 ```text
 struct Mutex { state int; waitHead int; waitTail int }
-  state    bit 0: locked; bit 1: the guard (a short spin lock) of the queue
+  state    bit 0: locked; bit 1: the guard (a short spin lock) of the queue;
+           bit 2: waiters queued (set together with the queue, under the guard);
+           bits 3-63 reserved (0)
   waitHead, waitTail: the FIFO of waiting tasks, linked through their slots
 ```
 
 The locked bit is set only by a CAS from `state == 0` (free, unguarded)
 or by the guard's holder: a guarded free mutex belongs to the slow `Lock`
-holding the guard.
+holding the guard. The waiters bit is set only while the mutex is locked,
+so a free mutex is 0 (or guarded by a slow `Lock`).
+
+**Inline fast paths.** The compiler emits `Mutex.Lock` as a CAS of `state`
+0 -> 1 (acquire) that yields `&zell_task_done_task` (the immortal done task,
+10.2, whose `await` then takes the inline done path), and `Mutex.Unlock` as
+a CAS 1 -> 0 (release): locked, nobody waiting, no guard. A failed CAS (or
+a nil pointer) calls `zell_task_mutex_lock` / `zell_task_mutex_unlock`.
+`TryLock` stays a call (the same CAS 0 -> 1). An extension of the word (R5
+of `docs/ASYNC_PLAN.md`: barging with a starvation bit) must keep `0` = free
+with nothing to do on Lock and `1` = locked with nothing to do on Unlock, or
+change these inline sequences with it.
 
 The compiled code passes `&m.state` (so the three words must stay in this
 order, 8 bytes each). It is **async-aware**: waiters are tasks, and

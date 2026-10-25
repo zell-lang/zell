@@ -632,6 +632,9 @@ void zell_task_set_ctx(zell_object *ctx);      /* borrowed; retained */
 zell_task *zell_task_new_plain(int64_t result_size, const zell_value_ops *result_ops);
 /* The immortal completed Task<void> (ABI.md 10.2): retain/release no-ops. */
 zell_task *zell_task_done(void);
+/* The object zell_task_done() returns: compiled code uses its address on
+ * the inline fast path of Mutex.Lock (ABI.md 10.6). */
+extern struct zell_task zell_task_done_task;
 
 /* Synchronous fast path of async functions (ABI.md 10.3): the coroutine's
  * task, made at its first suspension (`task` if it exists already; returns

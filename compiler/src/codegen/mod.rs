@@ -166,6 +166,8 @@
 //! An `await` of a task tests its state word inline (+24 == 1, acquire)
 //! and takes the result at +224 when it did not panic (+200 NULL; ABI.md
 //! 10.2 "Task layout").
+//! `Mutex.Lock` / `Unlock` are a CAS 0 -> 1 / 1 -> 0 of the state word,
+//! with the runtime call only when it fails (ABI.md 10.6).
 //! Callers awaiting a direct call outside a coroutine read `res.value` when
 //! `res.task` is NULL; callers keeping the task, and thunks of async
 //! functions used as values, pass a NULL awaiter and materialise a done

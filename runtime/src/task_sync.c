@@ -440,22 +440,28 @@ int64_t zell_chan_len(const zell_chan *c) {
 }
 
 /* ======================================================================
- * Mutex: three words inline in the Zell struct (10.6): m[0] is the state
- * (bit 0 locked, bit 1 the guard of the queue), m[1] and m[2] the head and
- * tail of the FIFO of waiting tasks (linked through their slots). Lock of
- * a free mutex is one compare-and-swap and returns the immortal done
- * task; Unlock hands the lock to the oldest waiter by completing its
- * task, which runs next on the unlocking worker.
+ * Mutex: three words inline in the Zell struct (10.6): m[0] is the state,
+ * m[1] and m[2] the head and tail of the FIFO of waiting tasks (linked
+ * through their slots). State bits: 0 locked, 1 the guard of the queue, 2
+ * waiters queued (set with the queue under the guard); higher bits are
+ * reserved (R5: barging with a starvation threshold extends the word,
+ * keeping 0 = free and 1 = locked with nothing else to do). Lock of a free
+ * mutex is one compare-and-swap 0 -> 1 and returns the immortal done task;
+ * Unlock of a mutex nobody waits for is one compare-and-swap 1 -> 0. The
+ * compiler inlines both (ABI.md 10.6) and calls the functions below only
+ * when the CAS fails. Unlock hands the lock to the oldest waiter by
+ * completing its task, which runs next on the unlocking worker.
  *
  * Invariant: the locked bit is set only from a state with the guard clear
  * (a CAS from 0, the free unguarded state), or by the guard's holder. A
  * slow Lock that takes the guard and finds the mutex freed meanwhile
  * (state == guard) stores LOCKED with a plain store, so a fast Lock or
  * TryLock that CASed the locked bit in under the guard would be lost: two
- * owners, and the second Unlock panics "unlock of unlocked mutex".
+ * owners, and the second Unlock panics "unlock of unlocked mutex". The
+ * waiters bit is set only while locked, so a free mutex is 0 or guarded.
  * ====================================================================== */
 
-enum { MU_LOCKED = 1, MU_GUARD = 2 };
+enum { MU_LOCKED = 1, MU_GUARD = 2, MU_WAITERS = 4 };
 
 static inline void mu_guard(int64_t *m) {
     for (int spins = 0;; spins++) {
@@ -484,7 +490,7 @@ zell_task *zell_task_mutex_lock(int64_t *m) {
     zell_task *tail = (zell_task *)(intptr_t)m[2];
     if (tail) *mu_next(tail) = t; else m[1] = (int64_t)(intptr_t)t;
     m[2] = (int64_t)(intptr_t)t;
-    __atomic_store_n(m, MU_LOCKED, __ATOMIC_RELEASE);   /* guard off */
+    __atomic_store_n(m, MU_LOCKED | MU_WAITERS, __ATOMIC_RELEASE);   /* guard off */
     return t;
 }
 
@@ -511,7 +517,8 @@ void zell_task_mutex_unlock(int64_t *m) {
     }
     m[1] = (int64_t)(intptr_t)*mu_next(t);
     if (!m[1]) m[2] = 0;
-    __atomic_store_n(m, MU_LOCKED, __ATOMIC_RELEASE);   /* ownership passes to t */
+    /* ownership passes to t; guard off */
+    __atomic_store_n(m, m[1] ? MU_LOCKED | MU_WAITERS : MU_LOCKED, __ATOMIC_RELEASE);
     zell_task_complete(t, NULL);
     zell_release(t);
 }

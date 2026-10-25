@@ -1237,11 +1237,11 @@ void zell__task_mark_done(zell_task *t) { __atomic_store_n(&t->state, TASK_DONE,
  * to wait returns (Mutex.Lock of a free mutex, Delay(0), a Send that found
  * room); awaiting it takes the is_done fast path, retain and release are
  * no-ops. */
-static struct zell_task done_task = {
+struct zell_task zell_task_done_task = {
     .hdr = { ZELL_RC_IMMORTAL, &task_type }, .state = TASK_DONE,
 };
 
-zell_task *zell_task_done(void) { return &done_task; }
+zell_task *zell_task_done(void) { return &zell_task_done_task; }
 
 /* The immortal yield sentinel: what task.Yield returns. It is never done;
  * add_cont recognises it and posts the continuation straight to the ring
