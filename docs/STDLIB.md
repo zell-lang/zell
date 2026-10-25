@@ -52,7 +52,7 @@
 |---|---|---|---|
 | `io` | `io` (`Reader`, `Writer`, `Closer`, `Seeker`, `Copy`, `ReadAllFrom`, `LimitReader`, `MultiWriter`, `Pipe`, `BoundedPipe`, `TeeReader`) | ✅ есть (+ `AsyncReader/AsyncWriter`, их реализует `net.Conn`; `os.File`) | интерфейсы async-совместимые (`AsyncReader`); нет `SendFile` в `Copy` |
 | `bufio` | `io.Buffered*`, `Scanner` | ✅ есть (`ReadLine/ReadString/ReadBytes/Peek/ReadRune`, `Flush`, `Scanner` с `ScanLines/Words/Runes/Bytes`, `io.Lines`/`Words`) | `Lines()`/`Words()` (срезами, итераторов нет) |
-| `fmt` | `fmt` | ✅ есть (Format, Sprintf) | `{0}`-шаблоны проверяются при компиляции, `Stringer` интерфейс |
+| `fmt` | `fmt` | ✅ есть (Format с выравниванием `{0,5}`/`{0,-5}` как в C#, Sprintf) | `{0}`-шаблоны проверяются при компиляции, `Stringer` интерфейс |
 | `os` | `os` | ✅ есть (args, `Getenv`/`Setenv`/`Environ` (все переменные как `KEY=value`, с учётом `Setenv`), exit, cwd, hostname…) | константы платформы, `OnInterrupt` |
 | `os/signal` | `os.signal` | ✅ есть (`Wait`, `WaitAny`, `Notify` → `Channel<int>`, `Catch`, `Ignore`, `Reset`, `Raise`; self-pipe + поток) | async `await signal.Wait(SIGTERM)` |
 | `os/exec` | `process` | ✅ есть (`Run/RunWith/Output`, `Start` с пайпами `AsyncReader/AsyncWriter`, `Wait/Kill/Signal`, env/dir, `Timeout` и отмена задачи, `LookPath`; pidfd) | async `Run`, пайпы как `Reader/Writer`, таймауты через контекст |

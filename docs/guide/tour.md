@@ -70,7 +70,9 @@ func divmod(a int, b int) (int, int) {
 
 Only `var` declares variables; the type comes after the name when you
 write it. Functions return several values as a tuple. Slices (`[]T`) and
-maps work like Go's; `s[a..b]` is a sub-slice or substring.
+maps work like Go's; `s[a..b]` is a sub-slice or substring. `fmt.Format`
+fills `{N}` with argument N; `{N,8}` right-aligns it to 8 characters and
+`{N,-8}` left-aligns it, as in C#.
 
 `m[k]` gives the value, or the zero value when the key is absent. To tell
 an absent key from a stored zero, ask for the second result (Go's

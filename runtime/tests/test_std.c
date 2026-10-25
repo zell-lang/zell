@@ -312,6 +312,12 @@ TEST(format) {
     EXPECT_STR(fmt("{0}{0}{0}", 1, xy), "xxx");
     static const char *const empt[] = { "" };
     EXPECT_STR(fmt("[{0}]", 1, empt), "[]");
+    /* alignment: {N,W} right, {N,-W} left, width in code points */
+    EXPECT_STR(fmt("[{0,3}|{1,-3}]", 2, xy), "[  x|y  ]");
+    static const char *const uni[] = { "\xd1\x8f\xd1\x8f", "toolong" };
+    EXPECT_STR(fmt("[{0,4}][{1,3}][{1,-3}][{0,0}]", 2, uni), "[  \xd1\x8f\xd1\x8f][toolong][toolong][\xd1\x8f\xd1\x8f]");
+    EXPECT_STR(fmt("{0,} {0,-} {0,x} {0, 3} {0,3 } {0,99999999999}", 2, xy), "{0,} {0,-} {0,x} {0, 3} {0,3 } {0,99999999999}");
+    EXPECT_STR(fmt("[{0,3}]", 1, empt), "[   ]");
     /* NULL template, NULL args pointer, NULL elements */
     EXPECT_STR(zell_fmt_format(NULL, NULL), "");
     zell_string *t = S("a{0}b");

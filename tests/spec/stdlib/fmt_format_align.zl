@@ -1,0 +1,14 @@
+// test: fmt.Format alignment: {0,5} right-aligns to 5 code points, {0,-5} left-aligns, longer values are not cut
+// status: passing
+namespace spec.stdlib.fmt_format_align
+
+import io
+
+func main() {
+    var rows = [["apple", "3"], ["kiwi", "12"], ["я", "100"]]
+    for r in rows {
+        println(fmt.Format("|{0,-6}|{1,4}|", r[0], r[1]))
+    }
+    println(fmt.Format("[{0,3}] [{0,-3}] [{1,2}]", 7, "toolong"))
+    println(fmt.Format("{0,} {0,x}", 1))
+}

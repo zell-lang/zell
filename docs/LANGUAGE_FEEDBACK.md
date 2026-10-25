@@ -188,7 +188,7 @@ documentation's Examples section, tested by
     site that instantiated it. Workaround: a dummy `return` after it; the
     message names the type (`Validate needs a struct, got int`) to make up
     for the location.
-35. ❌ **`fmt.Format` has no alignment or width** (`{0,-10}` in C#).
+35. ✅ **Fixed (2026-10-25):** `{N,W}` right-aligns and `{N,-W}` left-aligns to W code points (C#; `fmt.Format` has no `:format` spec since its arguments arrive as strings), in `runtime/src/std_fmt.c`. **`fmt.Format` has no alignment or width** (`{0,-10}` in C#).
     Workaround: `fmt.Sprintf("%-10s", ...)` or `text.table`.
 36. ✅ **Fixed (2026-10-25):** `strings.Builder` gained `WriteRune(r char)` (UTF-8, invalid code points as U+FFFD) plus the Go names `WriteString` and `WriteByte`. **`strings.Builder` lacks `WriteRune`**. Workaround:
     `b.WriteString(string(r))`.

@@ -298,7 +298,7 @@ pub fn doc_of(std_path: &str) -> Option<(&'static str, &'static str)> {
 pub const SPECIAL_DOCS: &[(&str, &str, &str)] = &[
     ("io.println", "func println(args ...any)", "println writes its arguments to standard output, separated by one space and followed by a newline.\n\nFloats print like Go's `%v`, slices as `[1 2 3]`, errors as their `Message()`."),
     ("io.print", "func print(args ...any)", "print is `println` without the trailing newline."),
-    ("fmt.Format", "func Format(template string, args ...any) string", "Format replaces each `{N}` in template with argument N formatted as `println` would; other text is copied verbatim.\n\nA literal template is checked at compile time against the number of arguments."),
+    ("fmt.Format", "func Format(template string, args ...any) string", "Format replaces each `{N}` in template with argument N formatted as `println` would; `{N,W}` right-aligns it to W code points and `{N,-W}` left-aligns it (C#; longer values are not cut); other text is copied verbatim.\n\nA literal template is checked at compile time against the number of arguments."),
     ("fmt.Sprintf", "func Sprintf(format string, args ...any) string", "Sprintf formats with Go verbs: `%v %d %s %f %.2f %5d %-4d %03d %x %q %c %t %e %%`."),
     ("task.All", "func All(tasks ...Task<T>) Task<(T...)>", "All waits for every task and returns their results as a tuple (`var (a, b) = await task.All(f(), g())`). With fallible tasks the result is fallible: the first error cancels the other tasks and is returned."),
     ("task.Any", "func Any(tasks ...Task<T>) Task<T>", "Any returns the result of the first task to finish (all tasks have the same type) and cancels the others."),
