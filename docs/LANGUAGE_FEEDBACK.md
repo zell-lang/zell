@@ -518,7 +518,7 @@ written by hand), **33** (see 67), **46** (see 78).
     names them `_0`, `_1`). Only destructuring works. **Decision:** print
     tuples as `(1 x)` (Go-like, space-separated), and allow `t.0`, `t.1`
     as in Rust/Swift.
-71. ❌ **ergonomics:** **`char` has no arithmetic**: `c - 'a'` ("operator -
+71. ✅ **Fixed (2026-10-25):** `char - char` is an `int`; `char + n`, `n + char`, `char - n` (any integer `n`) and `c += n`/`c -= n` give a `char`; other operators are an error with a hint. Unlike the first decision there is no debug code-point check: as with Go runes the result is the low 32 bits, wraps and never panics, and an invalid code point prints U+FFFD (DESIGN.md «Типы»). Spec: `operators/char_arithmetic`, `diagnostics/char_plus_char`, `char_times_int`, `char_minus_char_to_char`. **ergonomics:** **`char` has no arithmetic**: `c - 'a'` ("operator -
     is not defined on char") and `'a' + 2` both fail, so a Caesar shift is
     `char(int('a') + (int(r) - int('a') + k) % 26)`. **Decision:** like Go
     runes, `char - char` gives `int`, and `char ± int` gives `char`

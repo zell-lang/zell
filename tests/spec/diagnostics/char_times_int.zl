@@ -1,0 +1,11 @@
+// error: mismatched types char and int for operator *
+// status: passing
+namespace spec.diagnostics.char_times_int
+
+import io
+
+func main() {
+    var c = 'a'
+    var k = 2
+    println(c * k)
+}

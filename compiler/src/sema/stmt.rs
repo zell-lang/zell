@@ -776,6 +776,16 @@ impl<'a> Sema<'a> {
             return self.op_compound_assign(bop, t, value, span);
         }
         let v = self.value(value, Some(t.ty));
+        // `c += n` / `c -= n` on a char: `c = c ± n` (char arithmetic).
+        if matches!(self.tt.get(t.ty), Type::Char) && self.tt.is_integer(v.ty) && matches!(bop, ast::BinaryOp::Add | ast::BinaryOp::Sub) {
+            if !super::opover::simple_place(&t) {
+                self.err("char += and -= need a variable or field target", target.span);
+                return StmtKind::Block(hir::Block::default());
+            }
+            if let Some(e) = self.char_arith(bop, &t, &v, span) {
+                return StmtKind::Assign { target: t, value: e };
+            }
+        }
         match self.binop_for(bop, t.ty, v.ty, span) {
             Some((hop, _)) => StmtKind::CompoundAssign { target: t, op: hop, value: v },
             None => StmtKind::Block(hir::Block::default()),

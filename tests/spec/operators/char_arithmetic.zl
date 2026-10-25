@@ -1,0 +1,35 @@
+// test: char arithmetic as with Go runes: char - char is an int, char + int, int + char and char - int are a char (also with other integer types and += / -=), chars compare with < <= > >=; the result wraps like Go's int32 rune and is not checked for a valid code point (an invalid one prints U+FFFD)
+// status: passing
+namespace spec.operators.char_arithmetic
+
+import io
+
+func shift(r char, k int) char {
+    return 'a' + (r - 'a' + k) % 26
+}
+
+func main() {
+    var c = 'd'
+    var k = 3
+    println(c - 'a', 'a' + 2, c + k, 2 + c, k + c, c - 1, c - k, 'z' - 'a')
+    var d char = 'a' + 1
+    var n int = c - 'a'
+    println(d, n, c > 'a', c <= 'a', c >= 'd', c < 'e')
+    var b byte = 2
+    println(c + b)
+    c += 1
+    println(c)
+    c -= 2
+    println(c)
+    var word = "xyz"
+    var out = ""
+    for r in word {
+        out += string(shift(r, 3))
+    }
+    println(out)
+    var low = 'a' - 200
+    println(int(low))
+    var w = char(4294967295) + 2
+    println(int(w))
+    println(char(1114111) + 1 == '�', int(char(1114111) + 1))
+}

@@ -1,0 +1,11 @@
+// error: cannot assign int to variable of type char
+// status: passing
+namespace spec.diagnostics.char_minus_char_to_char
+
+import io
+
+func main() {
+    var c = 'd'
+    var d char = c - 'a'
+    println(d)
+}

@@ -1,0 +1,10 @@
+// error: operator + is not defined on char
+// status: passing
+namespace spec.diagnostics.char_plus_char
+
+import io
+
+func main() {
+    var c = 'a'
+    println(c + 'b')
+}

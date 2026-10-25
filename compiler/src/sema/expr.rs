@@ -4,7 +4,7 @@
 use super::coerce::Ctx;
 use super::resolve::PathRes;
 use super::*;
-use crate::hir::{BinOp, ExprKind, UnOp};
+use crate::hir::{BinOp, ConvKind, ExprKind, UnOp};
 
 impl<'a> Sema<'a> {
     /// Checks an expression; the result may be fallible (`T!`) or `void`.
@@ -588,6 +588,9 @@ impl<'a> Sema<'a> {
         if self.binary_overloaded(op, lv.ty, None) && !matches!(self.tt.get(lv.ty), Type::Param(_)) {
             return self.op_binary(op, lv, opover::OpArg::Hir(rv), span);
         }
+        if let Some(e) = self.char_arith(op, &lv, &rv, span) {
+            return e;
+        }
         if matches!(op, B::Div | B::Rem) && matches!(rv.kind, ExprKind::Const(hir::ConstValue::Int(0))) {
             self.err("division by zero", rv.span);
         }
@@ -633,6 +636,36 @@ impl<'a> Sema<'a> {
             }
             None => self.invalid(span),
         }
+    }
+
+    /// `char` arithmetic, as with Go runes (DESIGN.md «Типы»): `char - char`
+    /// is an `int`, `char + int`, `int + char` and `char - int` are a
+    /// `char`. Computed in `int` and converted back like `char(n)` (the low
+    /// 32 bits; no code-point check, as in Go). `None` for other operands.
+    pub(crate) fn char_arith(&mut self, op: ast::BinaryOp, lv: &hir::Expr, rv: &hir::Expr, span: Span) -> Option<hir::Expr> {
+        use ast::BinaryOp as B;
+        let (lc, rc) = (matches!(self.tt.get(lv.ty), Type::Char), matches!(self.tt.get(rv.ty), Type::Char));
+        if !matches!(op, B::Add | B::Sub) || !(lc || rc) {
+            return None;
+        }
+        let int = self.tt.int;
+        let to_int = |s: &Self, v: &hir::Expr| {
+            let kind = match s.tt.get(v.ty) {
+                Type::Char => ConvKind::CharToInt,
+                _ if v.ty == int => return v.clone(),
+                _ => ConvKind::IntToInt,
+            };
+            mk(ExprKind::Convert { kind, value: Box::new(v.clone()) }, int, v.span)
+        };
+        let res = match (op, lc, rc) {
+            (B::Sub, true, true) => int,
+            (_, true, false) if self.tt.is_integer(rv.ty) => self.tt.char_,
+            (B::Add, false, true) if self.tt.is_integer(lv.ty) => self.tt.char_,
+            _ => return None,
+        };
+        let (a, b) = (to_int(self, lv), to_int(self, rv));
+        let e = mk(ExprKind::Binary { op: arith(op), lhs: Box::new(a), rhs: Box::new(b) }, int, span);
+        Some(if res == int { e } else { mk(ExprKind::Convert { kind: ConvKind::IntToChar, value: Box::new(e) }, res, span) })
     }
 
     /// Chooses the HIR operator and result type for `l op r`, reporting
@@ -722,6 +755,8 @@ impl<'a> Sema<'a> {
                     None => "only + - * / % @ == != < <= > >= and indexing can be overloaded".to_string(),
                 };
                 self.err_help(format!("operator {sym} is not defined on {tn}"), span, help);
+            } else if matches!(t, Type::Char) {
+                self.err_help(format!("operator {sym} is not defined on {tn}"), span, "char arithmetic is `c - c` (an int), `c + n`, `n + c` and `c - n` (a char); convert with int(c) for anything else");
             } else {
                 self.err(format!("operator {sym} is not defined on {tn}"), span);
             }
