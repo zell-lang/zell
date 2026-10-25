@@ -1,0 +1,144 @@
+// Expression trees (DESIGN.md "Деревья выражений"): a search endpoint
+// builds its filter from the optional conditions of the incoming request.
+// Each lambda passed as `expr<F>` is a tree value: a small "library"
+// (toSql) translates it to SQL with `?` placeholders and an argument list,
+// reading column names from field attributes; the same tree runs in memory
+// through Compile(). Captured values are taken when a tree is built, so the
+// trees made in the loop over the requested cities keep their own city.
+namespace examples.expr_trees
+
+import io
+import expr
+
+@attribute(targets: [reflect.Target.Field])
+struct column {
+    name string
+}
+
+struct Address {
+    City string
+}
+
+struct Customer {
+    @column(name: "customer_id") Id int
+    Name string
+    Age int
+    @column(name: "is_vip") Vip bool
+    Address Address
+}
+
+// The query string of a search request, already parsed.
+struct SearchRequest {
+    MinAge int           // 0: any
+    NamePrefix string    // "": any
+    Cities []string      // empty: any
+    VipOnly bool
+}
+
+// The filter of a request: the conditions it sets, combined with And; the
+// cities with Or.
+func Filter(req SearchRequest) expr<func(*Customer) bool> {
+    var conds []expr<func(*Customer) bool> = []
+    if req.MinAge > 0 {
+        conds = append(conds, c => c.Age >= req.MinAge)
+    }
+    if req.NamePrefix != "" {
+        conds = append(conds, c => strings.HasPrefix(strings.ToLower(c.Name), strings.ToLower(req.NamePrefix)))
+    }
+    if len(req.Cities) > 0 {
+        var any []expr<func(*Customer) bool> = []
+        for city in req.Cities {
+            any = append(any, c => c.Address.City == city)
+        }
+        conds = append(conds, expr.OrAll(any))
+    }
+    if req.VipOnly {
+        conds = append(conds, c => c.Vip)
+    }
+    return expr.AndAll(conds)
+}
+
+struct Sql {
+    Text string
+    Args []any
+}
+
+func column_of(n *expr.Node) string {
+    var f = expr.FieldOf(n)
+    var c = f.Attribute<column>()
+    if c != nil {
+        return c.name
+    }
+    switch *n {
+    case expr.Node.Field(b, _, _, _, _):
+        switch *b {
+        case expr.Node.Field(_, _, _, _, _): return column_of(b) + "_" + strings.ToLower(f.Name)
+        }
+    }
+    return strings.ToLower(f.Name)
+}
+
+func toSql(n *expr.Node, out *Sql) string {
+    switch *n {
+    case expr.Node.Field(_, _, _, _, _):
+        return column_of(n)
+    case expr.Node.Const(v, _):
+        out.Args = append(out.Args, v)
+        return "?"
+    case expr.Node.Captured(_, _, v, _):
+        out.Args = append(out.Args, v)
+        return "?"
+    case expr.Node.Binary(op, l, r, _):
+        var sym = op.Symbol()
+        switch op {
+        case expr.Op.And: sym = "AND"
+        case expr.Op.Or: sym = "OR"
+        case expr.Op.Eq: sym = "="
+        case expr.Op.Ne: sym = "<>"
+        }
+        return "(" + toSql(l, out) + " " + sym + " " + toSql(r, out) + ")"
+    case expr.Node.Call(f, args, _):
+        switch f {
+        case "strings.HasPrefix": return toSql(args[0], out) + " LIKE " + toSql(args[1], out) + " || '%'"
+        case "strings.ToLower": return "lower(" + toSql(args[0], out) + ")"
+        }
+    }
+    return "1 = 1"
+}
+
+func Select(f expr<func(*Customer) bool>) Sql {
+    var out = Sql{Text: "", Args: []}
+    out.Text = "SELECT * FROM customers WHERE " + toSql(f.Root(), &out)
+    return out
+}
+
+func main() {
+    var customers = [
+        Customer{Id: 1, Name: "Alice", Age: 34, Vip: true, Address: Address{City: "Paris"}},
+        Customer{Id: 2, Name: "albert", Age: 17, Vip: false, Address: Address{City: "Lyon"}},
+        Customer{Id: 3, Name: "Bob", Age: 52, Vip: true, Address: Address{City: "Nice"}},
+        Customer{Id: 4, Name: "Alma", Age: 41, Vip: false, Address: Address{City: "Lyon"}},
+    ]
+    var requests = [
+        SearchRequest{MinAge: 18, NamePrefix: "AL", Cities: [], VipOnly: false},
+        SearchRequest{MinAge: 0, NamePrefix: "", Cities: ["Lyon", "Nice"], VipOnly: false},
+        SearchRequest{MinAge: 30, NamePrefix: "", Cities: ["Paris", "Nice"], VipOnly: true},
+        SearchRequest{MinAge: 0, NamePrefix: "", Cities: [], VipOnly: false},
+    ]
+    for req in requests {
+        var f = Filter(req)
+        var q = Select(f)
+        println(f)
+        println(q.Text)
+        println("  args:", q.Args)
+        var match = f.Compile()
+        var hits []int = []
+        for c in customers {
+            var x = c
+            if match(&x) {
+                hits = append(hits, c.Id)
+            }
+        }
+        println("  in memory:", hits)
+    }
+}
