@@ -192,7 +192,7 @@ documentation's Examples section, tested by
     Workaround: `fmt.Sprintf("%-10s", ...)` or `text.table`.
 36. ✅ **Fixed (2026-10-25):** `strings.Builder` gained `WriteRune(r char)` (UTF-8, invalid code points as U+FFFD) plus the Go names `WriteString` and `WriteByte`. **`strings.Builder` lacks `WriteRune`**. Workaround:
     `b.WriteString(string(r))`.
-37. ❌ **No indented JSON output** (`json.MarshalIndent`). Workaround: the
+37. ✅ **Fixed (2026-10-25):** `json.FormatIndent<T>(v, prefix, indent)` with Go `MarshalIndent` layout (C re-layout `zell_encoding_json_rt_indent` over `Format`). **No indented JSON output** (`json.MarshalIndent`). Workaround: the
     examples print compact JSON.
 38. 📘 **As specified, not changed (2026-10-25):** a `T!` result must be handled (DESIGN.md «Игнорирование и обязательность»), a deferred call included; the diagnostic proposes `defer func() { try f() catch err { ... } }()`. **`defer f.Close()` on a `void!` method is rejected** (a deferred call
     must handle its error). Workaround: rely on `Drop`, or defer a closure

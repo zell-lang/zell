@@ -500,6 +500,14 @@ func Format<T>(v T) string {
     return rtWFinish(w)
 }
 
+// FormatIndent is Format with Go's MarshalIndent layout: each element or
+// pair on a new line that starts with prefix and one indent per nesting
+// level; "key": value; empty containers stay {} and []. The first line
+// has no prefix.
+func FormatIndent<T>(v T, prefix string, indent string) string {
+    return rtIndent(Format(v), prefix, indent)
+}
+
 func write<T>(w int, v T) {
     if reflect.TypeOf<T>() == reflect.TypeOf<Value>() {
         rtWNode(w, v.n)

@@ -908,6 +908,7 @@ pub const FUNCS: &[StdFunc] = &[
     f!("encoding.json", "rtWFloat", "int, float", "void", "zell_encoding_json_rt_w_float"),
     f!("encoding.json", "rtWBool", "int, bool", "void", "zell_encoding_json_rt_w_bool"),
     f!("encoding.json", "rtWNode", "int, int", "void", "zell_encoding_json_rt_w_node"),
+    f!("encoding.json", "rtIndent", "string, string, string", "string", "zell_encoding_json_rt_indent"),
     f!("encoding.json", "rtWKeyInt", "int, string, bool, int", "void", "zell_encoding_json_rt_w_key_int"),
     f!("encoding.json", "rtWKeyStr", "int, string, bool, string", "void", "zell_encoding_json_rt_w_key_str"),
     f!("encoding.json", "rtWKeyFloat", "int, string, bool, float", "void", "zell_encoding_json_rt_w_key_float"),

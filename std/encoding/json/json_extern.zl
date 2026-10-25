@@ -104,6 +104,10 @@ extern func rtWBool(a int, b bool)
 extern func rtWNode(a int, b int)
 
 // Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_indent (runtime/src/std_*.c).
+extern func rtIndent(a string, b string, c string) string
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_encoding_json_rt_w_key_int (runtime/src/std_*.c).
 extern func rtWKeyInt(a int, b string, c bool, d int)
 

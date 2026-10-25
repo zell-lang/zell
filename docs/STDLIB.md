@@ -77,7 +77,7 @@
 
 | Go | Zell | Статус | Лучше чем в Go |
 |---|---|---|---|
-| `encoding/json` | `encoding.json` | ✅ есть (Parse<T>/Format/Value; `json.Value`, `yaml.Value` и `toml.Value` делят `IsObject()`/`IsArray()`) | compile-time, пути в ошибках, атрибуты |
+| `encoding/json` | `encoding.json` | ✅ есть (Parse<T>/Format/FormatIndent (как `MarshalIndent`)/Value; `json.Value`, `yaml.Value` и `toml.Value` делят `IsObject()`/`IsArray()`) | compile-time, пути в ошибках, атрибуты |
 | `encoding/xml` | `encoding.xml` | ✅ есть (pull-`Reader` с пространствами имён, дерево `Value`, `Writer`, `Parse<T>/Decode<T>/Format<T>` с `@xml(name, attr, text, ns, omitEmpty, skip)`; C-токенизатор; DTD не раскрывается) | та же модель, pull-reader, атрибуты вместо тегов |
 | — (yaml, toml в Go нет) | `encoding.yaml`, `toml` | ✅ есть: yaml (YAML 1.2 core: блоки, flow, якоря/алиасы с лимитом, merge `<<`, теги, многодокументность; `Value`, `Parse<T>/Format<T>` с `@yaml`; сверено с PyYAML), toml (TOML 1.0 полностью, даты, `Parse<T>/Format<T>` с `@toml`; `Document` правит текст с сохранением комментариев и порядка; сверено с tomllib) | в стандартной библиотеке, round-trip с комментариями (toml `Document`; в yaml комментарии не сохраняются) |
 | `encoding/csv` | `encoding.csv` | ✅ есть (`Reader`/`Writer` как в Go, `LazyQuotes`, `FieldsPerRecord`, `Read<T>/ReadNoHeader<T>/Write<T>` с `@csv(name, index, skip, omitEmpty)`; сверено с Go) | `Read<T>`/`Write<T>` в структуры |

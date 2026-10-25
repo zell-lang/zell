@@ -1016,6 +1016,62 @@ void zell_encoding_json_rt_w_bool(int64_t h, bool b) {
 
 void zell_encoding_json_rt_w_node(int64_t h, int64_t n) { w_node(W(h), NODE(n)); }
 
+/* Newline, prefix and depth copies of indent (Go json.Indent). */
+static void w_newline(zell__json_w *w, const zell_string *prefix, const zell_string *indent, int64_t depth) {
+    w_raw(w, "\n", 1);
+    w_raw(w, zell_string_data(prefix), zell_string_len(prefix));
+    for (int64_t i = 0; i < depth; i++) w_raw(w, zell_string_data(indent), zell_string_len(indent));
+}
+
+zell_string *zell_encoding_json_rt_indent(const zell_string *src, const zell_string *prefix, const zell_string *indent) {
+    const char *t = zell_string_data(src);
+    int64_t n = zell_string_len(src), depth = 0;
+    int64_t h = zell_encoding_json_rt_w_new();
+    zell__json_w *w = W(h);
+    bool open = false; /* the last byte written opened a container */
+    for (int64_t i = 0; i < n; i++) {
+        char c = t[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+        if (open && c != ']' && c != '}') {
+            open = false;
+            w_newline(w, prefix, indent, depth);
+        }
+        switch (c) {
+        case '"': {
+            int64_t j = i + 1;
+            while (j < n && t[j] != '"') j += (t[j] == '\\') + 1;
+            int64_t end = j < n ? j + 1 : n; /* through the closing quote */
+            w_raw(w, t + i, end - i);
+            i = end - 1;
+            break;
+        }
+        case '{':
+        case '[':
+            w_raw(w, &c, 1);
+            depth++;
+            open = true;
+            break;
+        case '}':
+        case ']':
+            if (depth > 0) depth--;
+            if (open) open = false; /* empty: {} / [] */
+            else w_newline(w, prefix, indent, depth);
+            w_raw(w, &c, 1);
+            break;
+        case ',':
+            w_raw(w, ",", 1);
+            w_newline(w, prefix, indent, depth);
+            break;
+        case ':':
+            w_raw(w, ": ", 2);
+            break;
+        default:
+            w_raw(w, &c, 1);
+        }
+    }
+    return zell_encoding_json_rt_w_finish(h);
+}
+
 zell_string *zell_encoding_json_quote(const zell_string *s) {
     int64_t h = zell_encoding_json_rt_w_new();
     w_quoted(W(h), zell_string_data(s), zell_string_len(s));

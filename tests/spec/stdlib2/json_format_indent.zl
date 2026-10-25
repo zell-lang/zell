@@ -1,0 +1,26 @@
+// test: json.FormatIndent lays out Format's text like Go MarshalIndent: prefix and indent per level, "key": value, empty containers kept, strings untouched
+// status: passing
+namespace spec.stdlib2.json_format_indent
+
+import io
+import encoding.json
+
+struct Item {
+    Name string
+    Tags []string
+}
+
+struct Order {
+    Id    int
+    Items []Item
+    Notes map[string]string
+}
+
+func main() {
+    var o = Order{Id: 7, Items: [Item{Name: "a, {b}: \"c\"", Tags: ["x", "y"]}, Item{Name: "d", Tags: []}], Notes: map[string]string{}}
+    println(json.FormatIndent(o, "", "  "))
+    println(json.FormatIndent([1, 2], "// ", "\t"))
+    println(json.FormatIndent(42, "", "  "))
+    var v = try json.Parse<json.Value>("{\"k\": [true, null]}") else json.Value{}
+    println(json.FormatIndent(v, "", " "))
+}

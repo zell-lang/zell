@@ -1086,6 +1086,7 @@ void          zell_encoding_json_rt_w_key_float(int64_t w, const zell_string *na
 void          zell_encoding_json_rt_w_key_bool(int64_t w, const zell_string *name, bool first, bool b);
 void          zell_encoding_json_rt_w_strs(int64_t w, const zell_slice *strs);  /* ["a","b"] of a []string */
 zell_string *zell_encoding_json_quote(const zell_string *s);
+zell_string *zell_encoding_json_rt_indent(const zell_string *src, const zell_string *prefix, const zell_string *indent); /* +1 */
 
 /* diag / log runtime halves (diag.c, profile.c; ABI.md section 18). */
 zell_object *zell_diag_rt_slots(void);                  /* map[string]any, +1 or NULL */

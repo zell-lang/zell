@@ -328,6 +328,30 @@ TEST(quote) {
     zell_release(s);
 }
 
+static void expect_indent(const char *src, const char *prefix, const char *indent, const char *want) {
+    zell_string *s = zell_string_new(src, (int64_t)strlen(src));
+    zell_string *p = zell_string_new(prefix, (int64_t)strlen(prefix));
+    zell_string *in = zell_string_new(indent, (int64_t)strlen(indent));
+    zell_string *r = zell_encoding_json_rt_indent(s, p, in);
+    if (!STR_IS(r, want)) {
+        fprintf(stderr, "indent %s: got [%.*s]\n", src, (int)zell_string_len(r), zell_string_data(r));
+        assert(0);
+    }
+    zell_release(r);
+    zell_release(in);
+    zell_release(p);
+    zell_release(s);
+}
+
+TEST(indent) {
+    expect_indent("{\"a\":[1,2],\"b\":{},\"c\":[]}", "", "  ", "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {},\n  \"c\": []\n}");
+    expect_indent("[{\"k\":\"x,\\\"y:{\"}]", ">", "\t", "[\n>\t{\n>\t\t\"k\": \"x,\\\"y:{\"\n>\t}\n>]");
+    expect_indent(" 42 ", "", "  ", "42");
+    expect_indent("{ \"a\" : [ ] }", "", "", "{\n\"a\": []\n}");
+    expect_indent("", "", "  ", "");
+    expect_indent("\"unterminated", "", "  ", "\"unterminated");
+}
+
 /* Random mutations and truncations of a corpus: no crash, no sanitizer
  * report, and a document that parses formats to something that parses. */
 static const char *const corpus[] = {
@@ -441,6 +465,7 @@ int main(int argc, char **argv) {
     RUN(writer_node);
     RUN(writer_primitives);
     RUN(quote);
+    RUN(indent);
     RUN(fuzz_mutations);
     RUN(reflect_lookups);
     assert(zell_live_objects() == live);

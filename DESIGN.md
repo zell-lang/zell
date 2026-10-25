@@ -1454,7 +1454,7 @@ func main() {
   интерфейсов и методов у таблиц интерфейсов); исходник на Zell —
   `compiler/src/sema/reflect_src/reflect.zl`, тела нескольких внутренних
   функций генерирует компилятор (`codegen/reflect.rs`).
-- `encoding.json`: `Parse<T>(text) T!` и `Format<T>(v T) string`
+- `encoding.json`: `Parse<T>(text) T!` и `Format<T>(v T) string` (с отступами — `FormatIndent<T>(v, prefix, indent)`, раскладка Go `MarshalIndent`)
   через compile-time рефлексию (структуры с `@json(name:, omitEmpty:,
   skip:)`, вложенные структуры, срезы, массивы, `map` со строковыми
   ключами — при выводе отсортированы, указатели, `nil` → `null`, строки,
