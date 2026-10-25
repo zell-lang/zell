@@ -1,0 +1,46 @@
+// test: a TypesWith loop whose variable is never needed at compile time stays a run-time loop over the slice (break, index variable and run-time descriptors work as for any slice)
+// status: passing
+namespace spec.reflection.types_with_runtime_loop
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct plugin {
+    order int
+}
+
+@plugin(order: 2)
+struct Zip {
+    static func Run() string { return "zip" }
+}
+
+@plugin(order: 1)
+struct Tar {
+    static func Run() string { return "tar" }
+}
+
+@plugin(order: 3)
+struct Gz {
+    static func Run() string { return "gz" }
+}
+
+func pick(want string) *reflect.TypeInfo {
+    for t in reflect.TypesWith<plugin>() {
+        if t.Name == want {
+            return t
+        }
+    }
+    return nil
+}
+
+func main() {
+    for i, t in reflect.TypesWith<plugin>() {
+        if i == 2 {
+            break
+        }
+        var run = t.Method("Run").Call<func() string>()
+        println(i, t.Name, t.Attribute<plugin>().order, run())
+    }
+    var t = pick("Tar")
+    println(t.Name, len(t.Methods))
+}

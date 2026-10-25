@@ -262,6 +262,9 @@ impl<'a> Sema<'a> {
             if let Some(e) = self.ct_field_const(l, name) {
                 return e;
             }
+            if let Some(e) = self.ct_desc_const(l, name) {
+                return e;
+            }
         }
         let span = base.span.to(name.span);
         let mut b = self.auto_deref(base);
@@ -581,6 +584,10 @@ impl<'a> Sema<'a> {
                         (BinOp::Eq | BinOp::Ne, hir::ConstValue::Bool(a), hir::ConstValue::Bool(b)) => Some(a == b),
                         _ => None,
                     };
+                    // `prefix + path` of two attribute fields is one constant.
+                    if let (BinOp::StrConcat, hir::ConstValue::Str(a), hir::ConstValue::Str(b)) = (hop, a, b) {
+                        return mk(ExprKind::Const(hir::ConstValue::Str(format!("{a}{b}"))), ty, span);
+                    }
                     if let Some(eq) = eq {
                         let negated = matches!(hop, BinOp::StrNe | BinOp::Ne);
                         return mk(ExprKind::Const(hir::ConstValue::Bool(eq != negated)), ty, span);

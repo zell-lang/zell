@@ -1,0 +1,3 @@
+User users columns Id:int Name:string zero: {"Id":0,"Name":""}
+Order orders columns Id:int Total:float Note:string zero: {"Id":0,"Total":0,"Note":""}
+Status is an enum; table ""

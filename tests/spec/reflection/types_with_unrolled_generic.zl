@@ -1,0 +1,22 @@
+// error: cannot be unrolled at compile time: the generic type Box is marked @tag
+// status: passing
+namespace spec.reflection.types_with_unrolled_generic
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct tag {}
+
+@tag
+struct Box<T> {
+    V T
+}
+
+func main() {
+    var b = Box<int>{V: 1}
+    println(b.V)
+    for t in reflect.TypesWith<tag>() {
+        var x t
+        println(reflect.TypeOf<t>().Name)
+    }
+}

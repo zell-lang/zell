@@ -425,6 +425,9 @@ impl<'a> Sema<'a> {
                 if !self.arity("len", args, 1, span) {
                     return self.invalid(span);
                 }
+                if let Some(c) = self.ct_desc_len(&args[0]) {
+                    return c;
+                }
                 let v = self.value(&args[0], None);
                 let op = match self.tt.get(v.ty) {
                     Type::String => Builtin::LenString,

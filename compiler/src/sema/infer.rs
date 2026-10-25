@@ -453,6 +453,18 @@ impl<'a> Sema<'a> {
     /// struct without type arguments takes them from the expected type.
     pub(crate) fn struct_lit_struct(&mut self, path: &ast::Path, generics: &[ast::TypeExpr], expected: Option<TypeId>, span: Span) -> Option<u32> {
         let segs: Vec<&ast::Ident> = path.segments.iter().collect();
+        // `t{...}` of an unrolled `TypesWith` loop.
+        if generics.is_empty() && segs.len() <= 2 {
+            if let Some(ty) = self.ct_desc_type(path) {
+                if let Type::Struct(d) = *self.tt.get(ty) {
+                    return Some(d.0);
+                }
+                if !self.tt.is_invalid(ty) {
+                    self.err(format!("{} is not a struct type", self.tn(ty)), span);
+                }
+                return None;
+            }
+        }
         if self.lookup_global(segs[0], false).is_none() {
             self.unknown_type(path);
             return None;

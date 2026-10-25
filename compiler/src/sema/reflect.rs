@@ -122,10 +122,21 @@ pub(crate) struct ReflState {
     /// (function-context depth, local, struct type, field index or `None`
     /// in an abstract check).
     pub(crate) ct_fields: Vec<(usize, LocalId, TypeId, Option<u32>)>,
+    /// Compile-time descriptors of unrolled `TypesWith<A>()` / `t.Methods`
+    /// / `m.Params` loops (`reflect_unroll.rs`): (function-context depth,
+    /// local, descriptor).
+    pub(crate) ct_descs: Vec<(usize, LocalId, super::reflect_unroll::CtDesc)>,
+    /// `m.Args` structs by method (function id -> struct id).
+    pub(crate) args_structs: HashMap<u32, u32>,
+    /// Locals of unrolled descriptor-loop copies: (file, span) used in some
+    /// copy, and unused ones (file, span, name); reported when the
+    /// outermost unrolled loop ends if unused in every copy.
+    pub(crate) copy_used: std::collections::HashSet<(usize, Span)>,
+    pub(crate) copy_unused: Vec<(usize, Span, String)>,
     /// Per compile-time field variable (depth, local): references that were
     /// not folded away (`f.Type`, passing `f` on). A variable without any
     /// is bound to nil instead of the `FieldInfo`.
-    ct_uses: HashMap<(usize, LocalId), u32>,
+    pub(crate) ct_uses: HashMap<(usize, LocalId), u32>,
     /// Folds made by compile-time reflection so far (`f.Name`,
     /// `f.Attribute<A>()`, type tests, ...): an `if` whose condition became
     /// a constant through one of them is static (`reflect_ct.rs`).
@@ -417,7 +428,7 @@ impl<'a> Sema<'a> {
         self.refl.structs.get(name).copied()
     }
 
-    fn refl_struct_ty(&mut self, name: &str) -> TypeId {
+    pub(crate) fn refl_struct_ty(&mut self, name: &str) -> TypeId {
         match self.refl.structs.get(name).copied() {
             Some(s) => self.struct_ty(s),
             None => self.tt.invalid,
@@ -431,7 +442,7 @@ impl<'a> Sema<'a> {
     }
 
     /// A call of `reflect.TypeOf<T>()`.
-    fn type_of_call(&mut self, t: TypeId, span: Span) -> hir::Expr {
+    pub(crate) fn type_of_call(&mut self, t: TypeId, span: Span) -> hir::Expr {
         let ptr = self.type_info_ptr();
         let Some(&tmpl) = self.refl.templates.get("TypeOf") else { return self.invalid(span) };
         match self.instantiate(tmpl, vec![t], span) {
@@ -501,6 +512,9 @@ impl<'a> Sema<'a> {
             return Err(base);
         }
         if let ExprKind::Local(l) = base.kind {
+            if let Some(e) = self.ct_desc_call(l, name, targs, args, span) {
+                return Ok(e);
+            }
             let depth = self.fns.len();
             let ct = self.refl.ct_fields.iter().rev().find(|c| c.0 == depth && c.1 == l).copied();
             if let (Some((_, _, sty, idx)), "Get", None) = (ct, name.name.as_str(), targs) {
@@ -573,11 +587,11 @@ impl<'a> Sema<'a> {
     /// Adds `delta` to the unfolded-use count of `l` if it is a compile-time
     /// field variable of the current function (see `ReflState::ct_uses`).
     pub(crate) fn ct_field_use(&mut self, l: LocalId, delta: i32) {
-        if self.refl.ct_fields.is_empty() {
+        if self.refl.ct_fields.is_empty() && self.refl.ct_descs.is_empty() {
             return;
         }
         let depth = self.fns.len();
-        if self.refl.ct_fields.iter().any(|c| c.0 == depth && c.1 == l) {
+        if self.refl.ct_fields.iter().any(|c| c.0 == depth && c.1 == l) || self.refl.ct_descs.iter().any(|c| c.0 == depth && c.1 == l) {
             let n = self.refl.ct_uses.entry((depth, l)).or_insert(0);
             *n = (*n as i64 + delta as i64).max(0) as u32;
         }
@@ -587,9 +601,18 @@ impl<'a> Sema<'a> {
     /// `sty`, `A` being `structs[asid]` (type `aty`): a pointer to the first
     /// attribute of that type on the field, or `nil`.
     fn ct_attribute(&mut self, sty: TypeId, k: u32, asid: u32, aty: TypeId, span: Span) -> hir::Expr {
+        let attrs = match *self.tt.get(sty) {
+            Type::Struct(sd) => self.structs[sd.0 as usize].fields.get(k as usize).map(|f| f.attrs.clone()).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        self.attr_const_of(attrs, asid, aty, span)
+    }
+
+    /// The constant value of `x.Attribute<A>()` over the attributes `attrs`
+    /// of a compile-time declaration: a pointer to the first attribute of
+    /// struct `structs[asid]` (type `aty`), or `nil`.
+    pub(crate) fn attr_const_of(&mut self, attrs: Vec<hir::Attr>, asid: u32, aty: TypeId, span: Span) -> hir::Expr {
         let ptr = self.tt.pointer(aty);
-        let Type::Struct(sd) = *self.tt.get(sty) else { return mk(ExprKind::Nil, ptr, span) };
-        let attrs = self.structs[sd.0 as usize].fields.get(k as usize).map(|f| f.attrs.clone()).unwrap_or_default();
         for a in attrs {
             let sid = match &a.kind {
                 hir::AttrKind::User(s) => Some(*s),
@@ -767,7 +790,7 @@ impl<'a> Sema<'a> {
             self.err("for ... in reflect.Fields<T>() takes one variable", span);
             return Some(empty());
         }
-        if !self.in_generic_body() {
+        if !self.in_generic_body() && self.refl.ct_descs.is_empty() {
             self.err("reflect.Fields<T>() can only be used in a generic function (it is unrolled at instantiation); use reflect.TypeOf<T>().Fields at run time", iter.span);
             return Some(empty());
         }
@@ -844,18 +867,7 @@ impl<'a> Sema<'a> {
             copies.push(hir::Block { stmts, span: body.span });
         }
         self.pop_label();
-        // if idx == 0 { copy0 } else if idx == 1 { copy1 } ...
-        let mut chain: Option<hir::Block> = None;
-        for (k, copy) in copies.into_iter().enumerate().rev() {
-            let l = mk(ExprKind::Local(idx), int, span);
-            let r = mk(ExprKind::Const(hir::ConstValue::Int(k as i128)), int, span);
-            let cond = mk(ExprKind::Binary { op: hir::BinOp::Eq, lhs: Box::new(l), rhs: Box::new(r) }, self.tt.bool_, span);
-            let st = Stmt { kind: StmtKind::If { cond, then: copy, else_: chain.take() }, span };
-            chain = Some(hir::Block { stmts: vec![st], span });
-        }
-        let start = mk(ExprKind::Const(hir::ConstValue::Int(0)), int, span);
-        let end = mk(ExprKind::Const(hir::ConstValue::Int(nfields as i128)), int, span);
-        Some(StmtKind::ForRange { label, var: Some(idx), start, end, body: chain.unwrap_or_default() })
+        Some(self.unrolled_loop(label, idx, copies, span))
     }
 
     /// Name of the `reflect.Kind` variant of `t`.

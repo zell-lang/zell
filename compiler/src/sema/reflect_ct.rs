@@ -73,6 +73,12 @@ impl<'a> Sema<'a> {
             steps.push(name.name.clone());
             cur = expr::strip_parens(base);
         }
+        if let Some(d) = self.ct_desc_operand(cur) {
+            return Some(match d {
+                Some(t) => self.type_steps(t, steps.iter().rev().map(|s| s.as_str())),
+                None => None,
+            });
+        }
         let t = match &cur.kind {
             ast::ExprKind::Field { base, name } if name.name == "Type" => {
                 let (_, sty, k) = self.ct_field_var(base)?;
@@ -85,6 +91,11 @@ impl<'a> Sema<'a> {
             _ => return None,
         };
         Some(self.type_steps(t, steps.iter().rev().map(|s| s.as_str())))
+    }
+
+    /// [`type_steps`](Self::type_steps) for other modules.
+    pub(crate) fn type_steps_pub<'s>(&self, t: TypeId, steps: impl Iterator<Item = &'s str>) -> Option<TypeId> {
+        self.type_steps(t, steps)
     }
 
     /// Applies `.Elem` / `.Key` steps to `t`; `None` if `t` depends on a
@@ -146,6 +157,11 @@ impl<'a> Sema<'a> {
     /// `f.Type[.Elem|.Key]*.Name|FullName|Kind` of a compile-time field: a
     /// constant (`Kind` as the `reflect.Kind` variant).
     pub(crate) fn ct_type_path(&mut self, segs: &[&ast::Ident], span: Span) -> Option<hir::Expr> {
+        if segs.len() >= 2 && !self.refl.ct_descs.is_empty() {
+            if let Some(e) = self.ct_desc_type_path(segs, span) {
+                return Some(e);
+            }
+        }
         if segs.len() < 3 || segs[1].name != "Type" || !self.refl.loaded_reflect() {
             return None;
         }
@@ -318,6 +334,7 @@ impl<'a> Sema<'a> {
     fn muted_switch(&mut self, sw: &ast::SwitchStmt, l: LocalId, v: &hir::Expr) -> StmtKind {
         self.gen.mute += 1;
         let label = self.push_label(LabelKind::Switch);
+        let mut all_end = true;
         for c in &sw.cases {
             self.push_scope();
             for p in &c.patterns {
@@ -329,16 +346,23 @@ impl<'a> Sema<'a> {
                     }
                 }
             }
-            self.case_body(&c.body, c.span);
+            let b = self.case_body(&c.body, c.span);
+            all_end &= super::stmt::terminates(&b.stmts, true);
             self.pop_scope();
         }
+        // Every case and the default terminate: so does the switch, whichever
+        // case an instantiation keeps (the abstract check is not emitted).
+        let mut keep = None;
         if let Some(d) = &sw.default {
-            self.case_body(d, sw.span);
+            let b = self.case_body(d, sw.span);
+            if all_end && super::stmt::terminates(&b.stmts, true) {
+                keep = Some(b);
+            }
         }
         self.pop_label();
         self.gen.mute -= 1;
         self.refl.abstract_stmt = Some(sw.span);
-        self.switch_block(label, l, v, None, sw.span)
+        self.switch_block(label, l, v, keep, sw.span)
     }
 
     /// `{ switch subject { default: body } }`: the subject is evaluated

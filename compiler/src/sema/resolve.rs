@@ -716,6 +716,12 @@ impl<'a> Sema<'a> {
                         return ty;
                     }
                 }
+                // `t`, `p.Type`, `m.Args` ... of an unrolled descriptor loop.
+                if generics.is_empty() && path.segments.len() <= 2 {
+                    if let Some(ty) = self.ct_desc_type(path) {
+                        return ty;
+                    }
+                }
                 if !generics.is_empty() {
                     if path.segments.len() == 1 && path.segments[0].name == "Task" && generics.len() == 1 {
                         let inner = self.resolve_type(&generics[0]);

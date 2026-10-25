@@ -1,0 +1,48 @@
+// test: for t in reflect.TypesWith<A>() is unrolled when t is used as a type: t.Name, t.Kind and t.Attribute<A>() are constants, static if picks per type
+// status: passing
+namespace spec.reflection.types_with_unrolled
+
+import io
+import encoding.json
+
+@attribute(targets: [reflect.Target.Struct, reflect.Target.Enum])
+struct model {
+    table string
+}
+
+@model(table: "users")
+struct User {
+    Id   int
+    Name string
+}
+
+@model(table: "orders")
+struct Order {
+    Id    int
+    Total float
+    Note  string
+}
+
+@model
+enum Status {
+    Active
+    Closed
+}
+
+func main() {
+    for t in reflect.TypesWith<model>() {
+        var zero t
+        if t.Kind == reflect.Kind.Struct {
+            var cols = ""
+            for f in reflect.Fields<t>() {
+                cols += " " + f.Name + ":" + f.Type.Name
+            }
+            println(t.Name, t.Attribute<model>().table, "columns" + cols, "zero:", json.Format(zero))
+            continue
+        }
+        if t.Kind != reflect.Kind.Enum {
+            reflect.Error("only structs and enums are models")
+        }
+        println(t.Name, "is an enum; table", "\"" + t.Attribute<model>().table + "\"")
+    }
+}

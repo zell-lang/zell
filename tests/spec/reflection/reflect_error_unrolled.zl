@@ -1,0 +1,27 @@
+// error: Users.Find: parameter id needs @from
+// status: passing
+namespace spec.reflection.reflect_error_unrolled
+
+@attribute(targets: [reflect.Target.Struct])
+struct controller {}
+
+@attribute(targets: [reflect.Target.Param])
+struct from {}
+
+@controller
+struct Users {
+    func List(@from page int) string { return "list" }
+    func Find(id int) string { return "find" }
+}
+
+func main() {
+    for t in reflect.TypesWith<controller>() {
+        for m in t.Methods {
+            for p in m.Params {
+                if p.Attribute<from>() == nil {
+                    reflect.Error(t.Name + "." + m.Name + ": parameter " + p.Name + " needs @from")
+                }
+            }
+        }
+    }
+}

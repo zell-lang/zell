@@ -284,6 +284,9 @@ impl<'a> Sema<'a> {
         if let Some(k) = self.fields_for(vars, iter, body, span) {
             return k;
         }
+        if let Some(k) = self.desc_for(vars, iter, body, span) {
+            return k;
+        }
         if vars.len() > 2 || vars.is_empty() {
             self.err("for ... in takes one or two variables", span);
         }
@@ -685,6 +688,9 @@ impl<'a> Sema<'a> {
             return StmtKind::Expr(self.try_expr(inner, false));
         }
         if let Some(k) = self.ct_field_set(inner) {
+            return k;
+        }
+        if let Some(k) = self.ct_param_set(inner) {
             return k;
         }
         let h = self.expr(e, None);

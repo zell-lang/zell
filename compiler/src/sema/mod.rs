@@ -48,6 +48,7 @@ mod logtmpl;
 mod ownership;
 mod reflect;
 mod reflect_ct;
+mod reflect_unroll;
 mod reflect_with;
 mod resolve;
 mod stmt;
@@ -662,6 +663,11 @@ impl<'a> Sema<'a> {
         if d.severity == crate::diagnostics::Severity::Error && d.message.contains("<invalid>") && self.function_has_error() {
             return;
         }
+        // The copies of an unrolled descriptor loop repeat a diagnostic of
+        // code that does not depend on the descriptor: report it once.
+        if !self.refl.ct_descs.is_empty() && self.diags.items.iter().rev().take(64).any(|x| x.message == d.message && x.span == d.span && x.file == d.file) {
+            return;
+        }
         self.unit_note_diag();
         if let Some(n) = &self.gen.note {
             d = d.with_note(n.clone(), None);
@@ -764,18 +770,34 @@ impl<'a> Sema<'a> {
                 // In a concrete generic instance code dropped by a static
                 // `if` may hold the only use; the abstract check of the
                 // body sees every branch and reports unused variables.
+                if !self.refl.ct_descs.is_empty() {
+                    // In a copy of an unrolled descriptor loop: unused only if
+                    // unused in every copy (decided when the loop ends).
+                    let span = f.locals[l.0 as usize].span;
+                    if f.used[l.0 as usize] || f.recovering || self.type_has_dtor(f.locals[l.0 as usize].ty) || self.in_concrete_instance() {
+                        self.refl.copy_used.insert((self.cur_file, span));
+                    } else if self.gen.mute == 0 {
+                        self.refl.copy_unused.push((self.cur_file, span, name));
+                    }
+                    continue;
+                }
                 if !f.used[l.0 as usize] && !f.recovering && !self.type_has_dtor(f.locals[l.0 as usize].ty) && !self.in_concrete_instance() {
                     let span = f.locals[l.0 as usize].span;
-                    let fix = Fix::edit(format!("Rename {name} to _"), span, "_");
-                    let mut d = Diagnostic::error(format!("unused variable {name}: declared and never used"), span)
-                        .in_file(self.cur_file)
-                        .with_code(codes::UNUSED_VARIABLE)
-                        .with_help("use it, remove it, or rename it to `_`");
-                    d.fixes = vec![fix];
-                    self.push_diag(d);
+                    self.report_unused(&name, span);
                 }
             }
         }
+    }
+
+    /// The unused-variable error for local `name` declared at `span`.
+    pub(crate) fn report_unused(&mut self, name: &str, span: Span) {
+        let fix = Fix::edit(format!("Rename {name} to _"), span, "_");
+        let mut d = Diagnostic::error(format!("unused variable {name}: declared and never used"), span)
+            .in_file(self.cur_file)
+            .with_code(codes::UNUSED_VARIABLE)
+            .with_help("use it, remove it, or rename it to `_`");
+        d.fixes = vec![fix];
+        self.push_diag(d);
     }
 
     /// Looks a name up in local scopes, innermost function first, creating

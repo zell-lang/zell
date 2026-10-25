@@ -52,57 +52,83 @@ impl<'a> Sema<'a> {
                 out.push((a, Vec::new()));
                 continue;
             };
-            let asid = ad.0;
-            let marks = |s: &Self, attrs: &[hir::Attr]| {
-                attrs.iter().any(|x| match &x.kind {
-                    hir::AttrKind::User(u) => *u == asid,
-                    hir::AttrKind::Builtin(n) => s.refl.struct_id(n) == Some(asid),
-                })
-            };
-            // (package, path, file, offset, type)
-            let mut found: Vec<(String, String, usize, u32, TypeId)> = Vec::new();
-            for i in 0..self.structs.len() {
-                let s = &self.structs[i];
-                if !marks(self, &s.attrs) || self.is_template_struct(i as u32) {
-                    continue;
-                }
-                let (file, off) = (s.file, s.span.start);
-                let t = self.tt.intern(Type::Struct(crate::types::DeclId(i as u32)));
-                if self.has_param(t) {
-                    continue;
-                }
-                found.push((self.file_package(file), stdlib::source_path(file), file, off, t));
-            }
-            for i in 0..self.enums.len() {
-                let e = &self.enums[i];
-                if !marks(self, &e.attrs) || self.is_template_enum(i as u32) {
-                    continue;
-                }
-                let (file, off) = (e.file, e.span.start);
-                let t = self.tt.intern(Type::Enum(crate::types::DeclId(i as u32)));
-                if self.has_param(t) {
-                    continue;
-                }
-                found.push((self.file_package(file), stdlib::source_path(file), file, off, t));
-            }
-            for i in 0..self.interfaces.len() {
-                let x = &self.interfaces[i];
-                if !marks(self, &x.attrs) {
-                    continue;
-                }
-                let (file, off) = (x.file, x.span.start);
-                let t = self.tt.intern(Type::Interface(crate::types::DeclId(i as u32)));
-                if self.has_param(t) {
-                    continue;
-                }
-                found.push((self.file_package(file), stdlib::source_path(file), file, off, t));
-            }
-            // Instances of one template share the declaration's position:
-            // keep them in instantiation (type id) order.
-            found.sort_by(|x, y| (&x.0, &x.1, x.2, x.3, x.4).cmp(&(&y.0, &y.1, y.2, y.3, y.4)));
-            out.push((a, found.into_iter().map(|f| f.4).collect()));
+            out.push((a, self.marked_types(ad.0, true)));
         }
         out
+    }
+
+    /// The types of the whole program declared with attribute struct
+    /// `asid`, in `TypesWith` order (package, file, declaration); generic
+    /// instances only with `instances` (they are complete only at the end
+    /// of the analysis).
+    pub(crate) fn marked_types(&mut self, asid: u32, instances: bool) -> Vec<TypeId> {
+        let marks = |s: &Self, attrs: &[hir::Attr]| {
+            attrs.iter().any(|x| match &x.kind {
+                hir::AttrKind::User(u) => *u == asid,
+                hir::AttrKind::Builtin(n) => s.refl.struct_id(n) == Some(asid),
+            })
+        };
+        // (package, path, file, offset, type)
+        let mut found: Vec<(String, String, usize, u32, TypeId)> = Vec::new();
+        for i in 0..self.structs.len() {
+            let s = &self.structs[i];
+            if !marks(self, &s.attrs) || self.is_template_struct(i as u32) || (!instances && self.gen.inst_structs.contains_key(&(i as u32))) {
+                continue;
+            }
+            let (file, off) = (s.file, s.span.start);
+            let t = self.tt.intern(Type::Struct(crate::types::DeclId(i as u32)));
+            if self.has_param(t) {
+                continue;
+            }
+            found.push((self.file_package(file), stdlib::source_path(file), file, off, t));
+        }
+        for i in 0..self.enums.len() {
+            let e = &self.enums[i];
+            if !marks(self, &e.attrs) || self.is_template_enum(i as u32) || (!instances && self.gen.inst_enums.contains_key(&(i as u32))) {
+                continue;
+            }
+            let (file, off) = (e.file, e.span.start);
+            let t = self.tt.intern(Type::Enum(crate::types::DeclId(i as u32)));
+            if self.has_param(t) {
+                continue;
+            }
+            found.push((self.file_package(file), stdlib::source_path(file), file, off, t));
+        }
+        for i in 0..self.interfaces.len() {
+            let x = &self.interfaces[i];
+            if !marks(self, &x.attrs) {
+                continue;
+            }
+            let (file, off) = (x.file, x.span.start);
+            let t = self.tt.intern(Type::Interface(crate::types::DeclId(i as u32)));
+            if self.has_param(t) {
+                continue;
+            }
+            found.push((self.file_package(file), stdlib::source_path(file), file, off, t));
+        }
+        // Instances of one template share the declaration's position:
+        // keep them in instantiation (type id) order.
+        found.sort_by(|x, y| (&x.0, &x.1, x.2, x.3, x.4).cmp(&(&y.0, &y.1, y.2, y.3, y.4)));
+        found.into_iter().map(|f| f.4).collect()
+    }
+
+    /// Generic struct and enum declarations marked with attribute `asid`
+    /// (by the attribute's name), which a compile-time `TypesWith` loop
+    /// cannot list.
+    pub(crate) fn marked_templates(&self, asid: u32) -> Vec<String> {
+        let aname = self.structs[asid as usize].name.clone();
+        let builtin = self.attr_value_struct_name(asid);
+        let marks = |attrs: &[ast::Attribute]| attrs.iter().any(|a| a.path.segments.last().is_some_and(|s| s.name == aname || Some(s.name.as_str()) == builtin));
+        self.gen
+            .templates
+            .iter()
+            .filter(|t| match t.decl {
+                super::generics::TmplDecl::Struct(d) => marks(&d.attrs),
+                super::generics::TmplDecl::Enum(d) => marks(&d.attrs),
+                _ => false,
+            })
+            .map(|t| t.name.clone())
+            .collect()
     }
 
     /// The package name of `file` in a package build ("" otherwise; library
@@ -170,7 +196,7 @@ impl<'a> Sema<'a> {
     }
 
     /// The value of a compile-time string expression, if `e` is one.
-    fn const_string(&self, e: &hir::Expr) -> Option<String> {
+    pub(crate) fn const_string(&self, e: &hir::Expr) -> Option<String> {
         match &e.kind {
             ExprKind::Const(ConstValue::Str(s)) => Some(s.clone()),
             ExprKind::Binary { op: BinOp::StrConcat, lhs, rhs } => Some(self.const_string(lhs)? + &self.const_string(rhs)?),
@@ -200,7 +226,7 @@ impl<'a> Sema<'a> {
     }
 
     /// Namespace path of a named type's declaration ("" for others).
-    fn decl_package(&self, t: TypeId) -> String {
+    pub(crate) fn decl_package(&self, t: TypeId) -> String {
         let ns = match *self.tt.get(t) {
             Type::Struct(d) => self.structs[d.0 as usize].namespace,
             Type::Enum(d) => self.enums[d.0 as usize].namespace,
