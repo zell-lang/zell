@@ -194,7 +194,7 @@ documentation's Examples section, tested by
     `b.WriteString(string(r))`.
 37. ❌ **No indented JSON output** (`json.MarshalIndent`). Workaround: the
     examples print compact JSON.
-38. ❌ **`defer f.Close()` on a `void!` method is rejected** (a deferred call
+38. 📘 **As specified, not changed (2026-10-25):** a `T!` result must be handled (DESIGN.md «Игнорирование и обязательность»), a deferred call included; the diagnostic proposes `defer func() { try f() catch err { ... } }()`. **`defer f.Close()` on a `void!` method is rejected** (a deferred call
     must handle its error). Workaround: rely on `Drop`, or defer a closure
     with `try ... catch`; consider allowing it with the error dropped, or a
     `defer try` form.
@@ -242,7 +242,7 @@ Batch 2 (`jobrunner`, `typed-cache`, `scene-graph`, `errors-deep-dive`,
     file, in a 16-line `g.zl`). Workaround in `errors-deep-dive`: convert
     std errors at the boundary (`number` turns the parse error into a
     `ValidationError`), so their frames are never printed.
-46. ❌ **`return f()` in a `T!` function, where `f()` is also `T!`, is
+46. 📘 **As specified, not changed (2026-10-25):** DESIGN.md «Ошибки»: "`return` в такой функции принимает либо значение `T`, либо ошибку" and "Значение типа `T!` нельзя использовать, не обработав"; a `T!` is neither, and propagation is always marked with `?` ("неявного проброса нет"). **`return f()` in a `T!` function, where `f()` is also `T!`, is
     rejected** ("result of type V! must be handled"); it has to be `return
     f()?`. Go and Rust return the result as is. Workaround: `?`.
 47. ❌ **`zell test` does not understand a workspace root**: without a path it
