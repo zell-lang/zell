@@ -186,7 +186,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// `zell_coro_leave(ctx0)` inline (ABI.md 10.3): `ctx0` (+1, consumed)
     /// is the current context again, the one current until now released.
-    fn coro_leave_inline(&mut self, ctx0: PointerValue<'ctx>) {
+    pub(crate) fn coro_leave_inline(&mut self, ctx0: PointerValue<'ctx>) {
         let cp = self.coro_tls(0);
         let old = self.b.build_load(self.ptr_ty(), cp, "ctx.old").unwrap();
         self.b.build_store(cp, ctx0).unwrap();
@@ -696,6 +696,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             for f in self.fs().flags.iter().flatten() {
                 ptrs.push(*f);
             }
+            for t in &self.fs().temp_slots {
+                ptrs.push(t.ptr);
+                ptrs.extend(t.flag);
+            }
+            ptrs.extend(self.fs().scoped.iter().map(|(p, _)| *p));
+            ptrs.extend(self.interior_slot_ptrs());
         }
         let fty = self.ctx.void_type().fn_type(&[self.ptr_ty().into()], false);
         let asm = self.ctx.create_inline_asm(fty, String::new(), "r,~{memory}".to_string(), true, false, None, false);
@@ -774,10 +780,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let ops = self.value_ops(ret);
         let vp: PointerValue<'ctx> = if self.llty_opt(ret).is_some() { self.coro_res_field(ret, res, 1) } else { self.ptr_ty().const_null() };
         let c = self.call_rt_v("zell_task_completed", &[size.into(), ops.into(), vp.into()]).into_pointer_value();
+        let mat_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(join).unwrap();
         self.b.position_at_end(join);
         let phi = self.b.build_phi(self.ptr_ty(), "task").unwrap();
-        phi.add_incoming(&[(&t, from), (&c, mat)]);
+        phi.add_incoming(&[(&t, from), (&c, mat_end)]);
         phi.as_basic_value().into_pointer_value()
     }
 

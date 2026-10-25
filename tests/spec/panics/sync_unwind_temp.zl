@@ -1,0 +1,35 @@
+// test: owned temporaries live in the middle of an expression (a concatenated string argument, a slice literal operand) are released when a call after them panics; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.sync_unwind_temp
+
+import io
+
+func boom(n int) string {
+    if n > 0 {
+        panic("boom " + strings.Repeat("x", n))
+    }
+    return ""
+}
+
+func join(a string, b string, c []string) string {
+    return a + b + c[0]
+}
+
+func build(n int) string {
+    var base = strings.Repeat("ab", n)
+    return join(base + "!", boom(n), [base + "?"])
+}
+
+async func work() string! {
+    await task.Yield()
+    return build(2)
+}
+
+async func main() {
+    var v = try await work() catch err {
+        println("caught:", err.Message())
+        return
+    }
+    println(v)
+}

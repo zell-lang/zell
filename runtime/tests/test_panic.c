@@ -1,4 +1,5 @@
 #include "test.h"
+#include "../src/rt_internal.h"   /* zell__plat_setjmp */
 
 static void p_msg(void) { zell_panic("something broke"); }
 static void p_nil(void) { zell_panic_nil(); }
@@ -100,10 +101,89 @@ TEST(line_table) {
     assert(strstr(buf, "\n  t.zl:7 lined\n"));
 }
 
+/* ---- Synchronous frames on the frame chain (ABI.md 8.1 item 4a): a task
+ * panic long-jumps into each sync frame's landing, innermost first; each
+ * landing ends with zell_unwind_resume. */
+typedef struct sync_tnode {
+    void *prev;
+    void *tag;
+    zell__plat_jmpbuf jb;
+} sync_tnode;
+
+static int64_t sync_done;
+
+/* An outlined cleanup node: { prev, ZELL_SYNC_CLEANUP, fn, sp }, run by a
+ * call on top of the panicking stack. */
+typedef struct cleanup_tnode {
+    void *prev;
+    void *tag;
+    void (*fn)(void *);
+    void *sp;
+} cleanup_tnode;
+
+static void middle_cleanup(void *sp) {
+    fprintf(stderr, "middle cleanup %s\n", (const char *)sp);
+}
+
+static __attribute__((noinline)) void sync_middle(void (*next)(void)) {
+    cleanup_tnode n = { zell_coro_chain, ZELL_SYNC_CLEANUP, middle_cleanup, (void *)"ok" };
+    zell_coro_chain = &n;
+    next();
+    zell_coro_chain = n.prev;
+}
+
+static __attribute__((noinline)) void sync_inner(void) {
+    sync_tnode n;
+    n.prev = zell_coro_chain;
+    n.tag = ZELL_SYNC_FRAME;
+    zell_coro_chain = &n;
+    if (zell__plat_setjmp(n.jb)) {
+        fputs("inner landing\n", stderr);
+        zell_unwind_resume();
+    }
+    zell_panic("sync boom");
+}
+
+static void sync_job(void *arg) {
+    (void)arg;
+    sync_tnode n;
+    n.prev = zell_coro_chain;
+    n.tag = ZELL_SYNC_FRAME;
+    zell_coro_chain = &n;
+    if (zell__plat_setjmp(n.jb)) {
+        fputs("outer landing\n", stderr);
+        __atomic_store_n(&sync_done, 1, __ATOMIC_RELEASE);
+        zell_unwind_resume();
+    }
+    sync_middle(sync_inner);
+}
+
+static void p_sync_frames(void) {
+    zell_task *t = zell_task_new(0, NULL);
+    zell_task *prev = zell_task_enter_scope(t);
+    zell_sched_post(sync_job, NULL);   /* the job runs as task t */
+    zell_task_leave_scope(prev);
+    zell_release(prev);
+    while (!__atomic_load_n(&sync_done, __ATOMIC_ACQUIRE)) zell__plat_sleep_ns(1000000);
+    zell__plat_sleep_ns(200000000);   /* the job prints the unobserved panic */
+    (void)t;
+    fflush(stderr);
+    _Exit(0);
+}
+
+TEST(sync_frames_unwind) {
+    char buf[16384];
+    int rc = run_child(p_sync_frames, buf, sizeof buf);
+    if (rc != 0 || strncmp(buf, "inner", 5) != 0) fprintf(stderr, "child exit %d:\n%s\n", rc, buf);
+    assert(rc == 0);
+    assert(strncmp(buf, "inner landing\nmiddle cleanup ok\nouter landing\npanic: sync boom\n", 63) == 0);
+}
+
 int main(void) {
     printf("test_panic\n");
     RUN(messages);
     RUN(flush_and_exit);
     RUN(line_table);
+    RUN(sync_frames_unwind);
     return 0;
 }

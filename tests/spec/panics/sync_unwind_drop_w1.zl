@@ -1,0 +1,45 @@
+// test: (one worker) a panic in a task drops the live values of the synchronous frames below it in reverse declaration order, also a value only reachable through a pointer local; --leak-check stays clean
+// status: passing
+// env: ZELL_WORKERS=1
+// run-flags: --leak-check
+namespace spec.panics.sync_unwind_drop_w1
+
+import io
+
+var drops = 0
+
+struct Guard {
+    name string
+
+    func Drop() {
+        drops += 1
+        println("drop", this.name)
+    }
+}
+
+func boom(g *Guard) {
+    var local = Guard{name: "boom local"}
+    if len(g.name) + len(local.name) > 0 {
+        panic("boom")
+    }
+}
+
+func run() {
+    var first = Guard{name: "first"}
+    var second = Guard{name: "second"}
+    var heap = new Guard{name: "heap"}
+    boom(heap)
+    println("not reached", first.name, second.name)
+}
+
+async func work() void! {
+    await task.Yield()
+    run()
+}
+
+async func main() {
+    try await work() catch err {
+        println("caught:", err.Message(), "drops =", drops)
+        return
+    }
+}

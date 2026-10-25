@@ -1,0 +1,57 @@
+// test: (one worker) a panic unwinds mixed frames innermost first: sync -> async ramp (not suspended yet) -> sync -> async task; every defer runs once and --leak-check stays clean
+// status: passing
+// env: ZELL_WORKERS=1
+// run-flags: --leak-check
+namespace spec.panics.sync_unwind_nested_w1
+
+import io
+
+struct Guard {
+    name string
+
+    func Drop() {
+        println("drop", this.name)
+    }
+}
+
+func leaf(depth int) int {
+    var g = Guard{name: "leaf"}
+    defer println("leaf deferred")
+    if depth > 0 {
+        panic("deep panic at " + g.name)
+    }
+    return 0
+}
+
+// Never suspends before the panic: its frame runs in the caller's task.
+async func mid(depth int) int {
+    defer println("mid deferred")
+    var label = "mid " + strings.Repeat("!", depth)
+    if depth > 100 {
+        await task.Yield()
+    }
+    return leaf(depth) + len(label)
+}
+
+func outer(depth int) int {
+    var g = Guard{name: "outer"}
+    defer println("outer deferred")
+    // The ramp runs here, in this frame's task, until it suspends.
+    var t = mid(depth)
+    _ = t
+    return len(g.name)
+}
+
+async func work() int! {
+    await task.Yield()
+    defer println("work deferred")
+    return outer(3)
+}
+
+async func main() {
+    var v = try await work() catch err {
+        println("caught:", err.Message())
+        return
+    }
+    println(v)
+}

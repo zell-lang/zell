@@ -84,6 +84,7 @@ const RUNTIME: &[(&str, &str, bool)] = &[
     ("zell_panic_str", "v:p", true),
     ("zell_panic_error", "v:p", true),
     ("zell_panic_nil", "v:", true),
+    ("zell_unwind_resume", "v:", true),
     ("zell_panic_bounds", "v:ll", true),
     ("zell_print_str", "v:p", false),
     ("zell_print_int", "v:l", false),
@@ -181,7 +182,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// Calls `f`, adding `zeroext` to every `i1` argument and result (C ABI).
     pub(crate) fn call_c(&mut self, f: FunctionValue<'ctx>, args: &[BasicMetadataValueEnum<'ctx>]) -> Option<BasicValueEnum<'ctx>> {
-        let cs = self.b.build_call(f, args, "").unwrap();
+        let cs = self.call_fn(f, args);
         let zext = self.attr("zeroext");
         for (i, a) in args.iter().enumerate() {
             if let BasicMetadataValueEnum::IntValue(iv) = a {
@@ -201,7 +202,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// Calls runtime function `name`.
     pub(crate) fn call_rt(&mut self, name: &str, args: &[BasicMetadataValueEnum<'ctx>]) -> Option<BasicValueEnum<'ctx>> {
-        if let Some(f) = self.rc_inline_fn(name) {
+        if let Some(f) = if self.f.as_ref().is_some_and(|f| f.cold > 0) { None } else { self.rc_inline_fn(name) } {
             self.b.build_call(f, args, "").unwrap();
             return None;
         }

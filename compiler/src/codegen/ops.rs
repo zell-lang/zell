@@ -439,7 +439,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             Builtin::Panic => {
                 let v = self.expr(&args[0])?;
                 let f = if *self.ty(args[0].ty) == Type::String { "zell_panic_str" } else { "zell_panic_error" };
+                // Held: a task panic copies the message, then unwinding
+                // this frame releases the value (unwind.rs).
+                let h = self.hold(args[0].ty, v);
                 self.call_noreturn(f, &[v.get().into()]);
+                self.unhold(h);
                 Ok(Val::void())
             }
             Builtin::ErrorNew => {

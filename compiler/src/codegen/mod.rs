@@ -164,10 +164,10 @@
 //! are inlined on the thread-local `zell_coro_tls` `{ ctx, cur,
 //! orphan_seq, orphan_on }` (ABI.md 10.2).
 //! An async function that never suspends ([`hir::suspend::plain_async`]:
-//! it awaits only direct calls of such functions, has no `defer` and owns
-//! no value with a destructor) is a plain function with the same ABI
-//! (ABI.md 10.3 "Never-suspending functions"): no frame, task or chain
-//! node, the caller's context saved and given back unless the body is
+//! it awaits only direct calls of such functions) is a plain function with
+//! the same ABI (ABI.md 10.3 "Never-suspending functions"): no frame, task
+//! or coroutine chain node (its landing pads as for any synchronous
+//! function, below), the caller's context saved and given back unless the body is
 //! context-neutral, NULL into `res.task` and the moved result into
 //! `res.value`; a direct `await` of it reads `res.value` only. It carries
 //! the string attribute `"zell-plain-async"` instead of
@@ -252,10 +252,8 @@
 //! retained itself: the local's hidden pin slots hold its owners
 //! (`interior.rs`). Sub-slices of a local array own the array's cell.
 //!
-//! Not released (by design): values reachable from a panicking task (a
-//! panic does not unwind), strong reference cycles (use `weak`; detected by
-//! `--leak-check`; freed by the cycle collector, below), values in the
-//! 64-slot defer array beyond a panic.
+//! Not released (by design): strong reference cycles (use `weak`; detected
+//! by `--leak-check`; freed by the cycle collector, below).
 //!
 //! **Cycle collector** ([`cycles`], ABI.md 3.8). Types on a cycle of the
 //! type reference graph ([`crate::sema::cycles`]) are allocated with
@@ -288,7 +286,13 @@
 //!
 //! **Task panics** (ABI.md 8.1): the `zell_coro_chain` pushes and pops are
 //! emitted for every target (the thread-local is native TLS everywhere,
-//! MinGW included).
+//! MinGW included). Synchronous functions emit the calls that may panic
+//! as `invoke`s with cleanup landing pads (the held temporaries, the
+//! defers, the locals: [`unwind`]); after optimisation [`unwind_lower`]
+//! turns each function that keeps one into a node on that chain (an
+//! outlined cleanup on x86-64, a setjmp elsewhere; ABI.md 8.1 item 4a).
+//! Coroutines spill held temporaries to frame slots for their destroy
+//! path ([`cleanup`]).
 
 mod async_;
 mod cleanup;
@@ -297,6 +301,7 @@ mod debug;
 mod debug_agent;
 pub use debug::dedup_declares;
 pub use async_::coro_frame_fixup;
+pub use unwind_lower::{lower_unwind, unwind_parent};
 mod expr;
 mod funcs;
 mod iface;
@@ -309,6 +314,8 @@ mod runtime;
 mod stmt;
 mod trace;
 mod types;
+mod unwind;
+mod unwind_lower;
 
 use crate::hir::{self, FuncId, Program};
 use crate::types::TypeId;
@@ -393,12 +400,24 @@ pub(crate) enum Cleanup<'ctx> {
     /// An owned temporary that is still to be consumed; released when an
     /// early exit (`?`, `try ... else return/break/continue`, `return`,
     /// `break`, `continue`) leaves the expression.
-    Temp(TypeId, BasicValueEnum<'ctx>),
+    /// With the slot it is spilled to while live, so that a panic
+    /// unwinding the frame releases it ([`unwind`]).
+    Temp(TypeId, BasicValueEnum<'ctx>, Option<TempSlot<'ctx>>),
     /// A block scope with the locals its `Let`s declared so far; released
     /// at the end of the block and by `break`/`continue` out of it.
     Scope(Vec<hir::LocalId>),
     /// A consumed entry.
     Done,
+}
+
+/// The frame slot an owned temporary is spilled to while it is held
+/// ([`unwind`]): the value (zeroed once consumed), or for a type with a
+/// destructor the value and a live flag.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TempSlot<'ctx> {
+    pub ptr: PointerValue<'ctx>,
+    pub flag: Option<PointerValue<'ctx>>,
+    pub ty: TypeId,
 }
 
 /// Code generation options.
@@ -534,6 +553,32 @@ pub(crate) struct FnState<'a, 'ctx> {
     /// of a type switch on them): calls through them use the constant
     /// vtable of that type, which LLVM turns into direct calls.
     pub known_dyn: Vec<(hir::LocalId, TypeId)>,
+    /// Held temporaries are spilled to [`TempSlot`]s (a coroutine: its
+    /// destroy path releases them, ABI.md 8.1).
+    pub spill_temps: bool,
+    /// Every temporary slot, and the one reused per (cleanup index, type).
+    pub temp_slots: Vec<TempSlot<'ctx>>,
+    pub temp_slot_of: HashMap<(usize, TypeId), usize>,
+    /// Calls that may panic are `invoke`s with a cleanup landing pad
+    /// ([`unwind`]): a synchronous function with a HIR body.
+    pub lpad_mode: bool,
+    /// The function has state to clean up on any panic (a `defer`, a local
+    /// that may own something, a saved context): every call that may
+    /// panic gets a landing pad, not only those under a held temporary.
+    pub needs_cleanup: bool,
+    /// Nesting of code that emits plain calls only (landing pads, the
+    /// unwind block, the release of the locals at the exit).
+    pub no_invoke: u32,
+    /// The shared tail of the landing pads: defers, locals, `resume`.
+    pub unwind_bb: Option<BasicBlock<'ctx>>,
+    /// Landing pads per set of live held temporaries (their values).
+    pub lpads: HashMap<Vec<usize>, BasicBlock<'ctx>>,
+    /// The `landingpad` values reaching the unwind block, and their blocks.
+    pub lpad_vals: Vec<(inkwell::values::BasicValueEnum<'ctx>, BasicBlock<'ctx>)>,
+    /// Nesting of cold code (landing pads, the unwind block): reference
+    /// counts are released by runtime calls, not the inline fast path, so
+    /// that the cleanup code stays small for the inliner.
+    pub cold: u32,
 }
 
 /// The code generator.
@@ -881,6 +926,16 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             try_targets: Vec::new(),
             interior: None,
             known_dyn: Vec::new(),
+            spill_temps: false,
+            temp_slots: Vec::new(),
+            temp_slot_of: HashMap::new(),
+            lpad_mode: false,
+            needs_cleanup: false,
+            no_invoke: 0,
+            unwind_bb: None,
+            lpads: HashMap::new(),
+            lpad_vals: Vec::new(),
+            cold: 0,
         };
         let saved = self.f.replace(st);
         self.b.position_at_end(body);

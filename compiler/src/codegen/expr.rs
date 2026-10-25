@@ -680,10 +680,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.coro_res_init(ret, res, awaiter);
         ma.push(res.into());
         let fv = self.funcs[fid.0 as usize];
-        self.b.build_call(fv, &ma, "").unwrap();
+        // Moved arguments belong to the callee from here on, also if it panics.
         for h in moved_holds {
             self.unhold(h);
         }
+        self.call_fn(fv, &ma);
         self.release_temps_from(d);
         Ok(res)
     }
@@ -705,14 +706,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     // result's references belong to the argument values,
                     // which stay held (or are stable) to the end of the
                     // statement; the result is borrowed from them.
-                    let r = self.b.build_call(bf, &ma, "").unwrap().try_as_basic_value().left();
+                    let r = self.call_fn(bf, &ma).try_as_basic_value().left();
                     return Ok(Val { v: r, owned: false });
                 }
                 let fv = self.funcs[fid.0 as usize];
-                let r = self.b.build_call(fv, &ma, "").unwrap().try_as_basic_value().left();
+                // Moved arguments belong to the callee from here on, also if it panics.
                 for h in moved_holds {
                     self.unhold(h);
                 }
+                let r = self.call_fn(fv, &ma).try_as_basic_value().left();
                 self.release_temps_from(d);
                 Ok(Val { v: r, owned: true })
             }
@@ -733,10 +735,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     vals.push(v);
                 }
                 let raw: Vec<BasicValueEnum> = vals.iter().map(|v| v.get()).collect();
-                let r = self.call_closure(c.ty, cv.get(), &raw)?;
+                // Moved arguments belong to the callee from here on, also if it panics.
                 for h in moved_holds {
                     self.unhold(h);
                 }
+                let r = self.call_closure(c.ty, cv.get(), &raw)?;
                 self.release_temps_from(d);
                 Ok(Val { v: r, owned: true })
             }

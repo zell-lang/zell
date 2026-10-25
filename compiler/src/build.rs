@@ -726,6 +726,14 @@ fn optimise(module: &Module, machine: &TargetMachine, opt: u8) -> Result<(), Str
     module.run_passes(&pipeline, machine, PassBuilderOptions::create()).map_err(|e| format!("internal compiler error: optimisation failed: {}", e.to_string()))?;
     codegen::dedup_declares(module);
     codegen::coro_frame_fixup(module);
+    codegen::lower_unwind(module);
+    // `ZELL_VERIFY_UNWIND=1`: verify the module after the lowering of the
+    // landing pads (codegen/unwind_lower.rs; the compiler's own tests set it).
+    if std::env::var_os("ZELL_VERIFY_UNWIND").is_some() {
+        if let Err(e) = module.verify() {
+            return Err(format!("internal compiler error: unwind lowering produced invalid IR:\n{}", e.to_string()));
+        }
+    }
     Ok(())
 }
 

@@ -1,0 +1,34 @@
+// test: a panic in a task runs the pending defers of the synchronous frames below it (innermost first) and releases what they own; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.sync_unwind_defer
+
+import io
+
+func inner(n int) int {
+    defer println("inner deferred 1")
+    var s = "owned " + strings.Repeat("x", n)
+    defer println("inner deferred 2:", s)
+    var xs = [1, 2, 3]
+    return xs[n + len(s)]
+}
+
+func middle(n int) int {
+    var names = ["a", "b"]
+    defer println("middle deferred,", len(names), "names")
+    return inner(n) + 1
+}
+
+async func work() int! {
+    await task.Yield()
+    defer println("work deferred")
+    return middle(2)
+}
+
+async func main() {
+    var v = try await work() catch err {
+        println("caught:", err.Message())
+        return
+    }
+    println(v)
+}

@@ -12,11 +12,10 @@
 //! awaits itself stays never-suspending. HIR has no generics, so every
 //! instantiation is decided on its own.
 //!
-//! A never-suspending function is *plain* (codegen emits it as an
-//! ordinary function with the coroutine's external ABI) when, in addition,
-//! its body has no `defer` and no local or temporary of a type with a
-//! destructor: synchronous frames do not run `defer` / `Drop` when a
-//! panic unwinds them (DESIGN.md "Паника"), coroutine frames do.
+//! A never-suspending function is *plain*: codegen emits it as an
+//! ordinary function with the coroutine's external ABI. A panic unwinds it
+//! like any synchronous frame (its `defer`s and `Drop`s run, its locals
+//! and the saved context are released: DESIGN.md "Паника", ABI.md 8.1).
 
 use super::ownership::{has_dtor, walk_function, walk_function_stmts};
 use super::{Callee, ExprKind, FuncId, Program, StmtKind};
@@ -26,9 +25,8 @@ use std::collections::HashSet;
 /// The async functions codegen lowers as plain functions.
 #[derive(Debug, Clone, Default)]
 pub struct PlainAsync {
-    /// Per function: an async function that never suspends and has no
-    /// `defer` and no local or temporary owning a value with a destructor.
-    /// `false` for every synchronous function.
+    /// Per function: an async function that never suspends. `false` for
+    /// every synchronous function.
     pub plain: Vec<bool>,
     /// Per function: its body can never change the current task context
     /// (10.8): every call in it is a direct call of an async function
@@ -69,7 +67,6 @@ pub fn plain_async(p: &Program) -> PlainAsync {
     // the synchronous functions it calls directly.
     let mut suspends = vec![false; n];
     let mut deps: Vec<Vec<FuncId>> = vec![Vec::new(); n];
-    let mut eligible = vec![false; n];
     let mut dirty = vec![false; n];
     let mut sync_deps: Vec<Vec<FuncId>> = vec![Vec::new(); n];
     for (i, f) in p.funcs.iter().enumerate() {
@@ -103,7 +100,6 @@ pub fn plain_async(p: &Program) -> PlainAsync {
         dirty[i] = ctx || drops || defer;
         if f.is_async {
             suspends[i] = own;
-            eligible[i] = !defer && !drops;
         }
     }
     // Greatest fixpoints of "never suspends" and "context-neutral":
@@ -122,7 +118,7 @@ pub fn plain_async(p: &Program) -> PlainAsync {
             }
         }
     }
-    let plain: Vec<bool> = (0..n).map(|i| p.funcs[i].is_async && !suspends[i] && eligible[i]).collect();
+    let plain: Vec<bool> = (0..n).map(|i| p.funcs[i].is_async && !suspends[i]).collect();
     let ctx_neutral = (0..n).map(|i| !dirty[i]).collect();
     PlainAsync { plain, ctx_neutral }
 }

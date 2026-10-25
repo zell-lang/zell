@@ -1,0 +1,40 @@
+// test: a mutex unlocked by a defer of a synchronous function is free after a panic unwinds that function, so another task locks it
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.sync_unwind_mutex
+
+import io
+
+var mu = new task.Mutex{}
+
+func critical(xs []int) int {
+    if !mu.TryLock() {
+        return -1
+    }
+    defer mu.Unlock()
+    return xs[len(xs)]
+}
+
+async func holder() int! {
+    await task.Yield()
+    return critical([1, 2])
+}
+
+async func other() string {
+    await mu.Lock()
+    defer mu.Unlock()
+    return "other got the mutex"
+}
+
+async func run() {
+    var v = try await holder() catch err {
+        println("holder:", err.Message())
+        return
+    }
+    println(v)
+}
+
+async func main() {
+    await run()
+    println(await other())
+}

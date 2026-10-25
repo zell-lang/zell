@@ -2567,11 +2567,41 @@ typedef struct coro_node {
     void *hdl;
 } coro_node;
 
+/* A synchronous frame's node (ABI.md 8.1): hdl is ZELL_SYNC_FRAME and the
+ * frame's setjmp buffer follows (offset 16). */
+typedef struct sync_node {
+    struct coro_node *prev;
+    void *tag;
+    zell__plat_jmpbuf jb;
+} sync_node;
+_Static_assert(offsetof(sync_node, jb) == 16, "compiled code stores the jump buffer at offset 16");
+
+/* A synchronous frame with an outlined cleanup (ABI.md 8.1): tag is
+ * ZELL_SYNC_CLEANUP, then the frame's cleanup function and its argument
+ * (the frame's stack pointer). */
+typedef struct cleanup_node {
+    struct coro_node *prev;
+    void *tag;
+    void (*fn)(void *sp);
+    void *sp;
+} cleanup_node;
+
 void zell__coro_unwind(void *stop) {
     coro_node *n;
     while ((n = zell_coro_chain) != NULL && (void *)n != stop) {
         zell_coro_chain = n->prev;   /* read before the frame (and n) is freed */
         void *hdl = n->hdl;
+        if (hdl == ZELL_SYNC_CLEANUP) {
+            /* Runs on top of the panicking stack: the frame is intact. */
+            cleanup_node *c = (cleanup_node *)n;
+            c->fn(c->sp);
+            continue;
+        }
+        if (hdl == ZELL_SYNC_FRAME) {
+            /* The frame's landing block runs its cleanup and calls
+             * zell_unwind_resume, which goes on from the next node. */
+            zell__plat_longjmp(((sync_node *)n)->jb);
+        }
         if (hdl) {
             /* LLVM switched-resume frame: word 1 is the destroy function,
              * which takes the frame's unwind path (compiled code). */

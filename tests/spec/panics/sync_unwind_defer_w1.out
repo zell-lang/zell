@@ -1,0 +1,5 @@
+inner deferred 2: owned xx
+inner deferred 1
+middle deferred, 2 names
+work deferred
+caught: panic: runtime error: index out of range [10] with length 3

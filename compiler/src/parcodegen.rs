@@ -19,6 +19,7 @@ use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::module::{Linkage, Module};
 use inkwell::targets::FileType;
+use inkwell::llvm_sys::prelude::LLVMValueRef;
 use inkwell::values::AsValueRef;
 use inkwell::{GlobalVisibility, OptimizationLevel};
 use std::path::{Path, PathBuf};
@@ -115,6 +116,20 @@ pub fn write_object_parallel(module: &Module, opt: OptimizationLevel, path: &Pat
         let p = (0..k).min_by_key(|j| (load[*j], *j)).unwrap();
         load[p] += weights[i];
         assign[i] = p;
+    }
+    // An outlined unwind cleanup (codegen/unwind_lower.rs, attribute
+    // "zell-unwind-cleanup") recovers its frame's slots through labels
+    // local to its function's object: same partition. The function is the
+    // first operand of its `llvm.localrecover` calls.
+    let defined: Vec<inkwell::values::FunctionValue> = module.get_functions().filter(|f| f.count_basic_blocks() > 0).collect();
+    let index: std::collections::HashMap<LLVMValueRef, usize> = defined.iter().enumerate().map(|(i, f)| (f.as_value_ref(), i)).collect();
+    for (i, f) in defined.iter().enumerate() {
+        if f.get_string_attribute(inkwell::attributes::AttributeLoc::Function, "zell-unwind-cleanup").is_none() {
+            continue;
+        }
+        if let Some(parent) = crate::codegen::unwind_parent(*f).and_then(|p| index.get(&p)) {
+            assign[i] = assign[*parent];
+        }
     }
     let bitcode = Arc::new(module.write_bitcode_to_memory().as_slice().to_vec());
     let assign = Arc::new(assign);

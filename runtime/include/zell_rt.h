@@ -555,8 +555,14 @@ void zell_task_run_main(zell_main_ramp_fn ramp, void *res);
  * suspended) restores the caller's context ctx0 like zell_coro_leave. */
 void zell_coro_unwound(zell_task *own, zell_object *ctx0);
 /* The running coroutine frames of this thread, innermost first: nodes
- * { prev, hdl } in the frames (hdl NULL = no destroy). */
+ * { prev, hdl } in the frames (hdl NULL = no destroy), and the nodes of
+ * synchronous frames { prev, ZELL_SYNC_FRAME, jmpbuf } (ABI.md 8.1). */
 extern _Thread_local void *zell_coro_chain;
+#define ZELL_SYNC_FRAME ((void *)1)
+#define ZELL_SYNC_CLEANUP ((void *)2)
+/* The end of a synchronous frame's landing block (ABI.md 8.1): goes on
+ * unwinding the panic with the next frame on the chain. */
+ZELL_NORETURN void zell_unwind_resume(void);
 /* This thread's task state, read and written inline by compiled ramps
  * (ABI.md 10.3, the inlined zell_coro_enter / zell_coro_leave): the
  * current context (owned, 10.8), the current task (owned, 10.11), and the

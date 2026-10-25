@@ -357,7 +357,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             // `inner` of a typed error; its Message() is the whole text).
             let m = self.method_entry(sid, "Unwrap")?;
             let p = self.payload(obj);
-            let cause = self.b.build_call(m, &[p.into()], "").unwrap().try_as_basic_value().left().unwrap();
+            let cause = self.call_fn(m, &[p.into()]).try_as_basic_value().left().unwrap();
             let slot = self.byte_gep(e.into_pointer_value(), 24);
             self.b.build_store(slot, cause).unwrap();
         }
@@ -565,10 +565,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         let mut ma: Vec<BasicMetadataValueEnum> = vec![data.into()];
         ma.extend(vals.iter().map(|v| BasicMetadataValueEnum::from(v.get())));
-        let r = self.b.build_indirect_call(fty, fnp, &ma, "").unwrap().try_as_basic_value().left();
+        // Moved arguments belong to the callee from here on, also if it panics.
         for h in moved_holds {
             self.unhold(h);
         }
+        let r = self.call_site(fty, inkwell::values::AsValueRef::as_value_ref(&fnp), &ma, true).try_as_basic_value().left();
         self.release_temps_from(dep);
         let _ = ty;
         Ok(Val { v: r, owned: true })

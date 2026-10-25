@@ -4,7 +4,7 @@
 use super::{CodeGen, LocalSlot, Val, R};
 use crate::hir::{self, CaptureSource, FuncId, FuncKind, LocalId};
 use crate::types::TypeId;
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{AsValueRef, BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::IntPredicate;
 
 /// Maximum number of pending deferred calls per function activation.
@@ -66,6 +66,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.fs_mut().const_only = const_only;
         self.fs_mut().const_depth = vec![usize::MAX; n];
         self.setup_interior(fid, f);
+        if self.fs().coro.is_some() {
+            // Destroy path (ABI.md 8.1): held temporaries live in slots, and
+            // a personality of its own keeps landing pads out (unwind.rs).
+            self.fs_mut().spill_temps = true;
+            let p = self.personality_fn(super::unwind::PERSONALITY_CORO);
+            unsafe { inkwell::llvm_sys::core::LLVMSetPersonalityFn(fv.as_value_ref(), inkwell::values::AsValueRef::as_value_ref(&p)) };
+        }
         if f.ret != self.prog.types.void {
             let t = self.llty(f.ret);
             let p = self.entry_alloca(t, "ret", true);
@@ -88,6 +95,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.fs_mut().borrowed[p.0 as usize] = true;
                 self.clear_const_only(*p);
             }
+        }
+        if self.fs().coro.is_none() {
+            // After the parameters: borrowed ones own nothing.
+            self.setup_lpads(f);
         }
         self.dbga_enter(f);
         self.block_stmts(&f.body)?;
@@ -122,11 +133,14 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// The exit block: deferred calls, release of locals, return.
     fn emit_exit(&mut self) -> R<()> {
         let open = self.fs().open_defers.clone();
+        // A deferred call that panics unwinds the rest (its landing pads);
+        // the release of the locals does not (a `Drop` panicking there
+        // must not release them again).
         self.run_defers()?;
-        self.release_locals();
+        self.without_invokes(|cg| cg.release_locals());
         if self.fs().plain.is_some() {
-            self.plain_async_return();
-            return Ok(());
+            self.without_invokes(|cg| cg.plain_async_return());
+            return self.emit_unwind_block(open);
         }
         if self.fs().coro.is_some() {
             self.coro_return()?;
@@ -139,9 +153,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             // The destroy path must see the frame as it is now, not as of
             // the last suspension: the flags, the defer array and the locals
             // stay in memory (escaped at entry).
-            let full = !open.is_empty() || self.fs().defers.is_some() || owns;
+            let full = !open.is_empty() || self.fs().defers.is_some() || owns || !self.fs().temp_slots.is_empty();
             self.coro_escape_state(&open, full);
             if full {
+                self.release_temp_slots();
                 self.fs_mut().open_defers = open;
                 self.run_defers()?;
                 self.release_locals();
@@ -159,7 +174,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.b.build_return(None).unwrap();
             }
         }
-        Ok(())
+        self.emit_unwind_block(open)
     }
 
     /// Releases every scoped temporary (last created first), then every
@@ -273,7 +288,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// Runs the deferred calls, last first: the open-coded ones (a function
     /// has either kind, never both) each under its armed flag, then the
     /// heap array.
-    fn run_defers(&mut self) -> R<()> {
+    pub(crate) fn run_defers(&mut self) -> R<()> {
         let open = std::mem::take(&mut self.fs_mut().open_defers);
         for (i, (armed, call)) in open.iter().enumerate().rev() {
             // SAFETY: the pointer was taken from `fs().hir` (a `&'a
@@ -311,7 +326,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let fnp = self.b.build_extract_value(c, 0, "").unwrap().into_pointer_value();
         let env = self.b.build_extract_value(c, 1, "").unwrap();
         let fty = self.ctx.void_type().fn_type(&[self.ptr_ty().into()], false);
-        self.b.build_indirect_call(fty, fnp, &[env.into()], "").unwrap();
+        self.call_site(fty, inkwell::values::AsValueRef::as_value_ref(&fnp), &[env.into()], true);
         self.call_rt("zell_release", &[env.into()]);
         self.b.build_unconditional_branch(check).unwrap();
         self.b.position_at_end(done);
@@ -364,7 +379,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // Locals and cells
     // ------------------------------------------------------------------
 
-    fn local_info(&self, l: LocalId) -> (&'a hir::Local, LocalSlot<'ctx>) {
+    pub(crate) fn local_info(&self, l: LocalId) -> (&'a hir::Local, LocalSlot<'ctx>) {
         let f = self.fs().hir.expect("codegen: local outside a function");
         (&f.locals[l.0 as usize], self.fs().locals[l.0 as usize].expect("codegen: local without slot"))
     }
@@ -617,7 +632,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let res = self.entry_alloca(rty.into(), "res", false);
         self.coro_res_init(ret, res, None);
         args.push(res.into());
-        self.b.build_call(target, &args, "").unwrap();
+        self.call_fn(target, &args);
         self.coro_res_task(ret, res)
     }
 
@@ -672,7 +687,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let lty = self.closure_fn_llty(fty);
         let mut all: Vec<BasicMetadataValueEnum> = vec![env.into()];
         all.extend(args.iter().map(|a| BasicMetadataValueEnum::from(*a)));
-        Ok(self.b.build_indirect_call(lty, fnp, &all, "").unwrap().try_as_basic_value().left())
+        Ok(self.call_site(lty, inkwell::values::AsValueRef::as_value_ref(&fnp), &all, true).try_as_basic_value().left())
     }
 
     /// Panics with `zell_panic_nil` if `p` is NULL.

@@ -66,7 +66,7 @@ fn examples() -> Vec<(String, PathBuf, PathBuf)> {
 fn build_and_run(name: &str, src: &Path, extra: &[&str]) -> Result<String, String> {
     let dir = tmpdir(&format!("{name}{}", extra.join("")));
     let exe = dir.join(name);
-    let b = Command::new(zell()).arg("build").arg(src).arg("-o").arg(&exe).args(extra).output().unwrap();
+    let b = Command::new(zell()).env("ZELL_VERIFY_UNWIND", "1").arg("build").arg(src).arg("-o").arg(&exe).args(extra).output().unwrap();
     if !b.status.success() {
         return Err(format!("build failed:\n{}", String::from_utf8_lossy(&b.stderr)));
     }

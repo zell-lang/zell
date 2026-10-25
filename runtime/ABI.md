@@ -1092,11 +1092,15 @@ that task only, on every platform:
    an SEH unwind (`__builtin_setjmp` is miscompiled for Win64 frames,
    whose frame pointer is offset from the frame address).
 2. **Frame chain.** `_Thread_local void *zell_coro_chain` (exported, read
-   and written by compiled code) lists the coroutine frames running on
-   the thread, innermost first. A node is `{ ptr prev; ptr hdl }` in the
-   frame (an alloca of the coroutine; `hdl` is the frame handle, or NULL
-   when no frame was allocated: `coro.alloc` false, so there is no
-   destroy function). The coroutine pushes its node after `coro.begin`
+   and written by compiled code) lists the coroutine frames and the
+   synchronous frames running on the thread, innermost first. A
+   coroutine's node is `{ ptr prev; ptr hdl }` in the frame (an alloca of
+   the coroutine; `hdl` is the frame handle, or NULL when no frame was
+   allocated: `coro.alloc` false, so there is no destroy function). A
+   synchronous frame's node (item 4a) has a tag in place of `hdl`:
+   `ZELL_SYNC_CLEANUP` (`(void *)2`) for `{ prev, tag, fn, sp }`,
+   `ZELL_SYNC_FRAME` (`(void *)1`) for `{ prev, tag, jmpbuf }` (the jump
+   buffer at offset 16). The coroutine pushes its node after `coro.begin`
    and again whenever it continues after an `await` that suspended or
    tried to (the resume edge of `coro.suspend` and the
    `zell_task_add_continuation`-returned-false edge); it pops it right
@@ -1109,10 +1113,17 @@ that task only, on every platform:
 3. **The panic** (`die` in panic.c, after the debug agent's panic stop):
    the message and the backtrace as text (`zell__plat_backtrace_buf`) are
    kept thread-locally, then every frame on the chain down to the job's
-   start is popped and **destroyed** by calling its LLVM destroy function
-   (word 1 of a switched-resume frame). Then the runtime
-   `__builtin_longjmp`s to `run_job`, which restores the chain and the
-   thread's context and current task as after any job.
+   start is popped, innermost first: a coroutine frame is **destroyed**
+   by calling its LLVM destroy function (word 1 of a switched-resume
+   frame); a synchronous frame's cleanup is **called** (`fn(sp)`, a
+   `ZELL_SYNC_CLEANUP` node) or the frame is **entered** by
+   `zell__plat_longjmp` into its node's buffer (a `ZELL_SYNC_FRAME` node,
+   item 4a), whose landing code ends with `ZELL_NORETURN void
+   zell_unwind_resume(void)`, which goes on with the next node (only
+   thread-locals carry the state: the frames above it are gone). At the job's start the runtime `zell__plat_longjmp`s to
+   `run_job`, which restores the chain and the thread's context and
+   current task as after any job. A message string the panic entry point
+   made itself (`zell_panic_error`) is released once copied.
 4. **The destroy path** (compiler side). Every suspend point's destroy
    edge (`coro.suspend` result 1) goes to one `coro.unwind` block; it is
    only ever reached through the runtime's destroy call, from any
@@ -1130,6 +1141,68 @@ that task only, on every platform:
    each address and a memory clobber): their stores stay in memory and
    are never dropped as dead. Other coroutines escape only
    `coro.awaiting` and skip the defers and locals.
+4a. **Synchronous frames** (compiler side, `codegen/unwind.rs`,
+   `codegen/unwind_lower.rs`). A function that is not a coroutine (a
+   plain `func`, a closure, a plain never-suspending `async func`, 10.3)
+   emits every call that may panic, while it has something to clean up
+   (a `defer`, a local that may own something, a held temporary, a saved
+   context), as an LLVM `invoke` whose cleanup landing pad releases the
+   held temporaries live at that call (the cleanup stack,
+   `codegen/cleanup.rs`, also the operand of `panic(...)`) and branches
+   to the function's unwind block: the armed defers (each disarmed before
+   it runs), the locals as at the normal exit (`Drop` in reverse
+   declaration order), the saved context of a plain async function (as
+   `zell_coro_leave`), `resume`. Releases and the runtime's
+   retain/release, `zell_dbg_*` and string comparisons are plain calls.
+   Arguments moved into a callee leave the caller's cleanup before the
+   call. The optimiser sees the real control flow (values stay in
+   registers, an `invoke` of a callee that cannot panic becomes a call and
+   its landing pad goes); no DWARF or SEH unwinder is used: after
+   optimisation every function that still has an `invoke` is lowered.
+   - Its node is pushed in a block that dominates every `invoke` and lies
+     on no cycle (an early return that reaches no `invoke` pays nothing)
+     and popped before every `ret` when it is the innermost one; a
+     call-site slot (`i32`) holds the landing pad's index, stored before
+     each former `invoke`, and -1 before every other call that may
+     unwind (a panic there is not this frame's to clean up). Values of
+     the body that the landing pads use are stored to stack slots (before
+     the panicking call when only `noreturn`/`cold` calls need them,
+     else after their definition) and the stack slots the landing pads
+     read are accessed volatile.
+   - **x86-64** (Linux, macOS, Windows): the landing pads are outlined
+     into `<f>.unwind(ptr sp)`, which recovers the frame's slots with
+     `llvm.localrecover` (the frame escapes them with `llvm.localescape`
+     and is marked `"stackrealign"`, so the offsets are relative to its
+     stack pointer after the prologue) and switches on the call-site
+     slot. The node is `{ ptr prev; ptr tag = ZELL_SYNC_CLEANUP ((void
+     *)2); ptr fn; ptr sp }` (`fn` = `<f>.unwind`, `sp` =
+     `llvm.stacksave()`); the runtime calls `fn(sp)` on top of the
+     panicking stack, where the frame is still intact, and goes on with
+     the next node.
+   - **Elsewhere** (arm64), or when other code enters a landing region:
+     the node is `{ ptr prev; ptr tag = ZELL_SYNC_FRAME ((void *)1);
+     jmpbuf }` (buffer at offset 16) and the push block ends in the
+     target's setjmp (`llvm.eh.sjlj.setjmp` on x86-64 POSIX: word 0
+     `llvm.frameaddress(0)`, word 2 `llvm.stacksave()`, word 1 written by
+     the intrinsic, what the runtime's `__builtin_longjmp` reads;
+     `_setjmp(buf, NULL)` on Windows x64, `_setjmp(buf)` elsewhere,
+     `returns_twice`, as `zell__plat_setjmp`), whose second return
+     switches on the call-site slot; the landing pads end in
+     `ZELL_NORETURN void zell_unwind_resume(void)` (item 3).
+     `ZELL_UNWIND_SETJMP=1` at build time forces this lowering on x86-64
+     (tests).
+   - Cost on the path that does not panic, per call of a function that
+     keeps a landing pad: the push (a TLS load, four stores) and the pop
+     (a TLS load, a compare, a store), one store per former `invoke` and
+     per other call that may unwind, the stores of the demoted values;
+     state the landing pads read stays in memory (LLVM does not keep it
+     in registers across a loop that may panic). Coroutines keep plain
+     calls: their held temporaries are stored to frame slots (zeroed or
+     flagged off when consumed) that the destroy path releases, and they
+     carry the personality `zell.personality.coro`, different from the
+     `zell.personality` of functions with landing pads, so that the
+     inliner never moves a landing pad into a coroutine (both are
+     removed by the lowering).
 5. `void zell_coro_unwound(zell_task *own, zell_object *ctx0)`: `own`
    NULL (the body never suspended, so it made no task) is
    `zell_coro_leave(ctx0)`; otherwise `own` is completed **as panicked**
@@ -1156,11 +1229,13 @@ that task only, on every platform:
    `zell_string *zell_task_panic_message(const zell_error *)` and
    `zell_task_panic_trace` (+1, `""` when the chain has no task panic)
    are `task.PanicMessage` / `task.PanicTrace`.
-8. **Not unwound**: synchronous frames (plain functions called from a
-   coroutine), C frames of runtime callbacks between the job and the
-   panic (locks they hold stay held), temporaries in the middle of an
-   expression, and coroutine frames elided into their caller's frame
-   (`coro.alloc` false). Their defers do not run and what they own is
+8. **Not unwound**: C frames of runtime callbacks between the job and
+   the panic (locks they hold stay held), coroutine frames elided into
+   their caller's frame (`coro.alloc` false), a synchronous frame whose
+   plain release ran the `Drop` that panicked (item 4a: releases have no
+   landing pad, so that nothing is released twice), and owned values in
+   flight inside one runtime call (an allocation that fails while a
+   container is built). Their defers do not run and what they own is
    leaked; nothing is released twice. A job with a current task whose
    chain holds no task-owning frame (a C callback running Zell code)
    prints the panic and ends the job; its task is not completed.
@@ -1805,17 +1880,15 @@ than a direct call of an async function proven never to suspend (task
 externs, a `Task` from a variable, field, `task.All`/`Any`, a closure,
 interface or function value call, or a may-suspend async function);
 starting from "never suspends" for all, it iterates to the greatest
-fixpoint, so recursion that only awaits itself stays plain. Because
-synchronous frames do not run `defer` / `Drop` when a panic unwinds them
-(8.1, DESIGN.md "Паника"), only functions with **no `defer` and no local
-or temporary owning a value with a destructor** (directly or through
-pointers, slices, maps, tasks or fields) are lowered. `zell check
---dump-hir` prints them as `async(plain) func`, and the LLVM function
-carries the string attribute `"zell-plain-async"`. A panic inside one
-behaves as before (it runs in its caller's task, as a coroutine does
-before its first suspension); optimised builds may inline it, so its
-caller's line can be missing from the backtrace, as for any inlined
-synchronous call (8.2).
+fixpoint, so recursion that only awaits itself stays plain. Every
+never-suspending function is lowered, with `defer`s and destructors too:
+a panic unwinds it as a synchronous frame (8.1 item 4a: defers, `Drop`,
+locals and the saved context). `zell check --dump-hir` prints them as
+`async(plain) func`, and the LLVM function carries the string attribute
+`"zell-plain-async"`. A panic inside one behaves as before (it runs in
+its caller's task, as a coroutine does before its first suspension);
+optimised builds may inline it, so its caller's line can be missing from
+the backtrace, as for any inlined synchronous call (8.2).
 
 `tests/coro_lowering.ll` is a complete, working example. `make test` compiles it
 with `clang -O2` and runs it. It contains four async functions (one awaiting

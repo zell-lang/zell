@@ -131,7 +131,8 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     first and `Drop` is then a no-op. Not needed yet: every stdlib `Close()`
     is synchronous.
 
-28. ✅ **Done (2026-10-24): a panic ends its task, not the process.**
+28. ✅ **Fixed (2026-10-25):** the open half (a): synchronous frames are
+    unwound too (#83). ✅ **Done (2026-10-24): a panic ends its task, not the process.**
     DESIGN.md "Паника", ABI.md 8.1: the runtime destroys the task's
     coroutine frames (defers run, locals and `Drop`s released) and
     completes the task as panicked; `Task<T!>` awaiters get an error
@@ -591,7 +592,21 @@ written by hand), **33** (see 67), **46** (see 78).
     Suggested decision: in a generic body the form is decided at the template
     check from the declared type (`V` a type parameter means comma-ok,
     always).
-83. ❌ **The open half of 28 grew (2026-10-25):** synchronous frames below a
+83. ✅ **Fixed (2026-10-25):** synchronous functions emit the calls that
+    may panic as LLVM `invoke`s with cleanup landing pads (held
+    temporaries, defers, locals, the saved context), so the optimiser sees
+    the real control flow; after optimisation each function that keeps
+    one gets a node on the thread's frame chain (an outlined cleanup
+    called through `llvm.localrecover` on x86-64, a setjmp on arm64; no
+    DWARF/SEH unwinder) and a task panic runs them innermost first, mixed
+    with coroutine frames (ABI.md 8.1 item 4a). The never-suspending
+    lowering no longer excludes `defer`/`Drop`
+    (`tests/spec/panics/sync_unwind_*`, `plain_async_defer_drop`).
+    Left: a panicking `Drop` run by a plain release skips the cleanup of
+    the frame doing the release; a coroutine whose panic before its first
+    suspension is unconditional loses its defers under `--release`
+    (pre-existing, `unwind_defer_drop_mutex` with `--release`).
+    **The open half of 28 grew (2026-10-25):** synchronous frames below a
     task still skip `defer`/`Drop` on panic, and since ef15437 the same holds
     for async functions lowered to plain functions (only those without
     `defer` and `Drop`-owning locals are lowered, but their refcounted

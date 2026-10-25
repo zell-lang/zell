@@ -104,6 +104,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     /// Releases (and zeroes) the pins of interior variable `l`.
+    /// Every pin slot of the function (the unwind path reads them).
+    pub(crate) fn interior_slot_ptrs(&self) -> Vec<PointerValue<'ctx>> {
+        self.fs().interior.as_ref().map(|st| st.pins.iter().flatten().map(|s| s.ptr).collect()).unwrap_or_default()
+    }
+
     pub(crate) fn release_pins(&mut self, l: LocalId) {
         let Some(slots) = self.fs().interior.as_ref().map(|st| st.pins[l.0 as usize].clone()) else { return };
         for s in slots {

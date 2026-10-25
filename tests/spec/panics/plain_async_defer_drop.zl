@@ -1,0 +1,35 @@
+// test: a never-suspending async function with a defer and a Drop local is compiled as a plain function (ABI.md 10.3) and a panic unwinds it as a synchronous frame: its defer runs, its local is dropped and its context is restored; --leak-check stays clean
+// status: passing
+// run-flags: --leak-check
+namespace spec.panics.plain_async_defer_drop
+
+import io
+
+struct Guard {
+    name string
+
+    func Drop() {
+        println("drop", this.name)
+    }
+}
+
+async func check(xs []int, i int) int {
+    var g = Guard{name: "check " + strings.Repeat("!", i)}
+    defer println("check deferred")
+    return xs[i] + len(g.name)
+}
+
+async func work() int! {
+    await task.Yield()
+    var ok = await check([1, 2, 3], 0)
+    println("first check", ok)
+    return await check([1, 2, 3], 7)
+}
+
+async func main() {
+    var v = try await work() catch err {
+        println("caught:", err.Message())
+        return
+    }
+    println(v)
+}

@@ -1,0 +1,33 @@
+// test: (one worker) a panic in a deferred call of a synchronous frame while a task panic unwinds it ends the process: both panics are printed, exit code 2
+// status: passing
+// env: ZELL_WORKERS=1
+// exit: 2
+// stderr: panic: runtime error: index out of range [3] with length 1
+// stderr: panic while unwinding the panic above:
+// stderr: panic: runtime error: index out of range [5] with length 1
+namespace spec.panics.sync_unwind_defer_panics_w1
+
+import io
+
+func cleanup(xs []int) {
+    println("cleanup runs")
+    println(xs[5])
+}
+
+func run(xs []int) int {
+    defer cleanup(xs)
+    return xs[3]
+}
+
+async func work() int! {
+    await task.Yield()
+    return run([1])
+}
+
+async func main() {
+    var v = try await work() catch err {
+        println("not reached:", err.Message())
+        return
+    }
+    println(v)
+}

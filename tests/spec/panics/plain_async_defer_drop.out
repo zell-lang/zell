@@ -1,0 +1,6 @@
+check deferred
+drop check 
+first check 7
+check deferred
+drop check !!!!!!!
+caught: panic: runtime error: index out of range [7] with length 3

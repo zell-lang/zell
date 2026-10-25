@@ -16,6 +16,9 @@ static _Thread_local int t_dying;
 static _Thread_local int t_unwinding;
 static _Thread_local zell_string *t_pmsg, *t_ptrace;
 static _Thread_local int t_pdelivered;
+/* The message string a panic entry point made (zell_panic_error): released
+ * once a task panic copied it. */
+static _Thread_local zell_string *t_msg_owned;
 
 #define TRACE_CAP 16384
 
@@ -71,6 +74,8 @@ void zell__panic_current(zell_string **msg, zell_string **trace) {
     if (t_unwinding) t_pdelivered++;
 }
 
+static ZELL_NORETURN void unwind_finish(void);
+
 /* `trace` NULL: capture this thread's backtrace (a fresh panic). */
 static ZELL_NORETURN __attribute__((noinline)) void die_traced(const char *msg, int64_t len, const char *trace, int64_t tlen, int quiet) {
     /* testing.Panics: a capture scope on this thread takes the panic. */
@@ -102,6 +107,10 @@ static ZELL_NORETURN __attribute__((noinline)) void die_traced(const char *msg, 
          * stops before anything is unwound. */
         if (!quiet && __atomic_load_n(&zell_dbg_on, __ATOMIC_RELAXED) && zell__dbg_panic_fn) zell__dbg_panic_fn(msg, len);
         t_pmsg = zell_string_new(msg, len);
+        if (t_msg_owned) {
+            zell_release(t_msg_owned);
+            t_msg_owned = NULL;
+        }
         if (trace) {
             t_ptrace = zell_string_new(trace, tlen);
         } else {
@@ -117,17 +126,31 @@ static ZELL_NORETURN __attribute__((noinline)) void die_traced(const char *msg, 
         }
         t_unwinding = 1;
         t_pdelivered = 0;
-        zell__coro_unwind(uw->chain0);
-        t_unwinding = 0;
-        /* No coroutine of a task took it (the job's task is not a compiled
-         * coroutine on this stack): nobody will observe it. */
-        if (!t_pdelivered) zell__panic_print(t_pmsg, t_ptrace);
-        zell_release(t_pmsg);
-        zell_release(t_ptrace);
-        t_pmsg = t_ptrace = NULL;
-        zell__plat_longjmp(uw->jb);
+        unwind_finish();
     }
     die_final(msg, len, trace, tlen, quiet);
+}
+
+/* Unwinds the rest of the frame chain of the job, then jumps back to its
+ * start. A synchronous frame on the chain is entered by a long jump (its
+ * landing block cleans it up and calls zell_unwind_resume, which comes
+ * back here), so this frame may be gone: only thread-locals are used. */
+static ZELL_NORETURN void unwind_finish(void) {
+    zell__job_unwind *uw = zell__job_unwind_tls;
+    zell__coro_unwind(uw->chain0);
+    t_unwinding = 0;
+    /* No coroutine of a task took it (the job's task is not a compiled
+     * coroutine on this stack): nobody will observe it. */
+    if (!t_pdelivered) zell__panic_print(t_pmsg, t_ptrace);
+    zell_release(t_pmsg);
+    zell_release(t_ptrace);
+    t_pmsg = t_ptrace = NULL;
+    zell__plat_longjmp(uw->jb);
+}
+
+void zell_unwind_resume(void) {
+    if (!t_unwinding) zell_panic("zell_unwind_resume outside a panic");
+    unwind_finish();
 }
 
 static ZELL_NORETURN __attribute__((noinline)) void die(const char *msg, int64_t len) {
@@ -172,6 +195,7 @@ void zell_panic_str(const zell_string *msg) {
 
 void zell_panic_error(const zell_error *err) {
     zell_string *m = zell_error_message(err);
+    t_msg_owned = m;
     die(zell_string_data(m), zell_string_len(m));
 }
 

@@ -1,0 +1,7 @@
+leaf deferred
+drop leaf
+mid deferred
+outer deferred
+drop outer
+work deferred
+caught: panic: deep panic at leaf

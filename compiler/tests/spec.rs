@@ -252,7 +252,7 @@ fn check(case: &Case) -> Result<(), String> {
     let result = (|| {
         if let Some(kw) = &case.dirs.error {
             let mut c = Command::new(zell());
-            c.current_dir(repo()).arg("build").arg(&rel_src).arg("-o").arg(&exe).args(&case.dirs.build_flags);
+            c.current_dir(repo()).env("ZELL_VERIFY_UNWIND", "1").arg("build").arg(&rel_src).arg("-o").arg(&exe).args(&case.dirs.build_flags);
             let o = run_with_timeout(c, Duration::from_secs(60))?;
             if o.code == Some(0) {
                 return Err(format!("expected a compile error containing `{kw}`, but the build succeeded"));
@@ -280,7 +280,7 @@ fn check(case: &Case) -> Result<(), String> {
         };
         let out = if case.dirs.run_flags.is_empty() {
             let mut c = Command::new(zell());
-            c.current_dir(repo()).arg("build").arg(&rel_src).arg("-o").arg(&exe).args(&case.dirs.build_flags);
+            c.current_dir(repo()).env("ZELL_VERIFY_UNWIND", "1").arg("build").arg(&rel_src).arg("-o").arg(&exe).args(&case.dirs.build_flags);
             let b = run_with_timeout(c, Duration::from_secs(60))?;
             if b.code != Some(0) {
                 return Err(format!("build failed:\n{}", b.stderr.trim_end()));
@@ -298,7 +298,7 @@ fn check(case: &Case) -> Result<(), String> {
             run_with_timeout(c, RUN_TIMEOUT)?
         } else {
             let mut c = Command::new(zell());
-            c.current_dir(repo()).env("ZELL_NO_BACKTRACE", "1").arg("run").arg(&rel_src).args(&case.dirs.run_flags).arg("--").args(&case.dirs.args);
+            c.current_dir(repo()).env("ZELL_NO_BACKTRACE", "1").env("ZELL_VERIFY_UNWIND", "1").arg("run").arg(&rel_src).args(&case.dirs.run_flags).arg("--").args(&case.dirs.args);
             for (k, v) in &case.dirs.env {
                 if v.is_empty() {
                     c.env_remove(k);
