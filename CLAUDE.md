@@ -85,7 +85,7 @@ warning-free and the runtime `-Werror` clean.
 Done: lexer/parser, sema + HIR, LLVM codegen (structs, interfaces, enums,
 closures, defer, errors, async via LLVM coroutines), C runtime + core
 stdlib, `zell build/run/check/test/fmt`, package manifests/workspaces/lock,
-LSP (3.17 conformance in `docs/LSP_CONFORMANCE.md`, lints L0001–L0009,
+LSP (3.17 conformance in `docs/LSP_CONFORMANCE.md`, lints L0001–L0010,
 refactorings) + VS Code client, IDEA plugin (`zell-lang/zell-idea-plugin`,
 CI releases `YYYY.M.<build>`), examples, benchmarks, performance wave 1–2
 (`agents/prompts/perf-wave-3.md` has every item's numbers), language
