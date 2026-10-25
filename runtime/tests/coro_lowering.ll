@@ -38,8 +38,9 @@
 ; from res.value).
 ;
 ;
-; `work` allocates its frame the way the compiler does (not zeroed); the
-; other functions use the zeroing zell_coro_frame_alloc.
+; `work` is written the way the compiler emits it (zell_coro_enter /
+; zell_coro_leave inline on zell_coro_tls, ABI.md 10.2, a frame that is
+; not zeroed); the other functions use the equivalent runtime calls.
 ;
 ; Protocol: `void @f(params, ptr %res)` with %res -> { ptr task; T value }.
 ; The ramp stores the coroutine's Task<T> (+1) into res.task when the body
@@ -67,6 +68,7 @@ declare ptr  @zell_task_delay(i64)
 declare void @zell_coro_resume(ptr)
 declare ptr  @zell_coro_frame_alloc(i64)
 declare ptr  @zell_coro_frame_alloc_uninit(i64)
+@zell_coro_tls = external thread_local global { ptr, ptr, i64, i32, i32 }   ; ctx, cur, orphan_seq, orphan_on
 declare void @zell_coro_frame_free(ptr)
 declare void @zell_retain(ptr)
 declare void @zell_release(ptr)
@@ -109,7 +111,28 @@ begin:
   %memphi = phi ptr [ null, %entry ], [ %mem, %alloc ]
   %hdl  = call ptr @llvm.coro.begin(token %id, ptr %memphi)
   store ptr null, ptr %task.slot
-  %ctx0 = call ptr @zell_coro_enter(ptr %mark.slot)   ; +1, and the hook mark for zell_task_lazy
+  ; zell_coro_enter(%mark.slot) inline, as the compiler emits it: the hook
+  ; mark of the current task (or the orphan number, recording on), and the
+  ; current context, +1
+  %cur = load ptr, ptr getelementptr inbounds (i8, ptr @zell_coro_tls, i64 8)
+  %has.cur = icmp ne ptr %cur, null
+  br i1 %has.cur, label %enter.task, label %enter.orphan
+
+enter.task:
+  %seq.p = getelementptr inbounds i8, ptr %cur, i64 144
+  %seq = load atomic i64, ptr %seq.p monotonic, align 8
+  store i64 %seq, ptr %mark.slot
+  br label %enter.ctx
+
+enter.orphan:
+  store i32 1, ptr getelementptr inbounds (i8, ptr @zell_coro_tls, i64 24)
+  %oseq = load i64, ptr getelementptr inbounds (i8, ptr @zell_coro_tls, i64 16)
+  store i64 %oseq, ptr %mark.slot
+  br label %enter.ctx
+
+enter.ctx:
+  %ctx0 = load ptr, ptr @zell_coro_tls
+  call void @zell_retain(ptr %ctx0)
   store ptr %ctx0, ptr %ctx.slot
   ; 2. body: `await task.Delay(5)` (result type void)
   %d = call ptr @zell_task_delay(i64 5)
@@ -152,7 +175,9 @@ d.ready:
 
 fin.sync:                                   ; never suspended: result and NULL task to the caller
   %ctx1 = load ptr, ptr %ctx.slot
-  call void @zell_coro_leave(ptr %ctx1)
+  %ctx.old = load ptr, ptr @zell_coro_tls      ; zell_coro_leave(%ctx1) inline
+  store ptr %ctx1, ptr @zell_coro_tls
+  call void @zell_release(ptr %ctx.old)
   %s.rt = getelementptr inbounds %res.i64, ptr %res, i64 0, i32 0
   store ptr null, ptr %s.rt
   %s.rv = getelementptr inbounds %res.i64, ptr %res, i64 0, i32 1

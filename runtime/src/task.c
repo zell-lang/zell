@@ -190,14 +190,21 @@ static _Thread_local post_batch *t_post_batch;
 static void post_batch_flush(post_batch *b);
 static _Thread_local worker *t_w;   /* this thread's worker, NULL on other threads */
 
-/* The context of the code running on this thread (owned reference, NULL =
- * empty). Jobs carry the context they were posted with; see ABI.md 10.8. */
-static _Thread_local zell_object *t_ctx;
-
-/* The task whose code runs on this thread (owned reference, NULL = none):
- * the parent of tasks created now and the target of cancellation hooks.
- * Travels with jobs and continuations like t_ctx; see ABI.md 10.11. */
-static _Thread_local zell_task *t_cur;
+/* This thread's task state (exported: compiled ramps inline
+ * zell_coro_enter / zell_coro_leave on it, ABI.md 10.3).
+ * t_ctx: the context of the code running on this thread (owned reference,
+ * NULL = empty). Jobs carry the context they were posted with; see ABI.md
+ * 10.8.
+ * t_cur: the task whose code runs on this thread (owned reference, NULL =
+ * none): the parent of tasks created now and the target of cancellation
+ * hooks. Travels with jobs and continuations like t_ctx; see ABI.md 10.11.
+ * t_orphan_on / t_orphan_seq: below (orphan cancel hooks). */
+_Thread_local zell_coro_tls_t zell_coro_tls;
+_Static_assert(offsetof(zell_coro_tls_t, ctx) == 0 && offsetof(zell_coro_tls_t, cur) == 8 && offsetof(zell_coro_tls_t, orphan_seq) == 16 && offsetof(zell_coro_tls_t, orphan_on) == 24, "ABI.md 10.3: zell_coro_tls layout");
+#define t_ctx (zell_coro_tls.ctx)
+#define t_cur (zell_coro_tls.cur)
+#define t_orphan_seq (zell_coro_tls.orphan_seq)
+#define t_orphan_on (zell_coro_tls.orphan_on)
 static void orphans_clear(void);   /* cancel hooks with no owner (below) */
 
 /* ---- job records ---- */
@@ -1059,6 +1066,10 @@ struct zell_task {
     int32_t panic_filled;
     unsigned char slot[];       /* result_size bytes (8-aligned) */
 };
+
+/* The word compiled code reads inline (ABI.md 10.2 "Task layout"): the
+ * ramp's cancel-hook mark. Moving it is an ABI change. */
+_Static_assert(offsetof(struct zell_task, hook_seq) == 144, "ABI.md 10.2: task layout");
 
 /* A thread blocked in zell_task_await, on its stack. It parks on its own
  * (thread-local) mutex and condition variable: a process-wide condition
@@ -2200,10 +2211,8 @@ static void hook_add(zell_task *t, hook *h) {
  * recording stops) at the end of every job, at a blocking await and at
  * shutdown, where no such body can still claim them (they could never be
  * cancelled anyway). */
-static _Thread_local int32_t t_orphan_on;
 static _Thread_local hook *t_orphans;
 static _Thread_local int32_t t_norphans;
-static _Thread_local int64_t t_orphan_seq;
 
 static void hooks_free_list(hook *h) {
     while (h) { hook *n = h->next; hook_free(h); h = n; }

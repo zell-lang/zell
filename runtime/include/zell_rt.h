@@ -557,6 +557,19 @@ void zell_coro_unwound(zell_task *own, zell_object *ctx0);
 /* The running coroutine frames of this thread, innermost first: nodes
  * { prev, hdl } in the frames (hdl NULL = no destroy). */
 extern _Thread_local void *zell_coro_chain;
+/* This thread's task state, read and written inline by compiled ramps
+ * (ABI.md 10.3, the inlined zell_coro_enter / zell_coro_leave): the
+ * current context (owned, 10.8), the current task (owned, 10.11), and the
+ * orphan cancel-hook link number and recording flag (10.11). Layout fixed:
+ * ctx +0, cur +8, orphan_seq +16, orphan_on +24 (int32). */
+typedef struct zell_coro_tls_t {
+    zell_object *ctx;
+    zell_task *cur;
+    int64_t orphan_seq;
+    int32_t orphan_on;
+    int32_t _pad;
+} zell_coro_tls_t;
+extern _Thread_local zell_coro_tls_t zell_coro_tls;
 /* Frame-linked await (ABI.md 10.3): a directly awaited coroutine that
  * suspends with its awaiter's handle in the first word of its result slot
  * `{ ptr word; T value }` makes no task; it leaves ZELL_LINK_LINKED in the

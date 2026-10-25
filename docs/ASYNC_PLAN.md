@@ -258,6 +258,29 @@ Expected gains are derived from the profile shares and counts above;
 - Moves: await_chain sync (frame alloc/free/memset 18.4%, ctx 4.4%), every
   async call with a suspend point.
 - Expected: sync 130 -> ~95 ms. Risk medium. Size 4 h.
+- Done (2026-10-25). (a) Frames come from `zell_coro_frame_alloc_uninit`.
+  The audit of the destroy path (it also runs for a frame that panics
+  before its first suspension, from the frame chain) found two kinds of
+  slots that only a suspension writes: the promoted copies of `coro.task`
+  that LLVM spills per suspend point (the task slot now escapes like the
+  locals, so destroy reads the NULL stored at entry) and LLVM's **suspend
+  index**, which the destroy function dispatches on whenever its destroy
+  edges differ (always in unoptimised code, 2 of 135 frames at O2 in the
+  async/panics specs). After optimisation the compiler gives every frame
+  whose destroy function loads the index (or cannot be identified) the
+  zeroing allocator. Everything else the destroy path reads (awaiting
+  slot, locals, drop and defer flags, defer count, ret slot, pins, the
+  linked word in `res`, `ctx.slot`, the chain node) is stored at entry.
+  Checked with `ZELL_FRAME_POISON=1` (0xA5 fill) on the async and panics
+  specs at O0 and O2, with and without the ASan runtime. (b)
+  `zell_coro_enter` / `zell_coro_leave` are inlined on the exported
+  `zell_coro_tls` (ABI.md 10.2), including the bug 42 mark (task
+  `hook_seq` at +144, or the orphan number). Measured: (a) alone 132 ->
+  131 ms (the memset was 3%; the allocator calls stay), (a)+(b) sync 132
+  -> 94-97 ms, yield 19 -> 14 ms (Go 10 / 7). Left: `zell_coro_frame_free`
+  + `_alloc_uninit` are 32% of the sync phase (heap free path and page
+  churn of a 1000-deep chain); a per-thread frame cache with a sized free
+  would take most of it.
 
 ### C4. Inline fast paths for done tasks and the free mutex (codegen + ABI)
 - Change: emit the `state == TASK_DONE` test inline (offset already published in
@@ -266,7 +289,6 @@ Expected gains are derived from the profile shares and counts above;
   with the runtime call only on the slow path.
 - Moves: mutex uncontended (71 vs 34 ms: 3 calls per iteration), every `await`
   of a completed task. Expected uncontended -> <= 1.3x Go. Risk low. Size 3 h.
-
 Not pursued: cheaper local pinning (measured 0); fewer biased-RC atomics in
 frames (frames are not refcounted; the hot `zell_release` is task objects,
 removed by C2/R2); a malloc-free global queue (after C1 the global queue

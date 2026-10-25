@@ -1400,9 +1400,9 @@ built as `*_async` variants that return a `zell_task *`.
 | `bool zell_sched_is_worker(void)` | whether the current thread is a worker |
 | `void zell_coro_resume(void *frame)` | resumes an LLVM switched-resume coroutine. It is exactly what `llvm.coro.resume` lowers to: it calls the function pointer stored in the first word of the frame. Pass `@zell_coro_resume` as `resume_fn` and the coroutine handle as `frame` |
 | `zell_task *zell_task_new(int64_t result_size, const zell_value_ops *ops)` | a new **pending** task, +1, attached under the current task and made current (10.11). `result_size` is `sizeof(T)` (0 for `Task<void>`). `ops` describes ownership of the result. (C code wrapping a callback uses `zell_task_new_plain`; compiled coroutines use `zell_task_lazy`) |
-| `zell_object *zell_coro_enter(int64_t *mark)` | the ramp's first call (10.3): returns the current context, **+1** (as `zell_task_get_ctx`), and stores in `*mark` the current task's cancel-hook link number (with no current task: the thread's orphan-hook number, and the thread counts a body that runs before its first suspension with no task, until its `zell_task_lazy`, `zell_coro_leave` or `zell_coro_defer`) |
+| `zell_object *zell_coro_enter(int64_t *mark)` | the ramp's first call (10.3): returns the current context, **+1** (as `zell_task_get_ctx`), and stores in `*mark` the current task's cancel-hook link number (with no current task: the thread's orphan-hook number, and the thread counts a body that runs before its first suspension with no task, until its `zell_task_lazy`, `zell_coro_leave` or `zell_coro_defer`). Compiled ramps inline it on `zell_coro_tls` (below) |
 | `zell_task *zell_task_lazy(zell_task *t, int64_t result_size, const zell_value_ops *ops, zell_object *ctx0, int64_t mark)` | the coroutine's own task at its first suspension (10.3): returns `t` if it is not NULL; otherwise a new pending task attached under the current task and made current, like `zell_task_new`, whose saved caller context is `ctx0` (**+1, consumed**; from `zell_coro_enter` at the start of the ramp). The cancel hooks linked on the current task (or, with none, on the thread's orphan list) after `mark` (from `zell_coro_enter`) move to the new task: the waits the body started before suspending are cancelled with it (a `task.Any` loser). A new task is returned with **two** references: the frame's and the one the ramp hands to its caller |
-| `void zell_coro_leave(zell_object *ctx0)` | a coroutine that never suspended (so made no task) returns: `ctx0` (+1, consumed) is the current context again, so whatever the body set does not leak into the caller (10.8) |
+| `void zell_coro_leave(zell_object *ctx0)` | a coroutine that never suspended (so made no task) returns: `ctx0` (+1, consumed) is the current context again, so whatever the body set does not leak into the caller (10.8). Inlined by compiled code: `old = tls.ctx; tls.ctx = ctx0; zell_release(old)` |
 | `zell_task *zell_task_completed(int64_t result_size, const zell_value_ops *ops, const void *result)` | an already **done** plain task, +1, holding `result` (`result_size` bytes copied; the slot takes over the reference, nothing is retained). Used by callers that keep the `Task<T>` of an async call that completed synchronously |
 | `void zell_task_complete(zell_task *t, const void *result)` | stores the result (copies `result_size` bytes from `result`, which is borrowed: the task **retains** it with `ops`; `result` may be NULL for void tasks or a zero result), marks the task done, wakes blocking waiters, and posts the continuations. **Panics `task completed twice`** on a second call. After it returns, `t` may already have been freed by another thread unless the caller still owns a reference |
 | `bool zell_task_is_done(const zell_task *t)` | acquire-load of the state |
@@ -1420,6 +1420,31 @@ built as `*_async` variants that return a `zell_task *`.
 | `zell_task *zell_task_done(void)` | the **immortal completed `Task<void>`**: what an operation that did not have to wait returns (`Delay(0)`, `Mutex.Lock` of a free mutex). Awaiting it takes the `zell_task_is_done` fast path of 10.3; retain and release are no-ops; it is never cancelled (it is done) and must never be completed. +1 nominally |
 | `zell_task *zell_task_all(zell_task *const *tasks, int64_t n)` | `Task<void>` that completes once every task in the array has completed. `n == 0` returns a completed task. Read the individual results from the input tasks. +1 |
 | `zell_task *zell_task_any(zell_task *const *tasks, int64_t n)` | task whose 8-byte result is the `int64_t` **index** of the first input to complete. `n` must be at least 1. +1 |
+
+**Task layout.** Compiled code reads these words of a task inline (the
+offsets are the same on every supported target; `task.c` checks them with
+`_Static_assert`, and `zell_debug_task_layout` publishes state and slot for
+the debuggers, 20):
+
+| offset | word | read by |
+|---|---|---|
+| +144 | `int64 hook_seq`: the task's cancel-hook link number; relaxed load | the inlined `zell_coro_enter` (the ramp's mark) |
+
+**Thread state for inlined ramps.** `extern _Thread_local zell_coro_tls_t
+zell_coro_tls` (same TLS model as `zell_coro_chain`: native TLS everywhere,
+also on Windows, `docs/PLATFORMS.md`) is the thread's current context and
+task as the runtime keeps them:
+
+| offset | field | meaning |
+|---|---|---|
+| +0 | `zell_object *ctx` | the current context (owned, 10.8) |
+| +8 | `zell_task *cur` | the current task (owned, 10.11), NULL = none |
+| +16 | `int64_t orphan_seq` | the orphan cancel-hook link number (10.11) |
+
+Compiled code reads `cur`, `orphan_seq` and `ctx`, writes `orphan_on = 1`
+(the inlined `zell_coro_enter`: `mark = cur ? cur->hook_seq : orphan_seq`,
+recording on when `cur` is NULL; `ctx`, retained) and swaps `ctx` (the
+inlined `zell_coro_leave`). Nothing else touches it outside the runtime.
 
 **Task ownership rules**
 
@@ -1460,7 +1485,7 @@ entry:
   mem   = need ? zell_coro_frame_alloc_uninit(llvm.coro.size.i64()) : null   ; not zeroed (rules below)
   hdl   = llvm.coro.begin(id, mem)
   store null -> task.slot
-  store zell_coro_enter(mark.slot) -> ctx.slot     ; +1
+  store zell_coro_enter(mark.slot) -> ctx.slot     ; +1 (inline on zell_coro_tls, 10.2)
   ... body ...
 
 ; each `x = await e` (e : Task<U>):

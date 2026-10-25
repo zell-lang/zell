@@ -49,6 +49,8 @@ use inkwell::IntPredicate;
 
 /// States of a result slot's `state` word (ABI.md 10.3, `ZELL_LINK_*`).
 const LINK_LINKED: u64 = 1;
+/// Byte offset of a task's cancel-hook link number (ABI.md 10.2 "Task layout").
+const TASK_HOOK_SEQ_OFF: u64 = 144;
 
 impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// Calls intrinsic `name` (non-overloaded) with raw arguments.
@@ -114,6 +116,76 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         g.as_pointer_value()
     }
 
+    /// The thread-local `zell_coro_tls` (ABI.md 10.3): `{ ctx, cur,
+    /// orphan_seq, orphan_on }`, read and written by the inlined
+    /// `zell_coro_enter` / `zell_coro_leave`.
+    fn coro_tls(&mut self, field: u32) -> PointerValue<'ctx> {
+        let g = match self.module.get_global("zell_coro_tls") {
+            Some(g) => g,
+            None => {
+                let i32t = self.ctx.i32_type();
+                let st = self.ctx.struct_type(&[self.ptr_ty().into(), self.ptr_ty().into(), self.i64_ty().into(), i32t.into(), i32t.into()], false);
+                let g = self.module.add_global(st, None, "zell_coro_tls");
+                g.set_thread_local(true);
+                g.set_linkage(inkwell::module::Linkage::External);
+                g
+            }
+        };
+        let off = [0u64, 8, 16, 24][field as usize];
+        self.byte_gep(g.as_pointer_value(), off)
+    }
+
+    /// `zell_coro_enter(mark)` inline (ABI.md 10.3): the current task's
+    /// cancel-hook link number into `mark` (with no task: the thread's
+    /// orphan number, and orphan recording on), and the current context,
+    /// retained (+1).
+    fn coro_enter_inline(&mut self, mark: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let i64t = self.i64_ty();
+        let cur = self.coro_tls(1);
+        let cur = self.b.build_load(self.ptr_ty(), cur, "cur").unwrap().into_pointer_value();
+        let has = self.b.build_is_not_null(cur, "").unwrap();
+        let bt = self.block("enter.task");
+        let bo = self.block("enter.orphan");
+        let join = self.block("enter.ctx");
+        self.b.build_conditional_branch(has, bt, bo).unwrap();
+        self.b.position_at_end(bt);
+        let hp = self.byte_gep(cur, TASK_HOOK_SEQ_OFF);
+        let m1 = self.atomic_load(i64t.into(), hp, 8, inkwell::AtomicOrdering::Monotonic, "hook.seq");
+        self.b.build_store(mark, m1).unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(bo);
+        let on = self.coro_tls(3);
+        self.b.build_store(on, self.ctx.i32_type().const_int(1, false)).unwrap();
+        let sp = self.coro_tls(2);
+        let m2 = self.b.build_load(i64t, sp, "orphan.seq").unwrap();
+        self.b.build_store(mark, m2).unwrap();
+        self.b.build_unconditional_branch(join).unwrap();
+        self.b.position_at_end(join);
+        let cp = self.coro_tls(0);
+        let ctx = self.b.build_load(self.ptr_ty(), cp, "ctx").unwrap().into_pointer_value();
+        self.call_rt("zell_retain", &[ctx.into()]);
+        ctx
+    }
+
+    /// An atomic load of `ty` from `p` (aligned to `align` bytes).
+    fn atomic_load(&mut self, ty: inkwell::types::BasicTypeEnum<'ctx>, p: PointerValue<'ctx>, align: u32, ord: inkwell::AtomicOrdering, name: &str) -> BasicValueEnum<'ctx> {
+        use inkwell::values::BasicValue;
+        let v = self.b.build_load(ty, p, name).unwrap();
+        let i = v.as_instruction_value().unwrap();
+        i.set_alignment(align).unwrap();
+        i.set_atomic_ordering(ord).unwrap();
+        v
+    }
+
+    /// `zell_coro_leave(ctx0)` inline (ABI.md 10.3): `ctx0` (+1, consumed)
+    /// is the current context again, the one current until now released.
+    fn coro_leave_inline(&mut self, ctx0: PointerValue<'ctx>) {
+        let cp = self.coro_tls(0);
+        let old = self.b.build_load(self.ptr_ty(), cp, "ctx.old").unwrap();
+        self.b.build_store(cp, ctx0).unwrap();
+        self.call_rt("zell_release", &[old.into()]);
+    }
+
     /// Splits a `coro.task` slot value: the frame's own task (NULL when it
     /// has none) and its awaiter when the frame is linked (the slot then
     /// holds the awaiter's handle + 1; NULL otherwise).
@@ -176,8 +248,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.build_store(task_slot, null).unwrap();
         let ctx_slot = self.entry_alloca(self.ptr_ty().into(), "coro.ctx", false);
         let mark_slot = self.entry_alloca(self.i64_ty().into(), "coro.mark", false);
-        let ctx0 = self.call_rt_v("zell_coro_enter", &[mark_slot.into()]);
+        let ctx0 = self.coro_enter_inline(mark_slot);
         self.b.build_store(ctx_slot, ctx0).unwrap();
+        // The inlined enter ends `begin`: the zeroing stores go after it.
+        let after = self.b.get_insert_block().unwrap();
+        self.fs().init_b.position_at_end(after);
         let res = func.get_last_param().unwrap().into_pointer_value();
         let begin_end = self.b.get_insert_block().unwrap();
         let cleanup = self.block("coro.cleanup");
@@ -258,7 +333,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             self.b.build_store(vp, v).unwrap();
         }
         let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
-        self.call_rt("zell_coro_leave", &[ctx0.into()]);
+        self.coro_leave_inline(ctx0.into_pointer_value());
         let next = self.coro_next_global();
         self.b.build_store(next, lk).unwrap();
         self.b.build_unconditional_branch(co.cleanup).unwrap();
@@ -266,7 +341,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // no retain) and a NULL task into the caller's slot.
         self.b.position_at_end(fin_sync);
         let ctx0 = self.b.build_load(self.ptr_ty(), co.ctx_slot, "").unwrap();
-        self.call_rt("zell_coro_leave", &[ctx0.into()]);
+        self.coro_leave_inline(ctx0.into_pointer_value());
         let tp = self.coro_res_field(co.ret, co.res, 0);
         self.b.build_store(tp, self.ptr_ty().const_null()).unwrap();
         if let Some(t) = rt {
@@ -632,7 +707,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let repush = self.block("link.repush");
         self.b.build_conditional_branch(now, lb, rb).unwrap();
         self.b.position_at_end(lb);
-        self.call_rt("zell_coro_leave", &[ctxr.into()]);
+        self.coro_leave_inline(ctxr);
         self.b.build_unconditional_branch(susp).unwrap();
         // Publishes the chain: no frame access from here to the suspend.
         self.b.position_at_end(rb);

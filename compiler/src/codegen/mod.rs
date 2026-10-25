@@ -160,7 +160,9 @@
 //! reads are stored and escaped at entry; [`coro_frame_fixup`] switches a
 //! frame whose destroy function loads LLVM's suspend index to the zeroing
 //! `zell_coro_frame_alloc` after optimisation) and go back with
-//! `zell_coro_frame_free`.
+//! `zell_coro_frame_free`. The ramp's `zell_coro_enter` / `zell_coro_leave`
+//! are inlined on the thread-local `zell_coro_tls` `{ ctx, cur,
+//! orphan_seq, orphan_on }` (ABI.md 10.2).
 //! Callers awaiting a direct call outside a coroutine read `res.value` when
 //! `res.task` is NULL; callers keeping the task, and thunks of async
 //! functions used as values, pass a NULL awaiter and materialise a done
