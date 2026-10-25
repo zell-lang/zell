@@ -1,0 +1,21 @@
+// test: a task.Delay that loses task.Any is cancelled with its timer, so main may exit while it was pending and --leak-check reports nothing (DESIGN.md «Асинхронность»)
+// status: passing
+// run-flags: --leak-check
+// no-stderr: leak
+namespace spec.async2.any_delay_loser_leak
+
+import io
+import task
+
+async func fast() {
+    await task.Delay(1)
+}
+
+async func main() {
+    await task.Any(fast(), task.Delay(300))
+    println("fast won")
+    for _ in 0..3 {
+        await task.Any(task.Delay(10000), fast(), task.Delay(5000))
+    }
+    println("three more")
+}

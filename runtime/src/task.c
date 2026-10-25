@@ -1955,10 +1955,13 @@ static void timer_insert(int64_t ms, zell_task *t, zell_task *cancel);
 
 static void delay_cancelled(zell_task *w) { zell_task_rt_fire(w); }
 
-/* A delay completes early when the current task is cancelled (10.11). */
+/* A delay completes early when the current task is cancelled (10.11), and
+ * when the delay task itself is (a loser of task.Any): its timer is
+ * dropped at once with the reference it holds, not when it would fire. */
 zell_task *zell_task_delay(int64_t ms) {
     if (ms <= 0) return zell_task_done();
     zell_task *t = task_new_ex(0, NULL, 0);
+    t->cancel_fn = delay_cancelled;
     timer_insert(ms, t, NULL);
     cancel_hook(delay_cancelled, t);
     return t;
