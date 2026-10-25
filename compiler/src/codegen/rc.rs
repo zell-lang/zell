@@ -272,7 +272,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let nb = if retain { b.build_int_add(bias, one16, "").unwrap() } else { b.build_int_sub(bias, one16, "").unwrap() };
         let st16 = b.build_store(obj, nb).unwrap();
         st16.set_alignment(8).unwrap();
-        st16.set_atomic_ordering(inkwell::AtomicOrdering::Monotonic).unwrap();
+        // A release store for a release (like rc.c `store_b`): a thread that
+        // later drops the last reference (acquire CAS on the whole word) must
+        // see every write this thread made before; free on x86 (a plain mov).
+        st16.set_atomic_ordering(if retain { inkwell::AtomicOrdering::Monotonic } else { inkwell::AtomicOrdering::Release }).unwrap();
         b.build_unconditional_branch(done).unwrap();
         b.position_at_end(plain);
         let one = i64t.const_int(1, false);

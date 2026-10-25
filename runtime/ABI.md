@@ -208,7 +208,7 @@ biased   bit 62 WEAK | bit 60 BIASED | bit 59 QUEUED | bits 47..58 owner slot
 A biased object belongs to the thread holding owner slot 1..4095; its
 count is `B + S`. **B** (the owner's part, the 16-bit half-word at the
 object's address on these little-endian targets) is changed only by the
-owner, with plain (relaxed atomic) 16-bit loads and stores; **S** (the shared
+owner, with plain (relaxed atomic) 16-bit loads and stores (release stores when B drops); **S** (the shared
 part, signed, stored with an excess of 2^30) is changed by everyone else
 with 64-bit atomic RMW of `±1 << 16`, which never touches B. The thread-local
 `zell_rc_owner` (`int64_t`, exported by the runtime) is the owner's tag
@@ -360,7 +360,8 @@ stores `word + 1` (retain, `word >= 0`) or `word - 1` (release,
 `2 <= word < 2^57`, below every flag bit). Otherwise, if the word is a
 biased count owned by this thread (`((uint64_t)word >> 47) & 0x16FFF ==
 zell_rc_owner`, a thread-local load), it stores the 16-bit B `+ 1` (retain,
-`B != 0xFFFF`) or `- 1` (release, `B >= 2`) at the object's address. Every
+`B != 0xFFFF`, relaxed) or `- 1` (release, `B >= 2`, a release store: the
+thread that later frees the object acquires it) at the object's address. Every
 other case calls the runtime function, which stays the reference
 behaviour. The layout the inline code relies on is exactly the one above
 (`zell_rt.h`): the 64-bit word at the object's address, `B` in its low 16
