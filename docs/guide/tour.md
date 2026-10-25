@@ -574,8 +574,8 @@ struct User {
 
 func main() {
     var users = [User{Name: "cid", Age: 45}, User{Name: "ann", Age: 31}, User{Name: "bob", Age: 27}]
-    slices.SortBy(users, (u User) => u.Age)
-    var names = slices.Map(users, (u User) => u.Name)
+    slices.SortBy(users, u => u.Age)
+    var names = slices.Map(users, u => u.Name)
     println(names, slices.Contains(names, "ann"))
 
     var byFirst = map[string]int{}
