@@ -1016,6 +1016,7 @@ impl<'a> Fmt<'a> {
             ExprKind::Lambda { params, ret, body, is_async } => self.lambda(e.span, params, ret.as_deref(), body, *is_async),
             ExprKind::Paren(x) => concat(vec![text("("), self.expr(x), text(")")]),
             ExprKind::NamedArg { name, value } => concat(vec![text(format!("{}: ", name.name)), self.expr(value)]),
+            ExprKind::Spread(x) => concat(vec![self.expr(x), text("...")]),
             ExprKind::Error => text(self.slice(e.span)),
         }
     }
@@ -1221,6 +1222,7 @@ impl<'a> Fmt<'a> {
             TypeKind::Pointer(x) => concat(vec![text("*"), self.ty(x)]),
             TypeKind::Weak(x) => concat(vec![text("weak *"), self.ty(x)]),
             TypeKind::Slice(x) => concat(vec![text("[]"), self.ty(x)]),
+            TypeKind::Variadic(x) => concat(vec![text("..."), self.ty(x)]),
             TypeKind::Array(x, n) => concat(vec![text(format!("[{n}]")), self.ty(x)]),
             TypeKind::ArrayExpr(x, n) => concat(vec![text("["), self.expr(n), text("]"), self.ty(x)]),
             TypeKind::Map(k, v) => concat(vec![text("map["), self.ty(k), text("]"), self.ty(v)]),

@@ -26,7 +26,7 @@ fn mentions(p: &ast::TypeExpr, names: &[String]) -> bool {
     use ast::TypeKind as K;
     match &p.kind {
         K::Named { path, generics } => (path.segments.len() == 1 && generics.is_empty() && names.contains(&path.segments[0].name)) || generics.iter().any(|g| mentions(g, names)),
-        K::Fallible(x) | K::Pointer(x) | K::Weak(x) | K::Slice(x) | K::Array(x, _) | K::ArrayExpr(x, _) => mentions(x, names),
+        K::Fallible(x) | K::Pointer(x) | K::Weak(x) | K::Slice(x) | K::Variadic(x) | K::Array(x, _) | K::ArrayExpr(x, _) => mentions(x, names),
         K::Map(k, v) => mentions(k, names) || mentions(v, names),
         K::Func { params, ret } => params.iter().any(|x| mentions(x, names)) || ret.as_ref().is_some_and(|r| mentions(r, names)),
         K::Tuple(ts) => ts.iter().any(|x| mentions(x, names)),

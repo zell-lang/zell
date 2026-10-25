@@ -1,0 +1,11 @@
+// error: a variadic parameter ...T is only allowed as the last parameter of a non-generic function
+// status: passing
+namespace spec.diagnostics.variadic_generic
+
+import io
+
+func count<T>(xs ...T) int { return len(xs) }
+
+func main() {
+    println(count<int>([1, 2]))
+}

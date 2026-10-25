@@ -283,6 +283,24 @@ var (x, y) = Swap(1, 2)
   `void!`). Без ожидаемого типа — ошибка `cannot infer the type of lambda
   parameter u`.
 - Функции — значения первого класса, тип `func(int) int`.
+- **Переменное число аргументов**, как в Go: последний параметр
+  `args ...T` — это `[]T`. Вызов передаёт в него оставшиеся аргументы
+  (новым срезом; ни одного — пустой срез) или один срез, развёрнутый
+  через `xs...`: `sum(1, 2, 3)`, `sum(xs...)`, `join(", ", parts...)`.
+  `...` допустим только у последнего аргумента и только для
+  вариативного параметра (ровно после фиксированных: `f(a, xs...)`);
+  срез передаётся как есть, без копии (как в Go). Так же разворачиваются
+  срезы во встроенных вариативных функциях: `append(xs, ys...)` (все
+  элементы `ys`, `append(xs, xs...)` допустим), `fmt.Sprintf(format,
+  args...)` с `args []any` (вид каждого аргумента — по его
+  динамическому типу), `task.All(ts...)` / `task.Any(ts...)` (то же, что
+  `task.All(ts)`). Вариативными бывают обычные функции и методы
+  структур и enum; в generic-функциях, лямбдах, методах интерфейсов и
+  функциональных типах `...T` нет — значение вариативной функции имеет
+  тип `func(..., []T) R`, а её значение-метод принимает срез. Ошибки:
+  `cannot use ... in call to non-variadic f`, `can only use ... with the
+  final argument`, `not enough arguments in call to f: expected at least
+  N`.
 
 ## Структуры и методы
 
@@ -1426,6 +1444,16 @@ async func main() {
 - Примитивы: `task.All`, `task.Any`, `task.Delay`, `Channel<T>`, `Mutex`.
   `await task.Any(t1, ..., tn)` (все `Task<T>` одного типа) даёт результат
   первой завершившейся задачи; остальные продолжают работать.
+  Число задач, известное только во время выполнения: `task.All(ts)` над
+  срезом `[]Task<T>` (или `task.All(ts...)`, или литерал `task.All([a,
+  b])`) — `Task<[]T>` с результатами в порядке среза; над `[]Task<T!>` —
+  `Task<([]T)!>`: как у формы с перечислением, дожидается каждой задачи, и
+  при ошибках результат — первая ошибка в порядке среза; над
+  `[]Task<void>` / `[]Task<void!>` — `Task<void>` / `Task<void!>`. Пустой
+  срез даёт пустой результат. В отличие от формы с перечислением, такой
+  `task.All` — обычная задача, её можно сохранить и дождаться позже.
+  `task.Any(ts)` над срезом — как `task.Any(t1, ..., tn)`; пустой срез —
+  паника `task.Any called with no tasks`.
   `task.Channel<int>(n)` создаёт канал с буфером на `n` значений (0 —
   небуферизованный: `Send` ждёт своего `Recv`); копии канала разделяют его;
   `await ch.Recv()` имеет тип `T!` и падает, когда канал закрыт и пуст;
@@ -3106,7 +3134,7 @@ method      = [ "static" ] func ;
 func        = [ "async" ] "func" ident [ generics ] "(" [ params ] ")" [ type ] block ;
 externfunc  = "extern" "func" ident "(" [ params ] ")" [ type ] ;   (* только в std/**/*_extern.zl *)
 params      = param { "," param } ;
-param       = ident { "," ident } type ;
+param       = ident { "," ident } type | ident "..." type ;   (* variadic: last parameter, a []T *)
 type        = path [ typeargs ] [ "!" ] | "*" type | "weak" "*" type | "[" [ constexpr ] "]" type
             | "map" "[" type "]" type | "func" "(" [ types ] ")" [ type ]
             | "(" types ")" ;           (* path may start at a compile-time descriptor: t, p.Type, f.Type, m.Result, m.Args *)
@@ -3131,7 +3159,7 @@ binop       = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
 unary       = ( "-" | "!" | "&" | "*" | "await" ) unary | tryexpr | postfix ;
 tryexpr     = "try" expr ( "catch" ident block | "else" expr ) ;
 trystmt     = "try" block "catch" ident block ;
-postfix     = primary { "." ( ident | int ) | "(" [ exprs ] ")" | "[" ( expr | range ) "]"
+postfix     = primary { "." ( ident | int ) | "(" [ exprs [ "..." ] ] ")" | "[" ( expr | range ) "]"
             | "?" [ "(" expr ")" ] | typeargs } ;
 typeargs    = "<" type { "," type } ">" ;     (* only before ( { . ) ] } , or end of statement *)
 range       = [ expr ] ".." [ expr ] ;

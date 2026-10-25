@@ -1,0 +1,11 @@
+// error: a variadic parameter ...T is only allowed as the last parameter
+// status: passing
+namespace spec.diagnostics.variadic_not_last
+
+import io
+
+func f(xs ...int, s string) int { return len(xs) + len(s) }
+
+func main() {
+    println(f([1], "a"))
+}

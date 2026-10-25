@@ -52,6 +52,7 @@ const RUNTIME: &[(&str, &str, bool)] = &[
     ("zell_string_from_rune", "p:i", false),
     ("zell_slice_new_ops", "v:plllp", false),
     ("zell_slice_append", "v:plpp", false),
+    ("zell_slice_append_slice", "v:plpp", false),
     ("zell_slice_sub", "v:pplll", false),
     ("zell_map_new", "p:pl", false),
     ("zell_map_new_str", "p:lp", false),

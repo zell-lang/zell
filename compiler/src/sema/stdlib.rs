@@ -730,6 +730,8 @@ pub const FUNCS: &[StdFunc] = &[
     f!("task", "PanicTrace", "error", "string", "zell_task_panic_trace"),
     // internal primitives of the Zell-source task (sema/stdlib_src/task.zl)
     f!("task", "rtSignal", "", "Task<void>", "zell_task_rt_signal"),
+    // fmt.Sprintf's lowered form (SPRINTF_SYMBOL) for fmt.zl's sprintfSpread.
+    f!("fmt", "rtSprintf", "string, string, []int, []float, []string", "string", "zell_fmt_sprintf"),
     f!("task", "rtWaker", "", "Task<void>", "zell_task_rt_waker"),
     f!("task", "IsCancelled", "", "bool", "zell_task_cur_cancelled"),
     f!("task", "rtCancel", "Task<void>", "void", "zell_task_cancel"),

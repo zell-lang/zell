@@ -1,0 +1,10 @@
+// error: cannot use
+// status: passing
+namespace spec.diagnostics.sprintf_spread_not_any
+
+import io
+
+func main() {
+    var xs = [1, 2]
+    println(fmt.Sprintf("%d %d", xs...))
+}

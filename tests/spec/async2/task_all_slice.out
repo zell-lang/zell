@@ -1,0 +1,13 @@
+cubes [27 1 8]
+words [w0 w1 w2 w3]
+literal [8 1]
+ok [50 10 30]
+failing 4
+failing 6
+first error: even 6
+tick 1
+tick 4
+void error: tick 2
+empty [] 0
+any 1
+any spread w0

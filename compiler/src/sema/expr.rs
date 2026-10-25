@@ -91,6 +91,11 @@ impl<'a> Sema<'a> {
                 self.err(format!("named argument {}: is only allowed inside attribute arguments", name.name), span);
                 self.invalid(span)
             }
+            K::Spread(x) => {
+                self.err("... is only allowed after the last argument of a call to a variadic function", span);
+                let _ = self.expr(x, None);
+                self.invalid(span)
+            }
             // Syntax error, already reported by the parser.
             K::Error => self.invalid(span),
         }

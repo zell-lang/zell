@@ -165,6 +165,59 @@ async func Spawn<T>(f func() Task<T>) T {
     return await t
 }
 
+// allSlice is `task.All(ts)` over a slice (sema: Special::TaskAll): the
+// results in input order.
+async func allSlice<T>(ts []Task<T>) []T {
+    var out []T = []
+    for t in ts {
+        out = append(out, await t)
+    }
+    return out
+}
+
+// allSliceErr is `task.All(ts)` over a slice of fallible tasks: like the
+// variadic form, every task is awaited and the first error in input order
+// is the result.
+async func allSliceErr<T>(ts []Task<T!>) []T! {
+    var out []T = []
+    var first error = nil
+    for t in ts {
+        var v = try await t catch err {
+            if first == nil {
+                first = err
+            }
+            continue
+        }
+        out = append(out, v)
+    }
+    if first != nil {
+        return first
+    }
+    return out
+}
+
+// allSliceVoid is `task.All(ts)` over a slice of Task<void>.
+async func allSliceVoid(ts []Task<void>) {
+    for t in ts {
+        await t
+    }
+}
+
+// allSliceVoidErr is `task.All(ts)` over a slice of Task<void!>.
+async func allSliceVoidErr(ts []Task<void!>) void! {
+    var first error = nil
+    for t in ts {
+        try await t catch err {
+            if first == nil {
+                first = err
+            }
+        }
+    }
+    if first != nil {
+        return first
+    }
+}
+
 // Go is Spawn for functions without a result (`Spawn<void>` cannot
 // return the result of its task).
 async func Go(f func() Task<void>) {

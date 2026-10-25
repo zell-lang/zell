@@ -843,6 +843,10 @@ pub enum Builtin {
     MapLookup,
     /// `append(s, x)` -> new slice header (`ty` is `[]T`).
     Append,
+    /// `append(s, xs...)` -> new slice header: every element of the slice
+    /// `xs` appended (`zell_slice_append_slice`, which snapshots `xs`, so
+    /// `append(s, s...)` works).
+    AppendSlice,
     /// `delete(m, k)`.
     Delete,
     /// `panic(x)`: `args[0]` is a `string` or `error`; never returns.

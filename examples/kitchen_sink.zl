@@ -898,7 +898,7 @@ func Validate<T>(v T) []ValidationError {
 func ValidateOrder(o *Order) void! {
     var errs = Validate(*o)
     for it in o.Items {
-        errs = slices.Concat(errs, Validate(it))
+        errs = append(errs, Validate(it)...)
     }
     if len(o.Items) > MaxItemsPerOrder {
         errs = append(errs, ValidationError{Field: "Items", Reason: "too many"})
@@ -1456,10 +1456,7 @@ async func demoMisc(book *OrderBook) void! {
     for n in [3, 1, 2] {
         pending = append(pending, cube(n))
     }
-    var cubes []int = []
-    for t in pending {
-        cubes = append(cubes, await t)
-    }
+    var cubes = await task.All(pending)
     println("  cubes", cubes)
 
     var n Notifier = MailNotifier{prefix: "[shop] "}

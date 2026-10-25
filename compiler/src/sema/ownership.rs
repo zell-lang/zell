@@ -466,7 +466,7 @@ fn promoted_escape(p: &Program, facts: &ParamFacts, from: TypeId, to: TypeId) ->
 fn collect_types(p: &Program, f: &Function) -> Vec<(TypeId, Span)> {
     let mut out = Vec::new();
     walk_function(p, f, &mut |e, _| {
-        if matches!(e.kind, ExprKind::SliceLit(_) | ExprKind::MapLit(_) | ExprKind::Tuple(_) | ExprKind::Builtin { op: Builtin::Append, .. }) {
+        if matches!(e.kind, ExprKind::SliceLit(_) | ExprKind::MapLit(_) | ExprKind::Tuple(_) | ExprKind::Builtin { op: Builtin::Append | Builtin::AppendSlice, .. }) {
             out.push((e.ty, e.span));
         }
     });

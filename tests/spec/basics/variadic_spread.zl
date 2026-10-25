@@ -1,0 +1,76 @@
+// test: variadic parameters `args ...T` (a []T), calls with any number of values or one slice spread with `xs...`; methods; append(xs, ys...); fmt.Sprintf(format, args...) with a []any
+// status: passing
+// run-flags: --leak-check
+namespace spec.basics.variadic_spread
+
+import io
+
+func sum(xs ...int) int {
+    var t = 0
+    for x in xs { t += x }
+    return t
+}
+
+func join(sep string, parts ...string) string {
+    var out = ""
+    for i, p in parts {
+        if i > 0 { out += sep }
+        out += p
+    }
+    return out + " (" + strconv.Itoa(len(parts)) + ")"
+}
+
+struct Log {
+    lines []string
+    func Add(prefix string, words ...string) {
+        this.lines = append(this.lines, join(prefix, words...))
+    }
+}
+
+enum Op {
+    Add, Mul
+    func Fold(xs ...int) int {
+        var acc = 0
+        if this == Op.Mul { acc = 1 }
+        for x in xs {
+            if this == Op.Add { acc += x } else { acc *= x }
+        }
+        return acc
+    }
+}
+
+func main() {
+    println(sum(), sum(1), sum(1, 2, 3))
+    var xs = [4, 5, 6]
+    println(sum(xs...))
+    println(join("-"), join("-", "a"), join("-", "a", "b", "c"))
+    var parts = ["x", "y"]
+    println(join("+", parts...))
+
+    var l = Log{}
+    l.Add(",", "one", "two")
+    l.Add(":", parts...)
+    l.Add("!")
+    println(l.lines)
+    println(Op.Add.Fold(1, 2, 3), Op.Mul.Fold(xs...), Op.Mul.Fold())
+
+    // A variadic function as a value takes the slice.
+    var f func([]int) int = sum
+    println(f([7, 8]))
+    var add = l.Add
+    add("/", ["p", "q"])
+    println(l.lines[3])
+
+    var a = ["a", "b"]
+    var b = ["c", "d", "e"]
+    a = append(a, b...)
+    a = append(a, a...)
+    println(a, len(a))
+    var none []string = []
+    println(append(none, none...), len(append(b, none...)))
+
+    var args []any = [42, "str", 2.5, true, 'z', [1, 2]]
+    println(fmt.Sprintf("%d|%s|%.2f|%t|%c|%v", args...))
+    var nums []any = [255, 255]
+    println(fmt.Sprintf("%05d %x", nums...))
+}

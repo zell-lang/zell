@@ -16,8 +16,8 @@ What it shows:
 - a bounded worker pool over `task.Channel<T>`: a job queue that pushes
   back on the producer, and a results channel drained by one collector
   (fan-in);
-- `task.WaitGroup` to close the results channel when the last worker
-  exits, and `defer wg.Done()`;
+- `task.All` over the slice of worker tasks to close the results
+  channel when the last worker exits;
 - per-job deadlines with `task.WithTimeout`, and work that stops early
   through `task.CheckCancelled()`;
 - cancelling a whole run from the parent with `task.NewCancel()` and a
@@ -134,10 +134,10 @@ async func Work(job Job) string! {
 - `Results` is the fan-in: every worker sends to it, one collector
   receives. `Collect` sorts by job id at the end, so the report does
   not depend on which worker happened to be faster.
-- The `WaitGroup` counts the workers. `closeWhenDone` waits for it and
-  closes `Results`, which ends the collector's `for r in p.Results`.
-  Each worker calls `wg.Done()` in a `defer`, so it is called on every
-  way out of the function.
+- `running` keeps the worker tasks. `closeWhenDone` waits for all of
+  them with `task.All(p.running)` (a slice: the number of workers is
+  known only at run time) and closes `Results`, which ends the
+  collector's `for r in p.Results`.
 
 `for job in p.Queue` receives until the queue is closed and drained.
 That is how shutdown works without a special message: the producer
@@ -210,7 +210,7 @@ struct Pool {
     Results task.Channel<Result>
     Stats   *Stats
     Jobs    task.Context
-    wg      *task.WaitGroup
+    running []Task<void>
 
     // Start launches the workers. They, the collector and the stats run
     // in the caller's context; only the jobs run in `jobs`. Cancelling
@@ -224,11 +224,9 @@ struct Pool {
             Queue: task.Channel<Job>(depth),
             Results: task.Channel<Result>(workers),
             Stats: new Stats{counts: map[string]int{}},
-            wg: new task.WaitGroup{},
         }
         for _ in 0..workers {
-            p.wg.Add(1)
-            _ = worker(p)
+            p.running = append(p.running, worker(p))
         }
         // Results is closed once the last worker is done, so the
         // collector's `for r in p.Results` ends by itself.
@@ -249,7 +247,6 @@ struct Pool {
 // worker takes jobs until the queue is closed and drained, or until its
 // context is cancelled and nothing is left in the queue.
 async func worker(p *Pool) {
-    defer p.wg.Done()
     for job in p.Queue {
         var r = await runOne(job, p.Jobs)
         await p.Stats.Record(r.Status)
@@ -293,7 +290,7 @@ func start(job Job) Task<string!> {
 }
 
 async func closeWhenDone(p *Pool) {
-    await p.wg.Wait()
+    await task.All(p.running)
     p.Results.Close()
 }
 

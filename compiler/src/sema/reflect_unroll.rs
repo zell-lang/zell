@@ -820,7 +820,7 @@ fn ty_needs(t: &ast::TypeExpr, roots: &[String]) -> bool {
     use ast::TypeKind as K;
     match &t.kind {
         K::Named { path, generics } => path.segments.first().is_some_and(|s| roots.contains(&s.name)) || generics.iter().any(|g| ty_needs(g, roots)),
-        K::Fallible(x) | K::Pointer(x) | K::Weak(x) | K::Slice(x) | K::Array(x, _) | K::ArrayExpr(x, _) => ty_needs(x, roots),
+        K::Fallible(x) | K::Pointer(x) | K::Weak(x) | K::Slice(x) | K::Variadic(x) | K::Array(x, _) | K::ArrayExpr(x, _) => ty_needs(x, roots),
         K::Map(k, v) => ty_needs(k, roots) || ty_needs(v, roots),
         K::Func { params, ret } => params.iter().any(|p| ty_needs(p, roots)) || ret.as_ref().is_some_and(|r| ty_needs(r, roots)),
         K::Tuple(xs) => xs.iter().any(|x| ty_needs(x, roots)),

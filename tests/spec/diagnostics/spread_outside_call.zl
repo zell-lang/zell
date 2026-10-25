@@ -1,0 +1,10 @@
+// error: ... is only allowed after the last argument of a call to a variadic function
+// status: passing
+namespace spec.diagnostics.spread_outside_call
+
+import io
+
+func main() {
+    var xs = [1, 2]
+    println(len(xs...))
+}

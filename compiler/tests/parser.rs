@@ -135,6 +135,7 @@ fn show(e: &Expr) -> String {
         ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
         ExprKind::Paren(e) => format!("[{}]", show(e)),
         ExprKind::NamedArg { name, value } => format!("{}: {}", name.name, show(value)),
+        ExprKind::Spread(x) => format!("{}...", show(x)),
         ExprKind::Error => "<error>".into(),
     }
 }
@@ -149,6 +150,7 @@ fn named(t: &TypeExpr) -> String {
         TypeKind::Pointer(t) => format!("*{}", named(t)),
         TypeKind::Weak(t) => format!("weak *{}", named(t)),
         TypeKind::Slice(t) => format!("[]{}", named(t)),
+        TypeKind::Variadic(t) => format!("...{}", named(t)),
         TypeKind::Array(t, n) => format!("[{n}]{}", named(t)),
         TypeKind::ArrayExpr(t, n) => format!("[{}]{}", show(n), named(t)),
         TypeKind::Map(k, v) => format!("map[{}]{}", named(k), named(v)),
@@ -1456,4 +1458,28 @@ fn increment_operator_is_reported_with_a_fix_and_recovers() {
     let (file, diags) = zell::parser::parse_source("namespace t\nfunc f() {\n    var a = 1 - -2\n    var b = a--1\n}\n");
     assert!(!diags.has_errors(), "{:?}", diags.items);
     assert!(!file.decls.is_empty());
+}
+
+#[test]
+fn labels_and_spread() {
+    // `outer:` on its own line: no `;` after `:`, the label names the `for`.
+    let s = stmts(
+        "outer:
+        for x in xs {
+            break outer
+        }
+        sw: switch x {
+            default: continue outer
+        }
+        f(a, xs...)",
+    );
+    let StmtKind::Labeled { label, stmt } = &s[0].kind else { panic!("{:?}", s[0].kind) };
+    assert_eq!(label.name, "outer");
+    let StmtKind::For(f) = &stmt.kind else { panic!() };
+    assert!(matches!(&f.body.stmts[0].kind, StmtKind::Break(Some(l)) if l.name == "outer"));
+    assert!(matches!(&s[1].kind, StmtKind::Labeled { label, stmt } if label.name == "sw" && matches!(stmt.kind, StmtKind::Switch(_))));
+    assert!(matches!(&s[2].kind, StmtKind::Expr(e) if show(e) == "f(a, xs...)"));
+    let d = decls("func sum(base int, xs ...int) int { return 0 }");
+    let Decl::Func(f) = &d[0] else { panic!() };
+    assert!(matches!(&f.params[1].ty.kind, TypeKind::Variadic(_)));
 }

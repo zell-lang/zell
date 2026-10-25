@@ -99,7 +99,7 @@ fn summarize(p: &Program, f: &Function) -> FnSummary {
                 Callee::Interface { .. } | Callee::Value(_) => impure = true,
             },
             ExprKind::Builtin { op, .. } => {
-                if matches!(op, Builtin::Append | Builtin::Delete | Builtin::ErrorsAs | Builtin::TaskAny) {
+                if matches!(op, Builtin::Append | Builtin::AppendSlice | Builtin::Delete | Builtin::ErrorsAs | Builtin::TaskAny) {
                     impure = true;
                 }
             }

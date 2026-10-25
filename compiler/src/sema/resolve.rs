@@ -767,6 +767,12 @@ impl<'a> Sema<'a> {
                 self.err("missing parameter type (write `(x T) => ...`; lambda parameters are typed from the expected function type only)", t.span);
                 self.tt.invalid
             }
+            // Accepted only by `resolve_func_sig` (the last parameter).
+            K::Variadic(x) => {
+                self.err("a variadic parameter ...T is only allowed as the last parameter of a non-generic function or method", t.span);
+                let _ = self.resolve_type(x);
+                self.tt.invalid
+            }
             K::Named { path, generics } => {
                 if path.segments.len() == 1 && generics.is_empty() {
                     if let Some(ty) = self.type_param(&path.segments[0].name) {
@@ -1152,8 +1158,15 @@ impl<'a> Sema<'a> {
             let ty = self.tt.intern(Type::Interface(crate::types::DeclId(i)));
             locals.push(hir::Local { name: "this".into(), ty, kind: LocalKind::This, captured: false, address_taken: false, span: decl.name.span });
         }
-        for p in &decl.params {
-            let ty = self.resolve_type(&p.ty);
+        for (i, p) in decl.params.iter().enumerate() {
+            let ty = match &p.ty.kind {
+                ast::TypeKind::Variadic(x) if i + 1 == decl.params.len() && decl.generics.is_empty() => {
+                    let el = self.resolve_type(x);
+                    self.variadic.insert(fid as u32);
+                    self.tt.slice(el)
+                }
+                _ => self.resolve_type(&p.ty),
+            };
             if p.name.name != "_" && locals.iter().any(|l: &hir::Local| l.name == p.name.name) {
                 self.err(format!("duplicate parameter {}", p.name.name), p.name.span);
             }

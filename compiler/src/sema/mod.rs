@@ -375,6 +375,8 @@ pub(crate) struct Sema<'a> {
     /// Methods of enums by (enum id, name). They are ordinary functions
     /// whose first parameter is `this` (the enum value).
     pub enum_methods: HashMap<(u32, String), FuncId>,
+    /// Functions and methods whose last parameter is variadic (`...T`).
+    pub variadic: std::collections::HashSet<u32>,
     /// The enum owning each enum method (by function id).
     pub enum_method_owner: HashMap<u32, u32>,
     /// Default methods of interfaces by (interface id, name): free
@@ -447,6 +449,7 @@ impl<'a> Sema<'a> {
             fns: Vec::new(),
             lambda_count: 0,
             enum_methods: HashMap::new(),
+            variadic: Default::default(),
             enum_method_owner: HashMap::new(),
             iface_defaults: HashMap::new(),
             iface_default_owner: HashMap::new(),

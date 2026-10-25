@@ -1,0 +1,42 @@
+// The Zell-source part of fmt: Sprintf with a spread argument slice
+// (`fmt.Sprintf(format, args...)`, args a []any). Every other fmt
+// function is lowered by the compiler (sema/call.rs) or is a runtime
+// extern (stdlib.rs).
+namespace fmt
+
+// sprintfSpread is fmt.Sprintf(format, args...): the kind of each argument
+// is its dynamic type (runtime/src/std_fmt_sprintf.c, the same slots the
+// compiler fills for a direct call).
+func sprintfSpread(format string, args []any) string {
+    var kinds = ""
+    var ints []int = []
+    var floats []float = []
+    var texts []string = []
+    for a in args {
+        var (i, f, t, k) = (0, 0.0, "", "o")
+        switch a {
+            case int v:
+                k = "i"
+                i = v
+            case float v:
+                k = "f"
+                f = v
+            case string v:
+                k = "s"
+                t = v
+            case bool v:
+                k = "b"
+                t = fmt.Format("{0}", v)
+            case char v:
+                k = "c"
+                i = int(v)
+            default:
+                t = fmt.Format("{0}", a)
+        }
+        kinds += k
+        ints = append(ints, i)
+        floats = append(floats, f)
+        texts = append(texts, t)
+    }
+    return rtSprintf(format, kinds, ints, floats, texts)
+}

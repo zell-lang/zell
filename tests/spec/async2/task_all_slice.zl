@@ -1,0 +1,71 @@
+// test: task.All and task.Any over a []Task<T> (or spread with ts...): results in input order, every task awaited, the first error in input order for fallible tasks; Task<void> slices; the result is a Task that can be stored
+// status: passing
+// run-flags: --leak-check
+namespace spec.async2.task_all_slice
+
+import io
+
+async func cube(n int) int {
+    await task.Delay(n * 3)
+    return n * n * n
+}
+
+async func word(n int) string {
+    await task.Yield()
+    return "w" + strconv.Itoa(n)
+}
+
+async func check(n int) int! {
+    await task.Delay(n * 2)
+    if n % 2 == 0 {
+        println("failing", n)
+        return error("even " + strconv.Itoa(n))
+    }
+    return n * 10
+}
+
+async func tick(n int) {
+    await task.Delay(n)
+    println("tick", n)
+}
+
+async func tickErr(n int) void! {
+    await task.Yield()
+    if n == 2 { return error("tick " + strconv.Itoa(n)) }
+}
+
+async func main() void! {
+    var pending []Task<int> = []
+    for n in [3, 1, 2] {
+        pending = append(pending, cube(n))
+    }
+    var cubes = await task.All(pending)
+    println("cubes", cubes)
+
+    var ws []Task<string> = []
+    for n in 0..4 {
+        ws = append(ws, word(n))
+    }
+    var all = task.All(ws...)
+    println("words", await all)
+    println("literal", await task.All([cube(2), cube(1)]))
+
+    var ok []Task<int!> = [check(5), check(1), check(3)]
+    println("ok", await task.All(ok)?)
+    var bad []Task<int!> = [check(3), check(6), check(4), check(1)]
+    try await task.All(bad) catch err {
+        println("first error:", err.Message())
+    }
+
+    var ticks []Task<void> = [tick(4), tick(1)]
+    await task.All(ticks)
+    var te []Task<void!> = [tickErr(1), tickErr(2)]
+    try await task.All(te) catch err { println("void error:", err.Message()) }
+
+    var none []Task<int> = []
+    println("empty", await task.All(none), len(await task.All(none)))
+
+    var racers []Task<int> = [cube(9), cube(1), cube(7)]
+    println("any", await task.Any(racers))
+    println("any spread", await task.Any(ws...))
+}

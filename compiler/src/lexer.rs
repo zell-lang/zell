@@ -561,7 +561,11 @@ impl Lexer<'_, '_> {
             '@' => self.with_eq(At, AtEq),
             '.' => {
                 if self.eat('.') {
-                    DotDot
+                    if self.eat('.') {
+                        Ellipsis
+                    } else {
+                        DotDot
+                    }
                 } else {
                     Dot
                 }

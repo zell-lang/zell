@@ -476,6 +476,7 @@ impl Walker<'_, '_> {
                 for (i, a) in args.iter().enumerate() {
                     let p = match op {
                         Builtin::Append => Store,
+                        Builtin::AppendSlice if i == 0 => Store,
                         Builtin::LenArray if i == 0 => AddrOf,
                         _ => Read,
                     };

@@ -43,7 +43,7 @@ struct Pool {
     Results task.Channel<Result>
     Stats   *Stats
     Jobs    task.Context
-    wg      *task.WaitGroup
+    running []Task<void>
 
     // Start launches the workers. They, the collector and the stats run
     // in the caller's context; only the jobs run in `jobs`. Cancelling
@@ -57,11 +57,9 @@ struct Pool {
             Queue: task.Channel<Job>(depth),
             Results: task.Channel<Result>(workers),
             Stats: new Stats{counts: map[string]int{}},
-            wg: new task.WaitGroup{},
         }
         for _ in 0..workers {
-            p.wg.Add(1)
-            _ = worker(p)
+            p.running = append(p.running, worker(p))
         }
         // Results is closed once the last worker is done, so the
         // collector's `for r in p.Results` ends by itself.
@@ -82,7 +80,6 @@ struct Pool {
 // worker takes jobs until the queue is closed and drained, or until its
 // context is cancelled and nothing is left in the queue.
 async func worker(p *Pool) {
-    defer p.wg.Done()
     for job in p.Queue {
         var r = await runOne(job, p.Jobs)
         await p.Stats.Record(r.Status)
@@ -126,7 +123,7 @@ func start(job Job) Task<string!> {
 }
 
 async func closeWhenDone(p *Pool) {
-    await p.wg.Wait()
+    await task.All(p.running)
     p.Results.Close()
 }
 

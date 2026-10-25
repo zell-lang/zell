@@ -124,6 +124,7 @@ pub(crate) const MODULES: &[(&str, &str, &str)] = &[
     // <<< data
     // tier 0/1 stdlib (docs/STDLIB.md)
     ("slices", "slices.zl", include_str!("stdlib_src/slices.zl")),
+    ("fmt", "fmt.zl", include_str!("stdlib_src/fmt.zl")),
     ("maps", "maps.zl", include_str!("stdlib_src/maps.zl")),
     ("cmp", "cmp.zl", include_str!("stdlib_src/cmp.zl")),
     ("bytes", "bytes.zl", include_str!("stdlib_src/bytes.zl")),

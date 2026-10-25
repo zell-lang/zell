@@ -257,6 +257,9 @@ pub enum TypeKind {
     /// No type written: a lambda parameter `(u) => u.Email`, typed from
     /// the function type the lambda is converted to.
     Infer,
+    /// `...T` as the type of the last parameter (variadic): the parameter
+    /// is a `[]T` (DESIGN.md «Функции»).
+    Variadic(Box<TypeExpr>),
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +432,9 @@ pub enum ExprKind {
     /// `name: value` as an argument of a call inside attribute arguments
     /// (`@cfg(not(os: "windows"))`); rejected anywhere else by sema.
     NamedArg { name: Ident, value: Box<Expr> },
+    /// `xs...` as the last argument of a call: the slice is the variadic
+    /// parameter (Go spread).
+    Spread(Box<Expr>),
     /// An expression that failed to parse (error recovery), e.g. the
     /// missing operand in `x + ` or an argument of an unfinished `f(`.
     /// Sema gives it the `Invalid` type without further diagnostics.

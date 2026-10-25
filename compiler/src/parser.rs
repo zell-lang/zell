@@ -774,7 +774,14 @@ impl Parser<'_> {
                 pending.push((attrs, name, start));
                 break;
             }
-            let ty = self.parse_type()?;
+            let ty = if self.at(&TokenKind::Ellipsis) {
+                let dots = self.bump().span;
+                let inner = self.parse_type()?;
+                let span = dots.to(inner.span);
+                TypeExpr { kind: TypeKind::Variadic(Box::new(inner)), span }
+            } else {
+                self.parse_type()?
+            };
             for (attrs, name, start) in pending.drain(..).chain(std::iter::once((attrs, name, start))) {
                 params.push(Param { span: start.to(ty.span), attrs, name, ty: ty.clone() });
             }
@@ -1559,7 +1566,13 @@ impl Parser<'_> {
                         let span = name.span.to(value.span);
                         return Ok(Expr { kind: ExprKind::NamedArg { name, value: Box::new(value) }, span });
                     }
-                    p.parse_expr()
+                    let e = p.parse_expr()?;
+                    if p.at(&TokenKind::Ellipsis) {
+                        let end = p.bump().span;
+                        let span = e.span.to(end);
+                        return Ok(Expr { kind: ExprKind::Spread(Box::new(e)), span });
+                    }
+                    Ok(e)
                 },
                 Expr::error,
             )

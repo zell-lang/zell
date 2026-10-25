@@ -20,7 +20,7 @@ impl<'a> Sema<'a> {
     /// `(params, result)` of method `name` of a value of type `ty` (the
     /// result is `Task<T>` for an async method), or `None` when `name` is
     /// not a method (a field, or no member at all).
-    fn method_value_sig(&mut self, ty: TypeId, name: &ast::Ident) -> Option<(Vec<TypeId>, TypeId)> {
+    fn method_value_sig(&mut self, ty: TypeId, name: &ast::Ident) -> Option<(Vec<TypeId>, TypeId, bool)> {
         if let Some(sid) = self.struct_of(ty) {
             if self.find_field(sid, &name.name).is_some() || self.gen.methods.contains_key(&(sid, name.name.clone())) {
                 return None;
@@ -38,20 +38,20 @@ impl<'a> Sema<'a> {
             None => return None,
         };
         let m = methods.iter().find(|m| m.name == name.name)?;
-        Some((m.params.clone(), m.ret))
+        Some((m.params.clone(), m.ret, false))
     }
 
     /// Parameters (without the receiver) and result (`Task<T>` when async).
-    fn method_sig_parts(&mut self, f: FuncId) -> (Vec<TypeId>, TypeId) {
+    fn method_sig_parts(&mut self, f: FuncId) -> (Vec<TypeId>, TypeId, bool) {
         let sig = self.sigs[f.0 as usize].clone();
         let ret = if sig.is_async { self.tt.task(sig.ret) } else { sig.ret };
-        (sig.params, ret)
+        (sig.params, ret, self.variadic.contains(&f.0))
     }
 
     /// `base.name` as a method value, or `Err(base)` when `name` is not a
     /// method of `base`.
     pub(crate) fn method_value(&mut self, base: hir::Expr, name: &ast::Ident) -> Result<hir::Expr, hir::Expr> {
-        let Some((params, ret)) = self.method_value_sig(base.ty, name) else { return Err(base) };
+        let Some((params, ret, spread)) = self.method_value_sig(base.ty, name) else { return Err(base) };
         let span = base.span.to(name.span);
         let recv = if matches!(self.tt.get(base.ty), Type::Struct(_)) {
             match base.kind {
@@ -73,7 +73,7 @@ impl<'a> Sema<'a> {
         let inner_ty = self.tt.func(params, ret);
         let outer_ty = self.tt.func(vec![recv.ty], inner_ty);
         let sp = name.span;
-        let inner = self.forwarding_lambda(RECV, &[], name, n, ret, sp);
+        let inner = self.forwarding_lambda(RECV, &[], name, n, ret, spread, sp);
         let outer = ast::Expr {
             kind: ast::ExprKind::Lambda { params: vec![param(RECV, sp)], ret: None, body: Box::new(ast::LambdaBody::Expr(inner)), is_async: false },
             span: sp,
@@ -92,29 +92,30 @@ impl<'a> Sema<'a> {
     /// `T.M` with `M` a method of struct `sid`: a function taking the
     /// receiver `*T` first.
     pub(crate) fn method_expr(&mut self, sid: u32, f: FuncId, name: &ast::Ident, span: Span) -> hir::Expr {
-        let (params, ret) = self.method_sig_parts(f);
+        let (params, ret, spread) = self.method_sig_parts(f);
         let st = self.struct_ty(sid);
         let recv = self.tt.pointer(st);
         let n = params.len();
         let mut ps = vec![recv];
         ps.extend(params);
         let ty = self.tt.func(ps, ret);
-        let l = self.forwarding_lambda(RECV, &[RECV], name, n, ret, name.span);
+        let l = self.forwarding_lambda(RECV, &[RECV], name, n, ret, spread, name.span);
         let mut e = self.expr(&l, Some(ty));
         e.span = span;
         e
     }
 
     /// `(lead.., a0, .., a{n-1}) => recv.name(a0, ..)`: untyped parameters
-    /// (typed by the expected function type); a fallible synchronous
+    /// (typed by the expected function type; the last one is spread into
+    /// a variadic method); a fallible synchronous
     /// result is passed through with `?` in a block body.
-    fn forwarding_lambda(&mut self, recv: &str, lead: &[&str], name: &ast::Ident, n: usize, ret: TypeId, sp: Span) -> ast::Expr {
+    fn forwarding_lambda(&mut self, recv: &str, lead: &[&str], name: &ast::Ident, n: usize, ret: TypeId, spread: bool, sp: Span) -> ast::Expr {
         let id = |s: &str| ast::Expr { kind: ast::ExprKind::Ident(ast::Ident { name: s.to_string(), span: sp }), span: sp };
         let args: Vec<String> = (0..n).map(|i| format!("$a{i}")).collect();
         let mut params: Vec<ast::Param> = lead.iter().map(|s| param(s, sp)).collect();
         params.extend(args.iter().map(|a| param(a, sp)));
         let callee = ast::Expr { kind: ast::ExprKind::Field { base: Box::new(id(recv)), name: name.clone() }, span: sp };
-        let call = ast::Expr { kind: ast::ExprKind::Call { callee: Box::new(callee), args: args.iter().map(|a| id(a)).collect() }, span: sp };
+        let call = ast::Expr { kind: ast::ExprKind::Call { callee: Box::new(callee), args: args.iter().enumerate().map(|(i, a)| if spread && i + 1 == n { ast::Expr { kind: ast::ExprKind::Spread(Box::new(id(a))), span: sp } } else { id(a) }).collect() }, span: sp };
         let body = match self.tt.fallible_inner(ret) {
             Some(inner) => {
                 let prop = ast::Expr { kind: ast::ExprKind::Propagate { expr: Box::new(call), context: None }, span: sp };

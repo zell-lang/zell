@@ -64,6 +64,7 @@ pub enum TokenKind {
     Comma,     // ,
     Dot,       // .
     DotDot,    // ..
+    Ellipsis,  // ...
     Colon,     // :
     Semi,      // ; (explicit or auto-inserted at line end)
     Question,  // ?
@@ -183,7 +184,7 @@ impl TokenKind {
             Defer => "defer", Try => "try", Catch => "catch", New => "new", Nil => "nil",
             True => "true", False => "false", Map => "map", This => "this",
             LParen => "(", RParen => ")", LBrace => "{", RBrace => "}", LBracket => "[",
-            RBracket => "]", Comma => ",", Dot => ".", DotDot => "..", Colon => ":", Semi => ";",
+            RBracket => "]", Comma => ",", Dot => ".", DotDot => "..", Ellipsis => "...", Colon => ":", Semi => ";",
             Question => "?", Bang => "!", Arrow => "=>", At => "@", Amp => "&", Star => "*", Plus => "+",
             Minus => "-", Slash => "/", Percent => "%", Pipe => "|", Caret => "^", Shl => "<<",
             Shr => ">>", AndAnd => "&&", OrOr => "||", Lt => "<", Gt => ">", Le => "<=", Ge => ">=",

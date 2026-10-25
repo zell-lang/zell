@@ -1,0 +1,12 @@
+// error: can only use ... with the final argument
+// status: passing
+namespace spec.diagnostics.spread_not_last
+
+import io
+
+func sum(xs ...int) int { return len(xs) }
+
+func main() {
+    var xs = [1, 2]
+    println(sum(xs..., 3))
+}

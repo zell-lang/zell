@@ -1,0 +1,12 @@
+// error: sum takes 0 before its variadic parameter
+// status: passing
+namespace spec.diagnostics.spread_with_values
+
+import io
+
+func sum(xs ...int) int { return len(xs) }
+
+func main() {
+    var xs = [1, 2]
+    println(sum(1, xs...))
+}

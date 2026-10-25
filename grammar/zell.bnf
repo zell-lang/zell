@@ -29,7 +29,7 @@
 
     // Punctuation
     LPAREN='(' RPAREN=')' LBRACE='{' RBRACE='}' LBRACKET='[' RBRACKET=']'
-    COMMA=',' DOT='.' DOTDOT='..' COLON=':' SEMI=';'
+    COMMA=',' DOT='.' DOTDOT='..' ELLIPSIS='...' COLON=':' SEMI=';'
     QUESTION='?' BANG='!' ARROW='=>' AT='@'
     AMP='&' STAR='*' PLUS='+' MINUS='-' SLASH='/' PERCENT='%'
     PIPE='|' CARET='^' SHL='<<' SHR='>>'
@@ -122,6 +122,7 @@ func_signature ::= ASYNC? FUNC IDENTIFIER generic_params? LPAREN param_list? RPA
 param_list ::= param_group (COMMA param_group)* COMMA?
 // `a, b int` groups names under one type, like Go; `@body p Point` (parameter attributes)
 param_group ::= attribute* IDENTIFIER (COMMA IDENTIFIER)* type
+               | attribute* IDENTIFIER ELLIPSIS type   // variadic, last parameter only: a []T
 
 generic_params ::= LT generic_param (COMMA generic_param)* GT
 generic_param ::= IDENTIFIER (COLON type)?
@@ -239,7 +240,8 @@ postfix ::= DOT name_segment
           | generic_args
 // `name: value` arguments only inside attribute arguments (`@cfg(not(os: "windows"))`).
 arg_list ::= call_arg (COMMA call_arg)* COMMA?
-call_arg ::= (field_name COLON)? expr
+// `f(xs...)`: a slice spread into the variadic parameter (last argument only)
+call_arg ::= (field_name COLON)? expr ELLIPSIS?
 
 // `_` is the discard target (`_ = f()`) and a wildcard in patterns (`Shape.Rect(w, _)`)
 primary_expr ::= lambda_expr | literal | THIS | NIL | UNDERSCORE

@@ -139,7 +139,7 @@ fn decl_shape(d: &ast::Decl, h: &mut DefaultHasher) {
                 path.to_string().hash(h);
                 generics.iter().for_each(|g| ty(g, h));
             }
-            K::Fallible(x) | K::Pointer(x) | K::Weak(x) | K::Slice(x) | K::ArrayExpr(x, _) => ty(x, h),
+            K::Fallible(x) | K::Pointer(x) | K::Weak(x) | K::Slice(x) | K::Variadic(x) | K::ArrayExpr(x, _) => ty(x, h),
             K::Array(x, n) => {
                 ty(x, h);
                 n.hash(h);

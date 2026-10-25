@@ -1,0 +1,13 @@
+// error: task.All takes tasks or one slice of tasks
+// status: passing
+namespace spec.diagnostics.task_all_spread_mixed
+
+import io
+
+async func one() int { return 1 }
+
+async func main() {
+    var ts []Task<int> = [one()]
+    var (a, b) = await task.All(one(), ts...)
+    println(a, b)
+}

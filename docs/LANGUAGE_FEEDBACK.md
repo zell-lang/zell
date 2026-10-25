@@ -497,7 +497,7 @@ written by hand), **33** (see 67), **46** (see 78).
     reflect.TypeOf<X>()` and `f.Attribute<A>() != nil` are static `if`
     conditions; (c) add `f.Set(target *T, value)` with the field's static
     type.
-68. ❌ **spec gap:** **there is no way to pass a slice to a variadic
+68. ✅ **Fixed (2026-10-25):** Go variadics and spread: a last parameter `args ...T` is a `[]T`, a call passes the remaining values or one slice as `xs...` (last argument only, only to a variadic parameter); the builtin variadics take it too: `append(xs, ys...)`, `fmt.Sprintf(format, args...)` with `args []any`, `task.All(ts...)`. `task.All(ts)` over a `[]Task<T>` is a `Task<[]T>` (`Task<([]T)!>` for `T!`, `Task<void>` for `void`), every task awaited and the first error in input order the result, like the variadic form (which also waits for every task rather than cancelling the rest); `task.Any(ts)` takes a slice too (DESIGN.md «Функции», «Асинхронность», `basics/variadic_spread`, `async2/task_all_slice`, `diagnostics/spread_*`, `diagnostics/variadic_*`); `kitchen_sink.zl` awaits `task.All(pending)` and appends with `...`, `docs/examples/jobrunner` waits for its workers with `task.All` instead of a `WaitGroup`. **spec gap:** **there is no way to pass a slice to a variadic
     parameter**, so `task.All` cannot wait on a number of tasks known only
     at run time ("task.All arguments must be tasks, found []Task<int>"),
     and `append(xs, ys...)` does not parse.

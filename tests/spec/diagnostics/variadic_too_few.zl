@@ -1,0 +1,11 @@
+// error: not enough arguments in call to join: expected at least 1, got 0
+// status: passing
+namespace spec.diagnostics.variadic_too_few
+
+import io
+
+func join(sep string, parts ...string) int { return len(sep) + len(parts) }
+
+func main() {
+    println(join())
+}

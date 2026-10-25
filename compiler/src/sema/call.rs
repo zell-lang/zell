@@ -75,12 +75,20 @@ impl<'a> Sema<'a> {
             if matches!(&expr::strip_parens(a).kind, ast::ExprKind::Lambda { params, .. } if params.iter().any(|p| matches!(p.ty.kind, ast::TypeKind::Infer))) {
                 continue;
             }
-            self.expr(a, None);
+            match &a.kind {
+                ast::ExprKind::Spread(x) => self.expr(x, None),
+                _ => self.expr(a, None),
+            };
         }
     }
 
     /// Checks call arguments against parameter types.
     pub(crate) fn check_args(&mut self, params: &[TypeId], args: &[ast::Expr], fname: &str, span: Span) -> Vec<hir::Expr> {
+        if let Some(a) = args.iter().find(|a| matches!(a.kind, ast::ExprKind::Spread(_))) {
+            self.err(format!("cannot use ... in call to non-variadic {fname}"), a.span);
+            self.check_args_loose(args);
+            return Vec::new();
+        }
         if params.len() != args.len() {
             if !args.iter().any(|a| a.is_recovered()) {
                 let ps: Vec<String> = params.iter().map(|p| self.tn(*p)).collect();
@@ -93,13 +101,136 @@ impl<'a> Sema<'a> {
         args.iter().zip(params).enumerate().map(|(i, (a, p))| self.expr_to(a, *p, Ctx::Arg(i, fname.to_string()))).collect()
     }
 
+    /// [`check_args`](Self::check_args) for user function `f`: a variadic
+    /// last parameter `...T` (a `[]T`) takes the remaining arguments as a
+    /// new slice, or one slice spread with `xs...` (Go rules).
+    pub(crate) fn check_fn_args(&mut self, f: FuncId, params: &[TypeId], args: &[ast::Expr], fname: &str, span: Span) -> Vec<hir::Expr> {
+        if !self.variadic.contains(&f.0) {
+            return self.check_args(params, args, fname, span);
+        }
+        let fixed = params.len() - 1;
+        let sl = params[fixed];
+        let Type::Slice(el) = *self.tt.get(sl) else { return self.check_args(params, args, fname, span) };
+        let spread_at = args.iter().position(|a| matches!(a.kind, ast::ExprKind::Spread(_)));
+        if let Some(i) = spread_at {
+            if i + 1 != args.len() || i != fixed {
+                let msg = if i + 1 != args.len() {
+                    "can only use ... with the final argument".to_string()
+                } else {
+                    format!("have {} arguments before ..., {fname} takes {fixed} before its variadic parameter", i)
+                };
+                self.err(msg, args[i].span);
+                self.check_args_loose(args);
+                return Vec::new();
+            }
+        } else if args.len() < fixed {
+            if !args.iter().any(|a| a.is_recovered()) {
+                let ps: Vec<String> = params.iter().enumerate().map(|(i, p)| if i == fixed { format!("...{}", self.tn(el)) } else { self.tn(*p) }).collect();
+                let help = format!("{fname} takes ({})", ps.join(", "));
+                self.err_help(format!("not enough arguments in call to {fname}: expected at least {fixed}, got {}", args.len()), span, help);
+            }
+            self.check_args_loose(args);
+            return Vec::new();
+        }
+        let mut out: Vec<hir::Expr> = args[..fixed].iter().zip(params).enumerate().map(|(i, (a, p))| self.expr_to(a, *p, Ctx::Arg(i, fname.to_string()))).collect();
+        if let Some(i) = spread_at {
+            let ast::ExprKind::Spread(x) = &args[i].kind else { unreachable!() };
+            out.push(self.expr_to(x, sl, Ctx::Arg(i, fname.to_string())));
+        } else {
+            let elems: Vec<hir::Expr> = args[fixed..].iter().enumerate().map(|(i, a)| self.expr_to(a, el, Ctx::Arg(fixed + i, fname.to_string()))).collect();
+            out.push(mk(ExprKind::SliceLit(elems), sl, span));
+        }
+        out
+    }
+
+    /// The one slice argument of `task.All` / `task.Any` (`ts` or `ts...`,
+    /// a `[]Task<T>`), checked; `Err` for the variadic form, with the
+    /// first argument when it was already lowered.
+    fn task_slice_arg(&mut self, what: &str, args: &[ast::Expr]) -> Result<hir::Expr, Option<hir::Expr>> {
+        let spread = args.iter().position(|a| matches!(a.kind, ast::ExprKind::Spread(_)));
+        if args.len() != 1 {
+            if let Some(i) = spread {
+                self.err(format!("{what} takes tasks or one slice of tasks: ... cannot follow other arguments"), args[i].span);
+            }
+            return Err(None);
+        }
+        let a = match &args[0].kind {
+            ast::ExprKind::Spread(x) => &**x,
+            _ => &args[0],
+        };
+        // A slice literal of tasks is the slice form too.
+        if spread.is_none() && !matches!(expr::strip_parens(a).kind, ast::ExprKind::SliceLit(_)) {
+            // Decided by the type: lowered once here, then kept.
+            let v = self.value(a, None);
+            return match *self.tt.get(v.ty) {
+                Type::Slice(t) if matches!(self.tt.get(t), Type::Task(_)) => Ok(v),
+                _ => Err(Some(v)),
+            };
+        }
+        let v = self.value(a, None);
+        match *self.tt.get(v.ty) {
+            Type::Slice(t) if matches!(self.tt.get(t), Type::Task(_)) => Ok(v),
+            Type::Invalid => Ok(v),
+            _ => {
+                self.err(format!("{what} of a slice needs a []Task<T>, found {}", self.tn(v.ty)), v.span);
+                Ok(self.invalid(v.span))
+            }
+        }
+    }
+
+    /// `task.All(ts)` over a slice: the `task.allSlice*` helpers of
+    /// `stdlib_src/task.zl` (every task awaited, results in input order,
+    /// the first error in input order for fallible tasks).
+    fn task_all_slice(&mut self, v: hir::Expr, span: Span) -> hir::Expr {
+        let Type::Slice(tt) = *self.tt.get(v.ty) else { return self.invalid(span) };
+        let Type::Task(r) = *self.tt.get(tt) else { return self.invalid(span) };
+        let (name, targs) = match self.tt.fallible_inner(r) {
+            Some(u) if matches!(self.tt.get(u), Type::Void) => ("allSliceVoidErr", vec![]),
+            Some(u) => ("allSliceErr", vec![u]),
+            None if matches!(self.tt.get(r), Type::Void) => ("allSliceVoid", vec![]),
+            None => ("allSlice", vec![r]),
+        };
+        let Some(t) = self.std_template("task", name) else { return self.invalid(span) };
+        let Some(fid) = self.instantiate_func(t, targs, span) else { return self.invalid(span) };
+        let ty = self.tt.task(self.sigs[fid.0 as usize].ret);
+        mk(ExprKind::Call { callee: Callee::Func(fid), args: vec![v] }, ty, span)
+    }
+
+    /// The template of stdlib Zell-source function `ns.name` (loading its
+    /// module).
+    pub(crate) fn std_template(&mut self, ns: &str, name: &str) -> Option<u32> {
+        let nsi = *self.ns_index.get(ns)?;
+        self.std_lookup_hook(nsi, name);
+        match self.nss[nsi].members.get(name)? {
+            (Member::Generic(t), _, _) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// `fmt.Sprintf(format, args...)`: `args` is a `[]any` (Go); the kinds
+    /// are taken from the dynamic types at run time (`fmt.sprintfSpread`).
+    fn sprintf_spread(&mut self, args: &[ast::Expr], i: usize, span: Span) -> hir::Expr {
+        if i != 1 || args.len() != 2 {
+            self.err("fmt.Sprintf takes a format and either values or one []any spread with ...", args[i].span);
+            self.check_args_loose(args);
+            return self.invalid(span);
+        }
+        let fmt = self.expr_to(&args[0], self.tt.string, Ctx::Arg(0, "fmt.Sprintf".into()));
+        let ast::ExprKind::Spread(x) = &args[1].kind else { unreachable!() };
+        let anys = self.tt.slice(self.tt.any);
+        let xs = self.expr_to(x, anys, Ctx::Arg(1, "fmt.Sprintf".into()));
+        let Some(t) = self.std_template("fmt", "sprintfSpread") else { return self.invalid(span) };
+        let Some(fid) = self.instantiate_func(t, Vec::new(), span) else { return self.invalid(span) };
+        mk(ExprKind::Call { callee: Callee::Func(fid), args: vec![fmt, xs] }, self.tt.string, span)
+    }
+
     /// Call of a symbolically resolved callee.
     pub(crate) fn call_res(&mut self, res: PathRes, name: &ast::Ident, args: &[ast::Expr], span: Span, expected: Option<TypeId>) -> hir::Expr {
         match res {
             PathRes::Member(Member::Func(f)) | PathRes::StaticMethod(f) => {
                 let sig = self.sigs[f.0 as usize].clone();
                 let fname = self.funcs[f.0 as usize].name.clone();
-                let args = self.check_args(&sig.params, args, &fname, span);
+                let args = self.check_fn_args(f, &sig.params, args, &fname, span);
                 if self.reflect_error_call(f, &args, span) && args.len() == 1 {
                     // Never runs when reachable (compile error); a terminating statement.
                     return mk(ExprKind::Builtin { op: Builtin::Panic, args }, self.tt.void, span);
@@ -290,7 +421,7 @@ impl<'a> Sema<'a> {
                 let sig = self.sigs[fid.0 as usize].clone();
                 let fname = format!("{}.{}", self.structs[sid as usize].name, name.name);
                 let mut hargs = vec![recv];
-                hargs.extend(self.check_args(&sig.params, args, &fname, span));
+                hargs.extend(self.check_fn_args(fid, &sig.params, args, &fname, span));
                 let ty = if sig.is_async { self.tt.task(sig.ret) } else { sig.ret };
                 return mk(ExprKind::Call { callee: Callee::Func(fid), args: hargs }, ty, span);
             }
@@ -314,7 +445,7 @@ impl<'a> Sema<'a> {
                 let sig = self.sigs[fid.0 as usize].clone();
                 let fname = format!("{}.{}", self.enums[d.0 as usize].name, name.name);
                 let mut hargs = vec![base];
-                hargs.extend(self.check_args(&sig.params, args, &fname, span));
+                hargs.extend(self.check_fn_args(fid, &sig.params, args, &fname, span));
                 let ty = if sig.is_async { self.tt.task(sig.ret) } else { sig.ret };
                 return mk(ExprKind::Call { callee: Callee::Func(fid), args: hargs }, ty, span);
             }
@@ -488,6 +619,17 @@ impl<'a> Sema<'a> {
                     return self.invalid(span);
                 };
                 let ty = s.ty;
+                // `append(xs, ys...)`: all of the slice `ys`.
+                if let Some(i) = args.iter().position(|a| matches!(a.kind, ast::ExprKind::Spread(_))) {
+                    if i != 1 || args.len() != 2 {
+                        self.err("append takes a slice and either values or one slice spread with ...", args[i].span);
+                        self.check_args_loose(&args[1..]);
+                        return self.invalid(span);
+                    }
+                    let ast::ExprKind::Spread(x) = &args[1].kind else { unreachable!() };
+                    let o = self.expr_to(x, ty, Ctx::Arg(1, "append".into()));
+                    return bi(Builtin::AppendSlice, vec![s, o], ty);
+                }
                 let mut hargs = vec![s];
                 for (i, a) in args[1..].iter().enumerate() {
                     hargs.push(self.expr_to(a, el, Ctx::Arg(i + 1, "append".into())));
@@ -702,6 +844,9 @@ impl<'a> Sema<'a> {
                     self.err("fmt.Sprintf needs a format string", span);
                     return self.invalid(span);
                 }
+                if let Some(i) = args.iter().position(|a| matches!(a.kind, ast::ExprKind::Spread(_))) {
+                    return self.sprintf_spread(args, i, span);
+                }
                 let fmt = self.expr_to(&args[0], self.tt.string, Ctx::Arg(0, "fmt.Sprintf".into()));
                 let (int, float, string) = (self.tt.int, self.tt.float, self.tt.string);
                 let mut kinds = String::new();
@@ -742,11 +887,23 @@ impl<'a> Sema<'a> {
                     self.err("task.All needs at least one task", span);
                     return self.invalid(span);
                 }
+                let mut first = match self.task_slice_arg("task.All", args) {
+                    Ok(v) if self.tt.is_invalid(v.ty) => return v,
+                    Ok(v) => return self.task_all_slice(v, span),
+                    Err(f) => f,
+                };
                 let mut vs = Vec::new();
                 let mut inner = Vec::new();
                 let mut fallible = false;
                 for a in args {
-                    let v = self.value(a, None);
+                    let a = match &a.kind {
+                        ast::ExprKind::Spread(x) => &**x,
+                        _ => a,
+                    };
+                    let v = match first.take() {
+                        Some(v) => v,
+                        None => self.value(a, None),
+                    };
                     match *self.tt.get(v.ty) {
                         Type::Task(t) => match self.tt.fallible_inner(t) {
                             Some(u) => {
@@ -773,10 +930,24 @@ impl<'a> Sema<'a> {
                     self.err("task.Any needs at least one task", span);
                     return self.invalid(span);
                 }
+                let mut first = match self.task_slice_arg("task.Any", args) {
+                    Ok(v) => {
+                        let Type::Slice(t) = *self.tt.get(v.ty) else { return v };
+                        return mk(ExprKind::Builtin { op: Builtin::TaskAny, args: vec![v] }, t, span);
+                    }
+                    Err(f) => f,
+                };
                 let mut vs: Vec<hir::Expr> = Vec::new();
                 let mut res: Option<TypeId> = None;
                 for a in args {
-                    let v = self.value(a, None);
+                    let a = match &a.kind {
+                        ast::ExprKind::Spread(x) => &**x,
+                        _ => a,
+                    };
+                    let v = match first.take() {
+                        Some(v) => v,
+                        None => self.value(a, None),
+                    };
                     match *self.tt.get(v.ty) {
                         Type::Task(t) => match res {
                             None => res = Some(t),

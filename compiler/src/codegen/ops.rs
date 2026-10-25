@@ -418,6 +418,20 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
                 Ok(Val::owned(self.b.build_load(self.slice_ty(), sp, "").unwrap()))
             }
+            Builtin::AppendSlice => {
+                let et = self.elem_of(ty).unwrap();
+                let s = self.expr_owned(&args[0])?;
+                let sp = self.spill(s);
+                let hs = self.hold_raw(args[0].ty, s);
+                let o = self.expr(&args[1])?;
+                self.unhold(hs);
+                let op = self.spill(o.get());
+                let sz = self.i64_ty().const_int(self.size_of(et), false);
+                let ops = self.value_ops(et);
+                self.call_rt("zell_slice_append_slice", &[sp.into(), sz.into(), ops.into(), op.into()]);
+                self.drop_val(args[1].ty, o);
+                Ok(Val::owned(self.b.build_load(self.slice_ty(), sp, "").unwrap()))
+            }
             Builtin::Delete => {
                 let (kt, _) = self.map_kv(args[0].ty);
                 let m = self.expr(&args[0])?;

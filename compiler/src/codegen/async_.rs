@@ -974,6 +974,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     /// `await task.Any(t1, ..., tn)`: `zell_task_any` yields the index of
     /// the first task to complete; its result is copied out (retained).
     fn await_any(&mut self, ty: TypeId, tasks: &[Expr]) -> R<Val<'ctx>> {
+        if tasks.len() == 1 && matches!(self.ty(tasks[0].ty), Type::Slice(_)) {
+            return self.await_any_slice(ty, &tasks[0]);
+        }
         let n = tasks.len() as u32;
         let arr_ty = self.ptr_ty().array_type(n);
         let arr = self.entry_alloca(arr_ty.into(), "any.tasks", false);
@@ -999,6 +1002,32 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         for (t, tv) in tasks.iter().zip(tvs) {
             self.drop_val(t.ty, tv);
         }
+        Ok(match r {
+            Some(v) => Val::owned(v),
+            None => Val::void(),
+        })
+    }
+
+    /// `await task.Any(ts)` over a slice `[]Task<T>`: `zell_task_any` on
+    /// the slice's elements (it panics for an empty slice).
+    fn await_any_slice(&mut self, ty: TypeId, ts: &Expr) -> R<Val<'ctx>> {
+        let d = self.depth();
+        let sv = self.expr(ts)?;
+        self.hold(ts.ty, sv);
+        self.forget_from(d);
+        let s = sv.get().into_struct_value();
+        let data = self.b.build_extract_value(s, 0, "any.data").unwrap().into_pointer_value();
+        let len = self.b.build_extract_value(s, 1, "any.len").unwrap();
+        let any = self.call_rt_v("zell_task_any", &[data.into(), len.into()]).into_pointer_value();
+        let slot = self.await_slot(any, None);
+        let idx = self.b.build_load(self.i64_ty(), slot, "any.idx").unwrap().into_int_value();
+        self.call_rt("zell_release", &[any.into()]);
+        let p = unsafe { self.b.build_in_bounds_gep(self.ptr_ty(), data, &[idx], "") }.unwrap();
+        let winner = self.b.build_load(self.ptr_ty(), p, "").unwrap().into_pointer_value();
+        let eo = self.fallible_err_off(ty);
+        let rslot = self.task_result_rt(winner, eo);
+        let r = self.load_result(ty, rslot);
+        self.drop_val(ts.ty, sv);
         Ok(match r {
             Some(v) => Val::owned(v),
             None => Val::void(),
