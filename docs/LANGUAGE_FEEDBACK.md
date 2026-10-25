@@ -202,7 +202,7 @@ documentation's Examples section, tested by
 39. ✅ **Fixed (2026-10-25):** added `testing.EqualMsg(t, got, want, msg)` (no variadics; named like `EqualFatal`), reporting `msg: got X, want Y`; `True`/`False` keep their required message; rules in `docs/guide/testing.md`. **`testing.Equal` and `testing.True` take messages inconsistently**:
     `Equal(t, got, want)` has no message argument, `True(t, cond, msg)`
     requires one. Workaround: `t.Log` the context before `Equal`.
-40. ❌ **`import net` brings `net.ErrNotFound` into scope and it clashes with
+40. ✅ **Fixed (2026-10-25):** cause: a declaration of the own namespace already won over a glob import (checked first), so the clash was silent; the decision is now spec text and uses of such a name report lint `L0010` `import-shadowed` (DESIGN.md «Правила импорта», docs/TOOLING.md, `lints/import_shadowed*`). **`import net` brings `net.ErrNotFound` into scope and it clashes with
     a local `ErrNotFound`**. Workaround: rename the local sentinel
     (`ErrBookNotFound`) or use `net.` names without the import.
 41. ✅ **Fixed (2026-10-25):** cause: a path head was looked up in the own namespace, imports and roots only; it now also names child namespaces of the enclosing namespaces, innermost first, after imports and roots (DESIGN.md «Правила импорта», `namespaces/sibling_relative_reference`). **Relative namespace references fail from a sibling namespace**

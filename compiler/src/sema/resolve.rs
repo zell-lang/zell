@@ -439,6 +439,9 @@ impl<'a> Sema<'a> {
             if let Member::Ns(ns) = m {
                 self.mark_ns_import_used(ns);
             }
+            if report {
+                self.note_import_shadowed(name);
+            }
             return Some(PathRes::Member(m));
         }
         // Stdlib code is instantiated in the scope of the user file that
@@ -529,6 +532,29 @@ impl<'a> Sema<'a> {
             self.err(format!("{n} is private to namespace {path} (only capitalised names are exported)"), name.span);
         }
         None
+    }
+
+    /// A declaration of the own namespace hides a name an import also
+    /// exports (DESIGN.md «Правила импорта»): no error, lint L0010 at the
+    /// use (the import's member stays reachable by its qualified name).
+    fn note_import_shadowed(&mut self, name: &ast::Ident) {
+        if self.nss[self.cur_ns].is_std {
+            return;
+        }
+        let n = name.name.as_str();
+        let hidden = self.file_scopes[self.cur_file].imports.iter().find_map(|e| match e {
+            ImportEntry::Glob(ns) => {
+                let m = self.nss[*ns].members.get(n)?;
+                let visible = (self.nss[*ns].is_std || is_exported(n)) && !matches!(m.0, Member::Ns(_));
+                visible.then(|| (self.nss[*ns].path.clone(), format!("import {}", self.nss[*ns].path)))
+            }
+            ImportEntry::Named(alias, _, ns) if alias == n => Some((self.nss[*ns].path.clone(), format!("import {}.{n}", self.nss[*ns].path))),
+            ImportEntry::Named(..) => None,
+        });
+        let Some((path, import)) = hidden else { return };
+        let msg = format!("{n} is the declaration of this namespace and hides {path}.{n} brought in by `{import}`; write {path}.{n} for the imported one");
+        let d = crate::diagnostics::Diagnostic::warning(msg, name.span).in_file(self.cur_file).with_code(super::lint::IMPORT_SHADOWED);
+        self.lint_notes.push(d);
     }
 
     /// A relative namespace reference (DESIGN.md «Правила импорта»): a

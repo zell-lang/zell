@@ -1,0 +1,27 @@
+// test: a declaration of the own namespace shadows a name brought in by an import without an error; the use reports L0010 and the qualified name still reaches the import (DESIGN.md «Правила импорта»)
+// status: passing
+// warning: warning[L0010]: ErrNotFound is the declaration of this namespace and hides net.ErrNotFound brought in by `import net`
+
+namespace spec.lints.import_shadowed
+
+import io
+import net
+import errors
+
+const ErrNotFound = error("book not found")
+
+func find(id int) int! {
+    if id == 0 {
+        return ErrNotFound
+    }
+    return id
+}
+
+func main() {
+    try {
+        find(0)?
+    } catch err {
+        println(err.Message(), errors.Is(err, ErrNotFound), errors.Is(err, net.ErrNotFound))
+    }
+    println(net.ErrNotFound.Message())
+}

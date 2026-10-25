@@ -1,0 +1,16 @@
+// test: no L0010 when the shadowing declaration is not used by its short name, or when the import does not export the name
+// status: passing
+// no-warning: L0010
+
+namespace spec.lints.import_shadowed_unused
+
+import io
+import net
+
+const ErrNotFound = error("book not found")
+
+const ErrBookMissing = error("missing")
+
+func main() {
+    println(net.ErrNotFound.Message(), ErrBookMissing.Message())
+}

@@ -26,6 +26,7 @@ pub(crate) fn empty_program() -> Program {
         entry: None,
         sources: Vec::new(),
         reflect: None,
+        lint_notes: Vec::new(),
     }
 }
 

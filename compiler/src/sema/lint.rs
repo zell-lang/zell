@@ -44,6 +44,7 @@ pub const UNUSED_PARAM: &str = "L0006";
 pub const UNUSED_FUNC: &str = "L0007";
 pub const DEFER_IN_LOOP: &str = "L0008";
 pub const DROP_CAPTURE: &str = "L0009";
+pub const IMPORT_SHADOWED: &str = "L0010";
 
 /// Every lint, by code.
 pub const LINTS: &[Lint] = &[
@@ -55,6 +56,7 @@ pub const LINTS: &[Lint] = &[
     Lint { code: UNUSED_PARAM, name: "unused-param", severity: Severity::Hint, unnecessary: true, doc: "a parameter of a private function that its body never reads" },
     Lint { code: UNUSED_FUNC, name: "unused-func", severity: Severity::Warning, unnecessary: true, doc: "a private function nothing calls or refers to" },
     Lint { code: DEFER_IN_LOOP, name: "defer-in-loop", severity: Severity::Info, unnecessary: false, doc: "`defer` in a loop runs at function exit, not per iteration, and makes every defer of the function use the heap" },
+    Lint { code: IMPORT_SHADOWED, name: "import-shadowed", severity: Severity::Warning, unnecessary: false, doc: "a declaration of the own namespace hides a name an import also brings in: the short name means the local one, the import's needs its qualified name" },
     Lint { code: DROP_CAPTURE, name: "drop-capture", severity: Severity::Warning, unnecessary: false, doc: "a type with `Drop` stores a closure capturing `this` in its own field: the object keeps itself alive and `Drop` waits for the cycle collector" },
 ];
 
@@ -159,6 +161,7 @@ pub fn check(p: &Program, texts: &[&str], wanted: &dyn Fn(usize) -> bool, diags:
         cx.function(FuncId(i as u32), f);
     }
     cx.drop_captures(wanted);
+    out.extend(p.lint_notes.iter().filter(|d| d.file < texts.len() && wanted(d.file)).cloned());
     out.sort_by_key(|d| (d.file, d.span.start));
     let mut seen = HashSet::new();
     for mut d in out {

@@ -98,6 +98,9 @@ pub struct Program {
     /// Reflection metadata wanted by the program (`reflect` was used),
     /// see [`Reflect`]; `None` when the program uses no reflection.
     pub reflect: Option<Reflect>,
+    /// Lint findings made during analysis (name resolution), filtered and
+    /// levelled by [`crate::sema::lint::check`] with the others.
+    pub lint_notes: Vec<crate::diagnostics::Diagnostic>,
 }
 
 /// What code generation needs for reflection (DESIGN.md "Рефлексия",

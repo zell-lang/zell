@@ -350,6 +350,8 @@ pub(crate) struct Sema<'a> {
     pub extern_map: HashMap<String, hir::ExternId>,
     /// Current file and namespace.
     pub cur_file: usize,
+    /// Lint findings of name resolution (`hir::Program::lint_notes`).
+    pub lint_notes: Vec<crate::diagnostics::Diagnostic>,
     pub cur_ns: NsIdx,
     /// Function contexts, innermost last.
     pub fns: Vec<FnCtx>,
@@ -424,6 +426,7 @@ impl<'a> Sema<'a> {
             externs: Vec::new(),
             extern_map: HashMap::new(),
             cur_file: 0,
+            lint_notes: Vec::new(),
             cur_ns: 0,
             fns: Vec::new(),
             lambda_count: 0,
@@ -528,6 +531,7 @@ impl<'a> Sema<'a> {
             entry,
             sources: Vec::new(),
             reflect,
+            lint_notes: self.lint_notes,
         }
     }
 
