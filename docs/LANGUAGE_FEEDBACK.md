@@ -190,7 +190,7 @@ documentation's Examples section, tested by
     for the location.
 35. ❌ **`fmt.Format` has no alignment or width** (`{0,-10}` in C#).
     Workaround: `fmt.Sprintf("%-10s", ...)` or `text.table`.
-36. ❌ **`strings.Builder` lacks `WriteRune`**. Workaround:
+36. ✅ **Fixed (2026-10-25):** `strings.Builder` gained `WriteRune(r char)` (UTF-8, invalid code points as U+FFFD) plus the Go names `WriteString` and `WriteByte`. **`strings.Builder` lacks `WriteRune`**. Workaround:
     `b.WriteString(string(r))`.
 37. ❌ **No indented JSON output** (`json.MarshalIndent`). Workaround: the
     examples print compact JSON.

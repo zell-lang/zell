@@ -1,0 +1,21 @@
+// test: strings.Builder.WriteRune encodes 1- to 4-byte runes as UTF-8, WriteByte and WriteString append bytes and text
+// status: passing
+namespace spec.strings2.builder_write_rune
+
+import io
+
+func main() {
+    var b = strings.Builder{}
+    for r in "aé€😀" {
+        b.WriteRune(r)
+    }
+    b.WriteByte(byte(33))
+    b.WriteString(" ok")
+    var s = b.String()
+    println(s, len(s), len(strings.Runes(s)))
+    var big = strings.Builder{}
+    for _ in 0..100 {
+        big.WriteRune('я')
+    }
+    println(big.Len(), strings.Count(big.String(), "я"))
+}

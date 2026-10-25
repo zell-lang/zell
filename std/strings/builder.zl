@@ -15,6 +15,51 @@ struct Builder {
         this.n = need
     }
 
+    // WriteString appends s (the Go name of Write).
+    func WriteString(s string) {
+        this.Write(s)
+    }
+
+    // WriteByte appends one byte.
+    func WriteByte(c byte) {
+        if this.n + 1 > len(this.buf) {
+            this.grow(this.n + 1)
+        }
+        this.buf[this.n] = c
+        this.n += 1
+    }
+
+    // WriteRune appends the UTF-8 encoding of r; an invalid code point
+    // (a surrogate or above U+10FFFF) is written as U+FFFD.
+    func WriteRune(r char) {
+        var c = int(r)
+        if c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF) {
+            c = 0xFFFD
+        }
+        if this.n + 4 > len(this.buf) {
+            this.grow(this.n + 4)
+        }
+        if c < 0x80 {
+            this.buf[this.n] = byte(c)
+            this.n += 1
+        } else if c < 0x800 {
+            this.buf[this.n] = byte(0xC0 | (c >> 6))
+            this.buf[this.n + 1] = byte(0x80 | (c & 0x3F))
+            this.n += 2
+        } else if c < 0x10000 {
+            this.buf[this.n] = byte(0xE0 | (c >> 12))
+            this.buf[this.n + 1] = byte(0x80 | ((c >> 6) & 0x3F))
+            this.buf[this.n + 2] = byte(0x80 | (c & 0x3F))
+            this.n += 3
+        } else {
+            this.buf[this.n] = byte(0xF0 | (c >> 18))
+            this.buf[this.n + 1] = byte(0x80 | ((c >> 12) & 0x3F))
+            this.buf[this.n + 2] = byte(0x80 | ((c >> 6) & 0x3F))
+            this.buf[this.n + 3] = byte(0x80 | (c & 0x3F))
+            this.n += 4
+        }
+    }
+
     func grow(need int) {
         var c = len(this.buf) * 2
         if c < 64 {
