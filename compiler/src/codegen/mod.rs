@@ -45,8 +45,8 @@
 //! structs) as immortal objects through NULL-backed slices; a method lists
 //! its parameters (`ParamInfo`, receiver excluded) and a struct/enum/
 //! interface table its declaring namespace (`Package`, appended at +232).
-//! `reflect.TypesWith<A>()` is a constant slice of the marked types'
-//! tables (`Reflect::types_with`). Functions
+//! `reflect.TypesWith<A>()` returns a fresh heap slice of the marked
+//! types' tables per call (`Reflect::types_with`). Functions
 //! listed in `Reflect::intrinsics` get their bodies from
 //! `CodeGen::emit_intrinsic` instead of their HIR.
 //!

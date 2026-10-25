@@ -211,8 +211,8 @@ pub enum Intrinsic {
     AsFunc(TypeId),
     /// `storeTag<T>(p *T, tag int)`: sets the tag of a plain enum.
     StoreTag(TypeId),
-    /// `TypesWith<A>() []*TypeInfo`: the constant slice of the types
-    /// marked with `A` ([`Reflect::types_with`]).
+    /// `TypesWith<A>() []*TypeInfo`: a fresh slice of the types marked
+    /// with `A` ([`Reflect::types_with`]).
     TypesWith(TypeId),
 }
 

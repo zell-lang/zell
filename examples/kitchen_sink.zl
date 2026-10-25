@@ -985,7 +985,7 @@ struct PaidReport {
 }
 
 func runReports(orders []*Order) void! {
-    var found = slices.Clone(reflect.TypesWith<handler>())
+    var found = reflect.TypesWith<handler>()
     slices.SortBy(found, (t *reflect.TypeInfo) => t.Attribute<handler>().order)
     for t in found {
         var h = t.Attribute<handler>()

@@ -1,0 +1,29 @@
+// test: TypesWith<A>() returns a fresh slice per call: sorting it and writing into it does not touch the next call's result
+// status: passing
+namespace spec.reflection.types_with_sort
+
+import io
+
+@attribute(targets: [reflect.Target.Struct])
+struct job {
+    order int
+}
+
+@job(order: 3)
+struct A {}
+
+@job(order: 1)
+struct B {}
+
+@job(order: 2)
+struct C {}
+
+func main() {
+    var ts = reflect.TypesWith<job>()
+    slices.SortBy(ts, (t *reflect.TypeInfo) => t.Attribute<job>().order)
+    println(ts[0].Name, ts[1].Name, ts[2].Name)
+    ts[0] = ts[2]
+    println(ts[0].Name)
+    var again = reflect.TypesWith<job>()
+    println(again[0].Name, again[1].Name, again[2].Name)
+}

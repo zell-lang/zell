@@ -719,9 +719,27 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
                 Intrinsic::TypesWith(a) => {
                     let ts = cg.refl().types_with.iter().find(|(x, _)| *x == a).map(|(_, ts)| ts.clone()).unwrap_or_default();
-                    let elems: Vec<BasicValueEnum<'ctx>> = ts.into_iter().map(|t| cg.type_info(t).into()).collect();
-                    let pt = cg.ptr_ty().into();
-                    Some(cg.const_slice(pt, elems))
+                    // A fresh heap slice per call: the caller may sort or
+                    // overwrite it, so it must not alias a constant table.
+                    // The tables are immortal, so storing them needs no retain.
+                    if ts.is_empty() {
+                        Some(cg.slice_ty().const_zero().into())
+                    } else {
+                        let elems: Vec<BasicValueEnum<'ctx>> = ts.into_iter().map(|t| cg.type_info(t).into()).collect();
+                        let out = cg.entry_alloca(cg.slice_ty().into(), "tw", false);
+                        let n = cg.i64_ty().const_int(elems.len() as u64, false);
+                        let size = cg.i64_ty().const_int(8, false);
+                        let rt = cg.prog.funcs[fid.0 as usize].ret;
+                        let et = cg.elem_of(rt).unwrap();
+                        let ops = cg.value_ops(et);
+                        cg.call_rt("zell_slice_new_ops", &[out.into(), size.into(), n.into(), n.into(), ops.into()]);
+                        let data = cg.b.build_load(ptr, out, "").unwrap().into_pointer_value();
+                        for (i, e) in elems.into_iter().enumerate() {
+                            let at = unsafe { cg.b.build_in_bounds_gep(ptr, data, &[cg.i64_ty().const_int(i as u64, false)], "") }.unwrap();
+                            cg.b.build_store(at, e).unwrap();
+                        }
+                        Some(cg.b.build_load(cg.slice_ty(), out, "").unwrap())
+                    }
                 }
                 Intrinsic::LoadAddr => {
                     let a = cg.b.build_int_to_ptr(p(0).into_int_value(), ptr, "").unwrap();

@@ -309,7 +309,7 @@ in an interface; `Notifier` returns `Task<int>` from a private async
 function), **12** (`math.Min/Max` take only floats; `minInt`/`maxInt`
 written by hand), **33** (see 67), **46** (see 78).
 
-57. ❌ **bug:** **writing into the slice from `reflect.TypesWith<A>()` crashes
+57. ✅ **Fixed (2026-10-25):** **bug:** **writing into the slice from `reflect.TypesWith<A>()` crashes
     the process (SIGSEGV)**. The slice points at the read-only static table,
     so `slices.SortBy` crashes, and so does a plain `ts[0] = ts[1]`.
     ```zell
@@ -321,6 +321,12 @@ written by hand), **33** (see 67), **46** (see 78).
     the copy costs one allocation per call. The other choice is a slice
     flagged as read-only, so writes panic with `cannot modify a reflection
     table`. Add a spec test that sorts the result.
+    **Cause and fix:** the intrinsic returned `const_slice`, a slice over an
+    internal constant global placed in read-only memory, so any store
+    faulted. `TypesWith<A>()` now allocates a fresh slice per call
+    (`zell_slice_new_ops`, the tables stay static and immortal); nothing is
+    emitted when it is unused. Spec test `reflection/types_with_sort`; the
+    `slices.Clone` workaround is gone from `examples/kitchen_sink.zl`.
 58. ❌ **bug:** **a real SIGSEGV (as in 57) prints nothing and loses all
     buffered stdout**: the ~90 lines the program had already printed were
     gone, with no message and exit code 139. A nil dereference is caught

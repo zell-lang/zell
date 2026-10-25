@@ -2793,9 +2793,12 @@ literals.
   `reflect.Fields<T>()`, declared `@reflect`, or listed by
   `reflect.TypesWith<A>()` — list their non-async methods and get `ptr_to`;
   other tables have no methods. Interface tables carry `attrs` (no methods).
-- `reflect.TypesWith<A>()` returns a constant slice (NULL backing) of the
-  tables of the marked types, computed by the compiler over the whole
-  program; it is emitted once per attribute type `A`.
+- `reflect.TypesWith<A>()` returns a fresh +1 slice (`zell_slice_new_ops`,
+  one allocation per call; nil when no type is marked) of the tables of the
+  marked types, computed by the compiler over the whole program; the
+  function is emitted once per attribute type `A`. The tables are immortal,
+  so they are stored without a retain; the caller may sort or overwrite
+  the slice.
 - The layout grows only by appending (`package` at +232, `params` at +72 of
   a method were added on 2026-10-24); existing offsets never move.
 - A struct field spelled with a builtin alias (`int64`, `uint`, `uint8`,
