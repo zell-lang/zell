@@ -18,7 +18,19 @@ impl<'a> Sema<'a> {
     fn stmt_list(&mut self, stmts: &[ast::Stmt]) -> Vec<Stmt> {
         let mut out = Vec::new();
         for s in stmts {
+            let n = out.len();
             self.stmt(s, &mut out);
+            // A static `if` / `switch` (lowered to the block of the branch
+            // taken) whose branch terminates: the rest of the list is dead
+            // in this instantiation and is not checked, like a dropped
+            // branch (DESIGN.md "Статическая рефлексия").
+            if matches!(s.kind, ast::StmtKind::If(_) | ast::StmtKind::Switch(_)) && out.len() == n + 1 {
+                if let StmtKind::Block(b) = &out[n].kind {
+                    if terminates(&b.stmts, true) {
+                        break;
+                    }
+                }
+            }
         }
         out
     }

@@ -1,0 +1,18 @@
+// error: Name needs a struct, got int
+// status: passing
+// stderr: raised by Name<int>
+namespace spec.reflection.static_if_fallthrough_error
+
+import io
+
+// The fall-through after a static if is live when the branch is not taken.
+func Name<T>(x T) string {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
+        return "struct"
+    }
+    reflect.Error("Name needs a struct, got " + reflect.TypeOf<T>().Name)
+}
+
+func main() {
+    println(Name(1))
+}

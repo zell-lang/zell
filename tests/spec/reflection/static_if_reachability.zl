@@ -1,0 +1,51 @@
+// test: after a static if whose taken branch terminates, the rest of the block is dead in that instantiation: reflect.Error there raises nothing, and a variable used only in the dropped code is not "unused"
+// status: passing
+namespace spec.reflection.static_if_reachability
+
+import io
+
+func Name<T>(x T) string {
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
+        return "struct " + reflect.TypeOf<T>().Name
+    }
+    reflect.Error("Name needs a struct, got " + reflect.TypeOf<T>().Name)
+}
+
+// An else-if chain: each taken branch returns, the trailing reflect.Error
+// is reached only by types no branch accepts.
+func Size<T>(x T) int {
+    var extra = 1
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Int {
+        return x
+    } else if reflect.TypeOf<T>().Kind == reflect.Kind.String {
+        return len(x)
+    }
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Slice {
+        return len(x) + extra
+    }
+    reflect.Error("Size: unsupported type " + reflect.TypeOf<T>().Name)
+}
+
+// `continue` in a static branch inside an unrolled field loop ends the copy.
+func Count<T>(v T) int {
+    var n = 0
+    for f in reflect.Fields<T>() {
+        if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
+            n = n + len(f.Name)
+            continue
+        }
+        reflect.Error("unreachable for structs")
+    }
+    return n
+}
+
+struct Point {
+    X int
+    Y int
+}
+
+func main() {
+    println(Name(Point{}))
+    println(Size(7), Size("abc"), Size([1, 2]))
+    println(Count(Point{X: 1}))
+}

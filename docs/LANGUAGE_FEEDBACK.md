@@ -283,7 +283,7 @@ the next `Send`; arenas crash in `zell_retain` past ~12 000 objects).
 
 ## Found while fixing the items above (2026-10-25)
 
-53. ❌ **A statement after a static `if` whose then-branch returns is still
+53. ✅ **Fixed (2026-10-25):** after a folded static `if` (or static `switch`) whose taken branch terminates (`return`, `break`, `continue`, `panic`, `reflect.Error`), the rest of the block is dead for that instantiation and not checked (`Sema::stmt_list`); unused variables of generic bodies are reported by the abstract check only, so code dropped in an instance does not make them "unused". Spec: `reflection/static_if_reachability`, `static_if_fallthrough_error`. **A statement after a static `if` whose then-branch returns is still
     "reachable"**: `if Kind == Struct { return "ok" }; reflect.Error(...)`
     fires the error for valid types; only an explicit `else` works.
     Reachability after a folded static `if` should treat the fall-through as

@@ -747,6 +747,12 @@ impl<'a> Sema<'a> {
         self.fcx().scopes.push(Vec::new());
     }
 
+    /// True while checking a concrete instance of a generic function (or a
+    /// lambda inside one).
+    pub(crate) fn in_concrete_instance(&self) -> bool {
+        self.fns.iter().any(|f| f.func.is_some_and(|fid| self.gen.insts.get(&fid.0).is_some_and(|i| i.note.is_some())))
+    }
+
     /// Pops a scope, reporting unused variables.
     pub fn pop_scope(&mut self) {
         let scope = self.fcx().scopes.pop().unwrap_or_default();
@@ -754,7 +760,10 @@ impl<'a> Sema<'a> {
             if let ScopeEntry::Local(l) = e {
                 let f = self.fns.last().unwrap();
                 // A variable with a destructor is used by its destructor.
-                if !f.used[l.0 as usize] && !f.recovering && !self.type_has_dtor(f.locals[l.0 as usize].ty) {
+                // In a concrete generic instance code dropped by a static
+                // `if` may hold the only use; the abstract check of the
+                // body sees every branch and reports unused variables.
+                if !f.used[l.0 as usize] && !f.recovering && !self.type_has_dtor(f.locals[l.0 as usize].ty) && !self.in_concrete_instance() {
                     let span = f.locals[l.0 as usize].span;
                     let fix = Fix::edit(format!("Rename {name} to _"), span, "_");
                     let mut d = Diagnostic::error(format!("unused variable {name}: declared and never used"), span)
