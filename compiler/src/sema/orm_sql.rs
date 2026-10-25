@@ -176,6 +176,7 @@ pub(crate) fn mentions(e: &ast::Expr, names: &[String]) -> bool {
         K::TypeArgs { base, .. } => mentions(base, names),
         K::SliceLit(xs) | K::Tuple(xs) => xs.iter().any(|x| mentions(x, names)),
         K::MapLit { entries, .. } => entries.iter().any(|(k, v)| mentions(k, names) || mentions(v, names)),
+        K::CompositeLit { elems, .. } => elems.iter().any(|(k, v)| k.as_ref().is_some_and(|k| mentions(k, names)) || mentions(v, names)),
         K::Range(a, b) => a.as_ref().is_some_and(|x| mentions(x, names)) || b.as_ref().is_some_and(|x| mentions(x, names)),
         K::Lambda { params, body, .. } => {
             let inner: Vec<String> = names.iter().filter(|n| !params.iter().any(|p| p.name.name == **n)).cloned().collect();

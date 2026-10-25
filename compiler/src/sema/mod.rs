@@ -271,6 +271,11 @@ pub(crate) struct FnCtx {
     /// ([`hir::StmtKind::Defer`]): none is inside a loop and there are at
     /// most [`hir::MAX_OPEN_DEFERS`]. Set by [`Sema::fn_body`].
     pub open_defers: bool,
+    /// Diagnostics before the body (index into `diags.items`) and the
+    /// declaration's span: an error after the start or inside the span (a
+    /// bad parameter type) makes follow-up `<invalid>` messages noise.
+    pub diag_start: usize,
+    pub decl_span: Option<Span>,
 }
 
 impl FnCtx {
@@ -290,6 +295,8 @@ impl FnCtx {
             try_depth: 0,
             recovering: false,
             open_defers: false,
+            diag_start: 0,
+            decl_span: None,
         }
     }
 
@@ -649,11 +656,26 @@ impl<'a> Sema<'a> {
         if self.gen.mute > 0 {
             return;
         }
+        // A type that is `<invalid>` comes from an error already reported
+        // in this function: its follow-ups only repeat it.
+        if d.severity == crate::diagnostics::Severity::Error && d.message.contains("<invalid>") && self.function_has_error() {
+            return;
+        }
         self.unit_note_diag();
         if let Some(n) = &self.gen.note {
             d = d.with_note(n.clone(), None);
         }
         self.diags.push(d);
+    }
+
+    /// An error was already reported in the function being checked (its
+    /// body so far, or its declaration: parameter and result types).
+    fn function_has_error(&self) -> bool {
+        let Some(f) = self.fns.first() else { return false };
+        let file = self.cur_file;
+        self.diags.items.iter().enumerate().any(|(i, x)| {
+            x.severity == crate::diagnostics::Severity::Error && x.file == file && (i >= f.diag_start || f.decl_span.is_some_and(|s| s.start <= x.span.start && x.span.end <= s.end))
+        })
     }
 
     /// Spelling of a type for messages: declared types of the current
@@ -927,6 +949,8 @@ impl<'a> Sema<'a> {
         let sig = self.sigs[fid.0 as usize].clone();
         let mut ctx = FnCtx::new(Some(fid), sig.ret, sig.is_async, f.name.clone());
         ctx.recovering = body.has_errors();
+        ctx.diag_start = self.diags.items.len();
+        ctx.decl_span = Some(decl.span);
         // Parameters were registered as locals by `resolve_signatures`.
         ctx.locals = f.locals.clone();
         ctx.used = vec![true; ctx.locals.len()];

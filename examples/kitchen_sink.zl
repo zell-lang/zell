@@ -732,7 +732,7 @@ async func streamTotals(src task.Channel<int>) string {
 async func demoAsync(cfg Config, book *OrderBook) void! {
     println("== async")
     var w = new Warehouse{
-        stock: map[Sku]int{"apple": 10, "pear": 3, "plum": 0, "fig": 5},
+        stock: Inventory{"apple": 10, "pear": 3, "plum": 0, "fig": 5},
         price: map[Sku]Cents{"apple": 120, "pear": 99, "plum": 250, "fig": 75},
     }
     var orders []*Order = []

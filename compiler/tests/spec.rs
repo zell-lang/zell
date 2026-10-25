@@ -14,7 +14,7 @@
 //! | `// args: a b` | program arguments (split on whitespace) |
 //! | `// run-flags: --x` | use `zell run <src> <flags> -- <args>` instead of build + exec |
 //! | `// stderr: <text>` | stderr must contain `<text>` (repeatable; stderr is otherwise not checked) |
-//! | `// no-stderr: <text>` | stderr must not contain `<text>` (repeatable) |
+//! | `// no-stderr: <text>` | stderr (of the run, or of the build for an `// error:` test) must not contain `<text>` (repeatable) |
 //! | `// warning: <text>` | the build's stderr must contain `<text>` (repeatable; e.g. a W0001 warning) |
 //! | `// no-warning: <text>` | the build's stderr must not contain `<text>` (repeatable) |
 //! | `// env: K=V` | environment variable of the program run (repeatable; `K=` removes `K`, e.g. `ZELL_NO_BACKTRACE=` to check a panic backtrace) |
@@ -259,6 +259,9 @@ fn check(case: &Case) -> Result<(), String> {
             }
             if !o.stderr.contains(kw.as_str()) {
                 return Err(format!("build failed, but stderr does not contain `{kw}`:\n{}", o.stderr.trim_end()));
+            }
+            if let Some(s) = case.dirs.no_stderr.iter().find(|s| o.stderr.contains(s.as_str())) {
+                return Err(format!("build stderr contains `{s}`:\n{}", o.stderr.trim_end()));
             }
             return Ok(());
         }

@@ -1411,14 +1411,14 @@ impl Parser<'_> {
                     ExprKind::Propagate { expr: Box::new(expr), context }
                 }
                 TokenKind::LBrace if !self.no_struct_lit => match struct_lit_path(&expr) {
-                    Some(path) => ExprKind::StructLit { path, generics: Vec::new(), fields: self.struct_fields()? },
+                    Some(path) => self.lit_body(path, Vec::new())?,
                     None => return Ok(expr),
                 },
                 TokenKind::Lt if is_name_path(&expr) => {
                     match self.try_type_args() {
                         Some(args) if self.at(&TokenKind::LBrace) => match struct_lit_path(&expr) {
                             Some(path) if !self.no_struct_lit => {
-                                ExprKind::StructLit { path, generics: args, fields: self.struct_fields()? }
+                                self.lit_body(path, args)?
                             }
                             _ => ExprKind::TypeArgs { base: Box::new(expr), args },
                         },
@@ -1512,29 +1512,71 @@ impl Parser<'_> {
     }
 
     /// `{ Name: value, ... }` after a struct literal's path.
-    fn struct_fields(&mut self) -> PResult<Vec<FieldInit>> {
+    /// The `{...}` after a type name: `Name: value` fields (a struct
+    /// literal, or a map literal through an alias with variable keys), or
+    /// else `key: value` / `value` elements of a map or slice literal
+    /// through an alias. A malformed element is skipped up to the next `,`
+    /// or the closing `}`, so the rest of the function still parses.
+    fn lit_body(&mut self, path: Path, generics: Vec<TypeExpr>) -> PResult<ExprKind> {
         self.expect(&TokenKind::LBrace)?;
-        let fields = self.with_struct_lit(true, |p| {
-            let mut fields = Vec::new();
+        let mut fields: Vec<FieldInit> = Vec::new();
+        let mut elems: Vec<(Option<Expr>, Expr)> = Vec::new();
+        let mut keyed_only = true;
+        self.with_struct_lit(true, |p| {
             loop {
                 p.skip_semis();
                 if p.at(&TokenKind::RBrace) || p.at_eof() {
                     break;
                 }
-                let name = if p.at_field_name_colon() { p.field_decl_name()? } else { p.ident()? };
-                p.expect(&TokenKind::Colon)?;
-                let value = p.parse_expr()?;
-                fields.push(FieldInit { span: name.span.to(value.span), name, value });
+                let elem = (|| -> PResult<()> {
+                    if p.at_field_name_colon() {
+                        let name = p.field_decl_name()?;
+                        p.expect(&TokenKind::Colon)?;
+                        let value = p.parse_expr()?;
+                        fields.push(FieldInit { span: name.span.to(value.span), name: name.clone(), value: value.clone() });
+                        elems.push((Some(Expr { span: name.span, kind: ExprKind::Ident(name) }), value));
+                    } else {
+                        keyed_only = false;
+                        let first = p.parse_expr()?;
+                        if p.eat(&TokenKind::Colon) {
+                            let value = p.parse_expr()?;
+                            elems.push((Some(first), value));
+                        } else {
+                            elems.push((None, first));
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = elem {
+                    if p.silent {
+                        return Err(e);
+                    }
+                    p.skip_list_elem(&TokenKind::RBrace);
+                }
                 p.skip_semis();
-                if !p.eat(&TokenKind::Comma) {
+                if p.eat(&TokenKind::Comma) {
+                    continue;
+                }
+                if p.at(&TokenKind::RBrace) || p.at_eof() {
                     break;
+                }
+                let e = p.unexpected("`,` or `}`");
+                if p.silent {
+                    return Err(e);
+                }
+                p.skip_list_elem(&TokenKind::RBrace);
+                if !p.eat(&TokenKind::Comma) && !p.at(&TokenKind::RBrace) {
+                    // a line break inside the literal: go on with the next line
+                    if !p.eat(&TokenKind::Semi) {
+                        break;
+                    }
                 }
             }
             p.skip_semis();
-            Ok(fields)
+            Ok(())
         })?;
         self.expect(&TokenKind::RBrace)?;
-        Ok(fields)
+        Ok(if keyed_only { ExprKind::StructLit { path, generics, fields } } else { ExprKind::CompositeLit { path, generics, elems } })
     }
 
     fn primary(&mut self) -> PResult<Expr> {
@@ -1619,8 +1661,9 @@ impl Parser<'_> {
         let path = self.path()?;
         let generics = if self.at(&TokenKind::Lt) { self.try_type_args().unwrap_or_default() } else { Vec::new() };
         if self.at(&TokenKind::LBrace) {
-            let fields = self.struct_fields()?;
-            return Ok(Expr { span: self.span_from(path.span), kind: ExprKind::StructLit { path, generics, fields } });
+            let start = path.span;
+            let kind = self.lit_body(path, generics)?;
+            return Ok(Expr { span: self.span_from(start), kind });
         }
         if !generics.is_empty() {
             return Err(self.unexpected("`{`"));

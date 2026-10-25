@@ -71,7 +71,7 @@ pub(crate) const ATTR_STRUCTS: &[&str] = &["json", "deprecated", "inline", "test
 /// Builtin attributes whose value struct has another name in
 /// `reflect.zl`: `@log`'s is `logAttr`, so that the root namespace
 /// `log` and `import reflect` can be used together.
-const ATTR_STRUCT_NAMES: &[(&str, &str)] = &[("log", "logAttr"), ("csv", "csvAttr"), ("xml", "xmlAttr"), ("yaml", "yamlAttr"), ("toml", "tomlAttr")];
+pub(crate) const ATTR_STRUCT_NAMES: &[(&str, &str)] = &[("log", "logAttr"), ("csv", "csvAttr"), ("xml", "xmlAttr"), ("yaml", "yamlAttr"), ("toml", "tomlAttr")];
 
 /// Builtin type names whose canonical spelling differs (`int64` is `int`).
 const ALIAS_SPELLINGS: &[&str] = &["int64", "uint", "uint8", "float64"];
@@ -114,7 +114,7 @@ pub(crate) struct ReflState {
     /// Per module: loaded.
     loaded: Vec<bool>,
     /// Struct / enum / function / template ids of loaded modules by name.
-    structs: HashMap<String, u32>,
+    pub(crate) structs: HashMap<String, u32>,
     enums: HashMap<String, u32>,
     funcs: HashMap<String, FuncId>,
     templates: HashMap<String, u32>,

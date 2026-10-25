@@ -106,7 +106,7 @@ fn assignop(op: AssignOp) -> &'static str {
 }
 
 fn is_literal(e: &Expr) -> bool {
-    matches!(e.kind, ExprKind::StructLit { .. } | ExprKind::MapLit { .. } | ExprKind::SliceLit(_))
+    matches!(e.kind, ExprKind::StructLit { .. } | ExprKind::CompositeLit { .. } | ExprKind::MapLit { .. } | ExprKind::SliceLit(_))
 }
 
 impl<'a> Fmt<'a> {
@@ -995,7 +995,7 @@ impl<'a> Fmt<'a> {
                 concat(parts)
             }
             ExprKind::Await(x) => concat(vec![text("await "), self.expr(x)]),
-            ExprKind::StructLit { .. } | ExprKind::MapLit { .. } | ExprKind::SliceLit(_) => self.literal(e, false),
+            ExprKind::StructLit { .. } | ExprKind::CompositeLit { .. } | ExprKind::MapLit { .. } | ExprKind::SliceLit(_) => self.literal(e, false),
             ExprKind::TypeArgs { base, args } => concat(vec![self.expr(base), self.type_args(args)]),
             ExprKind::New(x) => concat(vec![text("new "), self.expr(x)]),
             ExprKind::Tuple(es) => {
@@ -1124,6 +1124,25 @@ impl<'a> Fmt<'a> {
                 let head = concat(vec![text(path.to_string()), if generics.is_empty() { Doc::Nil } else { self.type_args(generics) }]);
                 let opts = ListOpts { open: "{", close: "}", close_pos: close, force, sep: Sep::Comma, pad: false };
                 let list = self.list(fields, |f| f.span, |f, fi| concat(vec![text(format!("{}: ", fi.name.name)), f.expr(&fi.value)]), opts);
+                concat(vec![head, list])
+            }
+            ExprKind::CompositeLit { path, generics, elems } => {
+                let after = generics.last().map_or(path.span.end, |g| g.span.end);
+                let open = self.tok_after(after, &TokenKind::LBrace).unwrap_or(after);
+                let span_of = |(k, v): &(Option<Expr>, Expr)| k.as_ref().map_or(v.span, |k| k.span.to(v.span));
+                let first = elems.first().map_or(close, |x| span_of(x).start);
+                let force = force || self.written_broken(open, first);
+                let head = concat(vec![text(path.to_string()), if generics.is_empty() { Doc::Nil } else { self.type_args(generics) }]);
+                let opts = ListOpts { open: "{", close: "}", close_pos: close, force, sep: Sep::Comma, pad: false };
+                let list = self.list(
+                    elems,
+                    span_of,
+                    |f, (k, v)| match k {
+                        Some(k) => concat(vec![f.expr(k), text(": "), f.expr(v)]),
+                        None => f.expr(v),
+                    },
+                    opts,
+                );
                 concat(vec![head, list])
             }
             ExprKind::MapLit { key_ty, val_ty, entries } => {

@@ -1,0 +1,37 @@
+// test: literals through map and slice type aliases: Alias{k: v} is a map literal (a bare name as key is a variable, as in Go), Alias{a, b} a slice literal, Alias{} an empty one
+// status: passing
+namespace spec.basics.alias_collection_literals
+
+import io
+
+type Inventory = map[string]int
+type Ints = []int
+type Grid = map[int]Ints
+
+func total(inv Inventory) int {
+    var n = 0
+    for _, v in inv {
+        n += v
+    }
+    return n
+}
+
+func main() {
+    var inv = Inventory{"apple": 3, "fig": 1}
+    println(len(inv), inv["apple"], total(inv))
+    var key = "kiwi"
+    var byVar = Inventory{key: 7}
+    println(byVar["kiwi"], len(byVar))
+    var empty = Inventory{}
+    empty["pear"] = 2
+    println(len(empty))
+    var xs = Ints{1, 2, 3}
+    xs = append(xs, 4)
+    println(xs, len(Ints{}))
+    var g = Grid{1: Ints{5, 6}, 2: [7]}
+    println(g[1], g[2])
+    println(total(Inventory{
+        "a": 1,
+        "b": 2,
+    }))
+}

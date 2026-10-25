@@ -561,6 +561,47 @@ impl<'a> Sema<'a> {
         Some(ns)
     }
 
+    /// `json.Parse` without `import encoding.json`: the head is the builtin
+    /// attribute (its value struct, possibly named `tomlAttr`), so the
+    /// member is not found there. When a std namespace `....<head>`
+    /// exports the member, reports the missing import (with a fix) instead
+    /// of naming the internal struct; true if reported.
+    fn attr_name_needs_import(&mut self, head: &ast::Ident, member: &ast::Ident) -> bool {
+        let n = head.name.as_str();
+        if !super::reflect::ATTR_STRUCTS.contains(&n) {
+            return false;
+        }
+        let suffix = format!(".{n}");
+        let mut paths: Vec<String> = self
+            .nss
+            .iter()
+            .filter(|ns| ns.is_std && (ns.path == n || ns.path.ends_with(&suffix)) && ns.members.contains_key(&member.name))
+            .map(|ns| ns.path.clone())
+            .collect();
+        // Namespaces written in Zell are loaded on first use (reflect.rs).
+        let decl = [format!("func {}(", member.name), format!("func {}<", member.name)];
+        for (path, _, src, _) in super::reflect::MODULES {
+            if (*path == n || path.ends_with(&suffix)) && decl.iter().any(|d| src.contains(d.as_str())) {
+                paths.push(path.to_string());
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        let Some(p) = paths.into_iter().next() else { return false };
+        let mut fixes = Vec::new();
+        if let Some(file) = self.files.get(self.cur_file) {
+            let at = file.imports.last().map(|i| i.span.end).unwrap_or(file.namespace.span.end);
+            let sep = if file.imports.is_empty() { "\n\n" } else { "\n" };
+            fixes.push(crate::diagnostics::Fix::edit(format!("Import {p}"), Span::new(at, at), format!("{sep}import {p}")));
+        }
+        let msg = format!("{n} here is the @{n} attribute; add \"import {p}\" to call {n}.{}", member.name);
+        let d = crate::diagnostics::Diagnostic::error(msg, member.span).in_file(self.cur_file).with_help(format!("{n}.{} is in {p}", member.name));
+        let mut d = d;
+        d.fixes = fixes;
+        self.push_diag(d);
+        true
+    }
+
     /// Resolves as many leading segments of `segs` as name declarations
     /// (namespaces, types, static methods, variants); returns the result and
     /// the number of segments consumed. `None` if the head is unknown.
@@ -606,9 +647,19 @@ impl<'a> Sema<'a> {
                         }
                         _ => {
                             if report {
+                                if i == 1 && self.attr_name_needs_import(segs[0], seg) {
+                                    return None;
+                                }
                                 let sn = self.structs[s as usize].name.clone();
-                                let what = if found.is_some() { "is not a static method of" } else { "is not a static method of struct" };
-                                self.err(format!("{} {what} {sn}", seg.name), seg.span);
+                                // never the internal value struct names (`tomlAttr`)
+                                let builtin = self.refl.structs.values().any(|&x| x == s);
+                                let attr = super::reflect::ATTR_STRUCT_NAMES.iter().find(|(_, x)| *x == sn).map(|(a, _)| *a).or_else(|| super::reflect::ATTR_STRUCTS.iter().find(|a| **a == sn).copied());
+                                let shown = match attr {
+                                    Some(a) if builtin => format!("the @{a} attribute"),
+                                    _ if found.is_some() => sn,
+                                    _ => format!("struct {sn}"),
+                                };
+                                self.err(format!("{} is not a static method of {shown}", seg.name), seg.span);
                             }
                             return None;
                         }

@@ -237,8 +237,11 @@ primary_expr ::= lambda_expr | literal | THIS | NIL | UNDERSCORE
                | IDENTIFIER
 literal ::= INT_LITERAL | FLOAT_LITERAL | STRING_LITERAL | RAW_STRING_LITERAL | CHAR_LITERAL | TRUE | FALSE
 
-// `Point{X: 1}`; not allowed directly in if/for/switch headers (Go rule)
-struct_literal ::= qualified_name generic_args? LBRACE (field_init (COMMA field_init)* COMMA?)? RBRACE
+// `Point{X: 1}`; not allowed directly in if/for/switch headers (Go rule).
+// Through a map or slice type alias also `Inventory{"apple": 3}`, `Ints{1, 2}`
+// (sema decides whether the name is a struct, a map or a slice type)
+struct_literal ::= qualified_name generic_args? LBRACE (literal_elem (COMMA literal_elem)* COMMA?)? RBRACE
+literal_elem ::= field_init | expr (COLON expr)?
 field_init ::= field_name COLON expr
 slice_literal ::= LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET
 map_literal ::= map_type LBRACE (map_entry (COMMA map_entry)* COMMA?)? RBRACE

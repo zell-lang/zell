@@ -1,0 +1,18 @@
+// error: unknown identifier missing
+// status: passing
+// no-stderr: <invalid>
+namespace spec.diagnostics.invalid_type_follow_ups
+
+import io
+
+func pair() (int, bool) {
+    return (missing(), true)
+}
+
+func h(f func(int) void!) {}
+
+func main() {
+    var t = (missingToo(), 1)
+    println(t)
+    h((n int) => alsoMissing(n))
+}

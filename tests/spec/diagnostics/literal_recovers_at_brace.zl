@@ -1,0 +1,14 @@
+// error: expected expression, found `,`
+// status: passing
+// no-stderr: expected declaration
+namespace spec.diagnostics.literal_recovers_at_brace
+
+import io
+
+type Inventory = map[string]int
+
+func main() {
+    var inv = Inventory{"a": 1, 2 +, "b": 3}
+    println(len(inv))
+    println("the next statements parse")
+}

@@ -401,7 +401,7 @@ written by hand), **33** (see 67), **46** (see 78).
     `basics/map_tuple_value_destructure`; `examples/kitchen_sink.zl` now
     writes `var lo, hi, seen = minmax[sku]` and `var (lo, hi) = minmax[sku]`
     without a `pair` temporary.
-61. ❌ **bug (diagnostic):** **`json.Parse` without `import encoding.json`
+61. ✅ **Fixed (2026-10-25):** **bug (diagnostic):** **`json.Parse` without `import encoding.json`
     names an internal struct**: "Parse is not a static method of struct
     json", and for TOML "…of struct tomlAttr". `strings.`/`fmt.` work
     without an import, so a user expects `json.` to work too. **Decision:**
@@ -409,7 +409,16 @@ written by hand), **33** (see 67), **46** (see 78).
     `….X` exports `Name`, report `json here is the @json attribute; add
     "import encoding.json" to call json.Parse`. Never print the `tomlAttr`
     / `yamlAttr` names. (Item 10 fixed the case with the import.)
-62. ❌ **bug (diagnostic) / inconsistency:** **a map literal through a type
+    **Cause and fix:** the head `json`/`toml` of a path resolves to the
+    builtin attribute value struct (`json`, `tomlAttr`) when the namespace
+    is not imported, and the struct branch of path resolution reported the
+    member as missing from that struct. Now, when a std namespace `….<head>`
+    (or a Zell-written std module) exports the member, the error is `json
+    here is the @json attribute; add "import encoding.json" to call
+    json.Parse` with an Import quick fix; other misses name `the @toml
+    attribute`, never `tomlAttr`. Spec tests
+    `diagnostics/attr_name_needs_import_json`, `_toml`.
+62. ✅ **Fixed (2026-10-25):** **bug (diagnostic) / inconsistency:** **a map literal through a type
     alias does not parse** (`type Inventory = map[Sku]int;
     Inventory{"apple": 10}` gives "expected identifier, found string
     literal"), and the parser then reports every following statement of the
@@ -420,11 +429,30 @@ written by hand), **33** (see 67), **46** (see 78).
     and let sema decide whether it is a struct or a map. Recover at the
     closing `}` so one bad literal does not report the rest of the
     function.
-63. ❌ **bug (diagnostic):** **follow-up errors mention `<invalid>`**: "value
+    **Cause and fix:** the parser read `Name{` only as a struct literal
+    (`ident: expr` fields), so a string key failed and the error escaped the
+    function body. `Name{...}` now takes `Name: value` fields or `key:
+    value` / `value` elements (new AST `CompositeLit`); sema makes it a map
+    literal through a map alias (a bare `Name:` key is the variable, as in
+    Go), a slice literal through a slice alias (`Ints{1, 2}`), and reports
+    `a literal of struct type P takes Field: value pairs` for a struct. A
+    malformed element is skipped up to `,`/`}`, so the rest of the function
+    parses. Grammar (`grammar/zell.bnf`) and DESIGN.md (type aliases)
+    updated. Spec tests `basics/alias_collection_literals`,
+    `diagnostics/struct_literal_without_field_names`,
+    `diagnostics/literal_recovers_at_brace`; `examples/kitchen_sink.zl`
+    writes `Inventory{…}`.
+63. ✅ **Fixed (2026-10-25):** **bug (diagnostic):** **follow-up errors mention `<invalid>`**: "value
     of type (<invalid>) cannot be printed", "cannot use func(int) <invalid>
     as func(int) void!", "cannot return (<invalid>, bool) …". **Decision:**
     an expression whose type contains `<invalid>` produces no further
     diagnostics.
+    **Cause and fix:** every check that meets an invalid type printed it.
+    Sema now drops an error whose message contains `<invalid>` when an error
+    was already reported in the function being checked (its body so far, or
+    its declaration span; global initializers too). Spec test
+    `diagnostics/invalid_type_follow_ups` (with `// no-stderr:`, which now
+    also applies to compile-fail tests).
 64. ❌ **inconsistency:** **`println` and `fmt.Format` ignore a `String()
     string` method** ("value of type Money cannot be printed") even though
     `fmt.Stringer` exists (DESIGN.md mentions `implements fmt.Stringer`).

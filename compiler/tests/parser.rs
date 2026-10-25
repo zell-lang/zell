@@ -110,6 +110,18 @@ fn show(e: &Expr) -> String {
         ExprKind::TypeArgs { base, args } => format!("{}<{}>", show(base), args.len()),
         ExprKind::New(e) => format!("new {}", show(e)),
         ExprKind::SliceLit(es) => format!("[{}]", es.iter().map(show).collect::<Vec<_>>().join(", ")),
+        ExprKind::CompositeLit { path, elems, .. } => format!(
+            "{}{{{}}}",
+            path.to_string(),
+            elems
+                .iter()
+                .map(|(k, v)| match k {
+                    Some(k) => format!("{}: {}", show(k), show(v)),
+                    None => show(v),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         ExprKind::MapLit { entries, .. } => format!(
             "map{{{}}}",
             entries.iter().map(|(k, v)| format!("{}: {}", show(k), show(v))).collect::<Vec<_>>().join(", ")
@@ -825,6 +837,10 @@ fn error_operators() {
 fn composite_literals() {
     assert_eq!(show(&expr("Point{X: 1, Y: 2}")), "Point{X: 1, Y: 2}");
     assert_eq!(show(&expr("Point{}")), "Point{}");
+    // through a map or slice alias (sema decides what the name is)
+    assert!(matches!(expr("Inventory{\"apple\": 3, k: 1}").kind, ExprKind::CompositeLit { ref elems, .. } if elems.len() == 2));
+    assert_eq!(show(&expr("Inventory{\n\"apple\": 3,\n}")), "Inventory{\"apple\": 3}");
+    assert_eq!(show(&expr("Ints{1, 2}")), "Ints{1, 2}");
     assert_eq!(show(&expr("app.models.User{Name: \"a\"}")), "app.models.User{Name: \"a\"}");
     assert_eq!(show(&expr("Point{\n X: 1,\n Y: 2,\n}")), "Point{X: 1, Y: 2}");
     assert_eq!(show(&expr("Point{\n X: 1,\n Y: 2\n}")), "Point{X: 1, Y: 2}");

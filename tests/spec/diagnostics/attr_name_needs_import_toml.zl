@@ -1,0 +1,14 @@
+// error: toml here is the @toml attribute; add "import encoding.toml" to call toml.Parse
+// status: passing
+namespace spec.diagnostics.attr_name_needs_import_toml
+
+import io
+
+struct P {
+    X int
+}
+
+func main() void! {
+    var p = toml.Parse<P>("")?
+    println(p.X)
+}

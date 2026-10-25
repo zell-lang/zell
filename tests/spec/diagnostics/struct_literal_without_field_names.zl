@@ -1,0 +1,14 @@
+// error: a literal of struct type P takes `Field: value` pairs
+// status: passing
+namespace spec.diagnostics.struct_literal_without_field_names
+
+import io
+
+struct P {
+    X int
+}
+
+func main() {
+    var p = P{1}
+    println(p.X)
+}

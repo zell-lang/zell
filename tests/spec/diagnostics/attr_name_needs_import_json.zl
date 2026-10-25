@@ -1,0 +1,14 @@
+// error: json here is the @json attribute; add "import encoding.json" to call json.Parse
+// status: passing
+namespace spec.diagnostics.attr_name_needs_import_json
+
+import io
+
+struct P {
+    X int
+}
+
+func main() void! {
+    var p = json.Parse<P>("")?
+    println(p.X)
+}

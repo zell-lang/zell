@@ -174,6 +174,12 @@ impl<'a> Walker<'a, '_> {
                 self.expr(k);
                 self.expr(v);
             }),
+            ExprKind::CompositeLit { elems, .. } => elems.iter().for_each(|(k, v)| {
+                if let Some(k) = k {
+                    self.expr(k);
+                }
+                self.expr(v);
+            }),
             ExprKind::Range(a, b) => a.iter().chain(b.iter()).for_each(|x| self.expr(x)),
             ExprKind::Lambda { body, .. } => match body.as_ref() {
                 ast::LambdaBody::Block(b) => self.block(b),

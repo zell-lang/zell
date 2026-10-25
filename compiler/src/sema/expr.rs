@@ -50,6 +50,7 @@ impl<'a> Sema<'a> {
             K::Try { .. } => self.try_expr(e, true),
             K::Await(inner) => self.await_expr(inner, span),
             K::StructLit { path, generics, fields } => self.struct_lit(path, generics, fields, span, expected),
+            K::CompositeLit { path, generics, elems } => self.composite_lit(path, generics, elems, span),
             K::TypeArgs { base, args } => self.generic_value(base, args, span),
             K::New(inner) => self.new_expr(inner, span),
             K::SliceLit(elems) => self.slice_lit(elems, span, expected),
@@ -698,7 +699,78 @@ impl<'a> Sema<'a> {
         }
     }
 
+    /// The map or slice type a literal's path names through a type alias
+    /// (`type Inventory = map[string]int`), if it does.
+    fn alias_collection(&mut self, path: &ast::Path, generics: &[ast::TypeExpr]) -> Option<TypeId> {
+        let segs: Vec<&ast::Ident> = path.segments.iter().collect();
+        if !generics.is_empty() || (segs.len() == 1 && self.lookup_local(&segs[0].name, false).is_some()) {
+            return None;
+        }
+        self.lookup_global(segs[0], false)?;
+        let (res, n) = self.resolve_segments(&segs, false)?;
+        let PathRes::Member(Member::Alias(a)) = res else { return None };
+        if n != segs.len() {
+            return None;
+        }
+        let t = self.alias_type(a);
+        matches!(self.tt.get(t), Type::Map(..) | Type::Slice(_)).then_some(t)
+    }
+
+    /// `Alias{k: v, ...}` over a map alias, `Alias{a, b}` over a slice
+    /// alias (`Name: v` elements of a map literal are keys read from the
+    /// variable `Name`, as in Go).
+    fn collection_lit(&mut self, ty: TypeId, elems: &[(Option<ast::Expr>, ast::Expr)], span: Span) -> hir::Expr {
+        match self.tt.get(ty).clone() {
+            Type::Map(k, v) => {
+                let mut entries = Vec::new();
+                for (ke, ve) in elems {
+                    let Some(ke) = ke else {
+                        self.err(format!("missing key in map literal of type {}", self.tn(ty)), ve.span);
+                        self.value(ve, None);
+                        continue;
+                    };
+                    entries.push((self.expr_to(ke, k, Ctx::Elem), self.expr_to(ve, v, Ctx::Elem)));
+                }
+                mk(ExprKind::MapLit(entries), ty, span)
+            }
+            Type::Slice(el) => {
+                let mut vs = Vec::new();
+                for (ke, ve) in elems {
+                    if let Some(ke) = ke {
+                        self.err(format!("a slice literal of type {} takes values, not keys", self.tn(ty)), ke.span);
+                    }
+                    vs.push(self.expr_to(ve, el, Ctx::Elem));
+                }
+                mk(ExprKind::SliceLit(vs), ty, span)
+            }
+            _ => self.invalid(span),
+        }
+    }
+
+    fn composite_lit(&mut self, path: &ast::Path, generics: &[ast::TypeExpr], elems: &[(Option<ast::Expr>, ast::Expr)], span: Span) -> hir::Expr {
+        if let Some(t) = self.alias_collection(path, generics) {
+            return self.collection_lit(t, elems, span);
+        }
+        // Not a map or slice alias: a struct literal needs `Field: value`.
+        if self.struct_lit_struct(path, generics, None, span).is_some() {
+            let at = elems.iter().find(|(k, _)| !matches!(k.as_ref().map(|k| &k.kind), Some(ast::ExprKind::Ident(_)))).map_or(span, |(k, v)| k.as_ref().map_or(v.span, |k| k.span));
+            self.err(format!("a literal of struct type {} takes `Field: value` pairs", path.to_string()), at);
+        }
+        for (k, v) in elems {
+            if let Some(k) = k {
+                self.value(k, None);
+            }
+            self.value(v, None);
+        }
+        self.invalid(span)
+    }
+
     fn struct_lit(&mut self, path: &ast::Path, generics: &[ast::TypeExpr], fields: &[ast::FieldInit], span: Span, expected: Option<TypeId>) -> hir::Expr {
+        if let Some(t) = self.alias_collection(path, generics) {
+            let elems: Vec<(Option<ast::Expr>, ast::Expr)> =
+                fields.iter().map(|f| (Some(ast::Expr { kind: ast::ExprKind::Ident(f.name.clone()), span: f.name.span }), f.value.clone())).collect();
+            return self.collection_lit(t, &elems, span);
+        }
         let Some(sid) = self.struct_lit_struct(path, generics, expected, span) else {
             for f in fields {
                 self.value(&f.value, None);

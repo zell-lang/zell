@@ -397,6 +397,11 @@ pub enum ExprKind {
     /// `Point{X: 1, Y: 2}`; `path` is empty-segment-free, e.g. `Point` or `app.models.User`.
     /// `generics` holds explicit type arguments: `List<int>{}`.
     StructLit { path: Path, generics: Vec<TypeExpr>, fields: Vec<FieldInit> },
+    /// `Inventory{"apple": 3}` / `Ints{1, 2}`: a literal through a map or
+    /// slice type alias whose elements are not all `Name: value` (those
+    /// stay a `StructLit`; sema decides whether the path is a struct, a map
+    /// or a slice).
+    CompositeLit { path: Path, generics: Vec<TypeExpr>, elems: Vec<(Option<Expr>, Expr)> },
     /// Explicit type arguments on a callee: `reflect.TypeOf<User>`, usually
     /// the callee of a `Call`.
     TypeArgs { base: Box<Expr>, args: Vec<TypeExpr> },

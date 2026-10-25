@@ -319,6 +319,9 @@ impl<'a> Sema<'a> {
                 }
             }
             s.fns.push(FnCtx::new(None, s.tt.void, false, "global initializer".into()));
+            if let Some(f) = s.fns.last_mut() {
+                f.diag_start = s.diags.items.len();
+            }
             let e = s.value(src, decl_ty);
             let e = match decl_ty {
                 Some(t) => s.coerce(e, t, coerce::Ctx::Init),
