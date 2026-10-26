@@ -165,9 +165,18 @@ async func Spawn<T>(f func() Task<T>) T {
     return await t
 }
 
-// allSlice is `task.All(ts)` over a slice (sema: Special::TaskAll): the
-// results in input order.
+// The slice forms of `task.All` (sema: Special::TaskAll). The first task to
+// complete with an error (or a panic) cancels the pending ones; the result
+// settles once every task has. rtAllCancel yields the index of that first
+// failed task (-1: none), so its panic is re-raised or its error returned
+// whatever the order of the slice.
+
+// allSlice is `task.All(ts)` over a slice: the results in input order.
 async func allSlice<T>(ts []Task<T>) []T {
+    var w = await rtAllCancel(ts, false)
+    if w >= 0 {
+        await ts[w]
+    }
     var out []T = []
     for t in ts {
         out = append(out, await t)
@@ -175,46 +184,35 @@ async func allSlice<T>(ts []Task<T>) []T {
     return out
 }
 
-// allSliceErr is `task.All(ts)` over a slice of fallible tasks: like the
-// variadic form, every task is awaited and the first error in input order
-// is the result.
+// allSliceErr is `task.All(ts)` over a slice of fallible tasks: the first
+// error to complete is the result.
 async func allSliceErr<T>(ts []Task<T!>) []T! {
-    var out []T = []
-    var first error = nil
-    for t in ts {
-        var v = try await t catch err {
-            if first == nil {
-                first = err
-            }
-            continue
+    var w = await rtAllCancel(ts, true)
+    if w >= 0 {
+        try await ts[w] catch err {
+            return err
         }
-        out = append(out, v)
     }
-    if first != nil {
-        return first
+    var out []T = []
+    for t in ts {
+        out = append(out, await t?)
     }
     return out
 }
 
 // allSliceVoid is `task.All(ts)` over a slice of Task<void>.
 async func allSliceVoid(ts []Task<void>) {
-    for t in ts {
-        await t
+    var w = await rtAllCancel(ts, false)
+    if w >= 0 {
+        await ts[w]
     }
 }
 
 // allSliceVoidErr is `task.All(ts)` over a slice of Task<void!>.
 async func allSliceVoidErr(ts []Task<void!>) void! {
-    var first error = nil
-    for t in ts {
-        try await t catch err {
-            if first == nil {
-                first = err
-            }
-        }
-    }
-    if first != nil {
-        return first
+    var w = await rtAllCancel(ts, true)
+    if w >= 0 {
+        await ts[w]?
     }
 }
 
