@@ -1045,9 +1045,31 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             tvs.push(v);
         }
         self.forget_from(d);
-        let mut results = Vec::new();
-        for (t, tv) in tasks.iter().zip(&tvs) {
+        // The first task to fail cancels the pending ones; `winner` is its index.
+        let n = tasks.len() as u32;
+        let arr_ty = self.ptr_ty().array_type(n);
+        let arr = self.entry_alloca(arr_ty.into(), "all.tasks", false);
+        let fl_ty = self.ctx.i8_type().array_type(n);
+        let fl = self.entry_alloca(fl_ty.into(), "all.fallible", false);
+        for (i, (t, tv)) in tasks.iter().zip(&tvs).enumerate() {
             let Type::Task(rt) = self.ty(t.ty).clone() else { return unsupported("task.All over a non-task") };
+            let z = self.i64_ty().const_zero();
+            let ix = self.i64_ty().const_int(i as u64, false);
+            let p = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[z, ix], "") }.unwrap();
+            self.b.build_store(p, tv.get()).unwrap();
+            let q = unsafe { self.b.build_in_bounds_gep(fl_ty, fl, &[z, ix], "") }.unwrap();
+            let f = self.fallible_err_off(rt).is_some() as u64;
+            self.b.build_store(q, self.ctx.i8_type().const_int(f, false)).unwrap();
+        }
+        let allt = self.call_rt_v("zell_task_all_cancel", &[arr.into(), self.i64_ty().const_int(n as u64, false).into(), fl.into()]).into_pointer_value();
+        let wslot = self.await_slot(allt, None);
+        let winner = self.b.build_load(self.i64_ty(), wslot, "all.winner").unwrap().into_int_value();
+        self.call_rt("zell_release", &[allt.into()]);
+        let mut results = Vec::new();
+        let mut wins = Vec::new();
+        for (i, (t, tv)) in tasks.iter().zip(&tvs).enumerate() {
+            let Type::Task(rt) = self.ty(t.ty).clone() else { return unsupported("task.All over a non-task") };
+            wins.push(self.b.build_int_compare(IntPredicate::EQ, winner, self.i64_ty().const_int(i as u64, false), "").unwrap());
             let eo = self.fallible_err_off(rt);
             let slot = self.await_slot(tv.get().into_pointer_value(), eo);
             results.push((rt, self.load_result(rt, slot)));
@@ -1063,7 +1085,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let mut agg: BasicValueEnum = st.const_zero().into();
         let mut err = self.ptr_ty().const_null();
         let mut idx = 0u32;
-        for (rt, v) in results {
+        let mut errs = Vec::new();
+        for (k, (rt, v)) in results.into_iter().enumerate() {
             let Some(v) = v else { continue };
             let (val, e) = match self.ty(rt) {
                 Type::Fallible(inner) if fallible => {
@@ -1077,11 +1100,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 _ => (Some(v), None),
             };
             if let Some(e) = e {
-                let first = self.b.build_is_null(err, "").unwrap();
-                let keep = self.b.build_select(first, e, err, "").unwrap().into_pointer_value();
-                let drop = self.b.build_select(first, self.ptr_ty().const_null(), e, "").unwrap();
-                self.call_rt("zell_release", &[drop.into()]);
-                err = keep;
+                errs.push((k, e));
             }
             if let Some(val) = val {
                 if idx < st.count_fields() {
@@ -1092,6 +1111,14 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
         if !fallible {
             return Ok(Val::owned(agg));
+        }
+        // The error of the first task to complete with one wins (the
+        // runtime's `winner`); a task's error is released unless chosen.
+        for (k, e) in errs {
+            let win = wins[k];
+            err = self.b.build_select(win, e, err, "").unwrap().into_pointer_value();
+            let drop = self.b.build_select(win, self.ptr_ty().const_null(), e, "").unwrap();
+            self.call_rt("zell_release", &[drop.into()]);
         }
         // On failure drop the partial values and return {zero, err}.
         let failed = self.b.build_is_not_null(err, "").unwrap();

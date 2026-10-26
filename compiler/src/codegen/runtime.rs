@@ -118,6 +118,8 @@ const RUNTIME: &[(&str, &str, bool)] = &[
     ("zell_task_run_main", "v:pp", false),
     ("zell_coro_unwound", "v:pp", false),
     ("zell_task_any", "p:pl", false),
+    ("zell_task_all_cancel", "p:plp", false),
+    ("zell_task_all_cancel_uniform", "p:plb", false),
     ("zell_runtime_init", "v:ip", false),
     ("zell_runtime_shutdown", "v:", false),
     ("zell_runtime_drain", "v:", false),

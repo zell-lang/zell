@@ -384,6 +384,9 @@ pub enum Special {
     /// `task.rtChanNext<T>(h int) Task<(T, bool)>` →
     /// [`crate::hir::Builtin::ChanNext`] (the iteration protocol).
     ChanNext,
+    /// `task.rtAllCancel(ts []Task<T>, fallible bool) Task<int>` →
+    /// [`crate::hir::Builtin::TaskAllCancel`] (the slice forms of `task.All`).
+    TaskAllCancel,
 }
 
 /// Special functions by namespace and name.
@@ -404,6 +407,7 @@ pub const SPECIALS: &[(&str, &str, Special)] = &[
     ("task", "rtChanSend", Special::ChanSend),
     ("task", "rtChanRecv", Special::ChanRecv),
     ("task", "rtChanNext", Special::ChanNext),
+    ("task", "rtAllCancel", Special::TaskAllCancel),
 ];
 
 /// Builtin stdlib struct types: (namespace, name, fields as (name, type)).

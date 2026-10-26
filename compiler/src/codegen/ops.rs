@@ -527,6 +527,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.drop_val(vt, v);   /* the runtime retained its own copy */
                 Ok(Val::owned(t))
             }
+            Builtin::TaskAllCancel => {
+                let d = self.depth();
+                let sv = self.expr(&args[0])?;
+                self.hold(args[0].ty, sv);
+                let fl = self.expr(&args[1])?.get().into_int_value();
+                self.forget_from(d);
+                let s = sv.get().into_struct_value();
+                let data = self.b.build_extract_value(s, 0, "all.data").unwrap();
+                let len = self.b.build_extract_value(s, 1, "all.len").unwrap();
+                let t = self.call_rt_v("zell_task_all_cancel_uniform", &[data.into(), len.into(), fl.into()]);
+                self.drop_val(args[0].ty, sv);
+                Ok(Val::owned(t))
+            }
             Builtin::ChanRecv | Builtin::ChanNext => {
                 let h = self.expr(&args[0])?.get();
                 let f = if op == Builtin::ChanRecv { "zell_task_chan_recv" } else { "zell_task_chan_next" };

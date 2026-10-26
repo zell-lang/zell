@@ -42,7 +42,8 @@ async func main() {
 
 Errors and `await` compose: `await f()?` waits and propagates an error
 of a `Task<T!>`. `task.All` of fallible tasks is itself fallible; the
-first error cancels the remaining tasks.
+error of the first task to fail (in time, not in argument order) is its
+result, and that failure cancels the remaining tasks.
 
 ```zell
 namespace guide.async.errors

@@ -1,0 +1,50 @@
+// test: the first failing task of task.All cancels a sibling waiting on a channel; its defer runs and it reports ErrCancelled
+// status: passing
+// run-flags: --leak-check
+namespace spec.async.task_all_cancels
+
+import io
+import errors
+
+async func Waiter(ch task.Channel<int>, log task.Channel<string>) int! {
+    defer println("waiter defer")
+    var v = await ch.Recv()?
+    return v
+}
+
+async func Failer() int! {
+    await task.Delay(5)
+    return error("boom")
+}
+
+async func Good(v int) int! {
+    await task.Yield()
+    return v
+}
+
+async func main() void! {
+    var ch = task.Channel<int>(0)
+    var log = task.Channel<string>(1)
+    var w = Waiter(ch, log)
+    try await task.All(w, Failer(), Good(7)) catch err {
+        println("variadic:", err)
+    }
+    try await w catch err {
+        println("waiter cancelled:", errors.Is(err, task.ErrCancelled))
+    }
+
+    var w2 = Waiter(ch, log)
+    var ts = [w2, Failer(), Good(7)]
+    try await task.All(ts) catch err {
+        println("slice:", err)
+    }
+    try await w2 catch err {
+        println("waiter cancelled:", errors.Is(err, task.ErrCancelled))
+    }
+
+    // success keeps the input order
+    var (a, b, c) = await task.All(Good(1), Good(2), Good(3))?
+    println(a, b, c)
+    var rs = await task.All([Good(4), Good(5), Good(6)])?
+    println(rs)
+}

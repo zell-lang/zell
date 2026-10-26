@@ -893,6 +893,11 @@ pub enum Builtin {
     ChanRecv,
     /// `args = [handle]`: `Task<(T, bool)>` (runtime `zell_task_chan_next`).
     ChanNext,
+    /// `args = [[]Task<T>, fallible bool]`: `Task<int>` (runtime
+    /// `zell_task_all_cancel`): done once every task has settled, holding
+    /// the index of the first one that failed (-1 if none); that failure
+    /// cancelled the pending ones.
+    TaskAllCancel,
 }
 
 /// One primitive print operation of a lowered `println`.

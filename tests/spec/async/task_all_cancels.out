@@ -1,0 +1,8 @@
+waiter defer
+variadic: boom
+waiter cancelled: true
+waiter defer
+slice: boom
+waiter cancelled: true
+1 2 3
+[4 5 6]

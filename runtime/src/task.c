@@ -2025,6 +2025,94 @@ zell_task *zell_task_all(zell_task *const *tasks, int64_t n) {
     return r;
 }
 
+/* task.All with cancellation (ABI.md 10.11): the first input to complete
+ * with an error (or a panic) cancels the inputs still pending; the result
+ * task, completed once every input has settled, holds that input's index
+ * (-1: no failure). */
+typedef struct allc_state {
+    zell_task *result;    /* owned */
+    int64_t refs;          /* atomic: outstanding callbacks + guard */
+    int64_t winner;        /* atomic */
+    int64_t n;
+    zell_task **inputs;   /* owned */
+    uint8_t *fallible;    /* owned */
+} allc_state;
+
+typedef struct allc_node {
+    allc_state *st;
+    int64_t index;
+} allc_node;
+
+static void allc_unref(allc_state *st) {
+    if (__atomic_sub_fetch(&st->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        int64_t w = __atomic_load_n(&st->winner, __ATOMIC_ACQUIRE);
+        zell_task_complete(st->result, &w);
+        zell_release(st->result);
+        for (int64_t i = 0; i < st->n; i++) zell_release(st->inputs[i]);
+        free(st->inputs);
+        free(st->fallible);
+        free(st);
+    }
+}
+
+static bool allc_failed(const zell_task *t, bool fallible) {
+    if (is_yield(t)) return false;
+    if (t->panic_msg) return true;
+    if (!fallible || t->result_size < 8) return false;
+    zell_error *e;
+    memcpy(&e, t->slot + ZELL_ROUND8(t->result_size) - 8, sizeof e);
+    return e != NULL;
+}
+
+static void allc_one_done(void *arg) {
+    allc_node *nd = arg;
+    allc_state *st = nd->st;
+    int64_t idx = nd->index;
+    free(nd);
+    if (allc_failed(st->inputs[idx], st->fallible[idx])) {
+        int64_t none = -1;
+        if (__atomic_compare_exchange_n(&st->winner, &none, idx, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            for (int64_t i = 0; i < st->n; i++)
+                if (i != idx && !zell_task_is_done(st->inputs[i])) zell_task_cancel(st->inputs[i]);
+        }
+    }
+    allc_unref(st);
+}
+
+zell_task *zell_task_all_cancel(zell_task *const *tasks, int64_t n, const uint8_t *fallible) {
+    zell_task *r = task_new_ex(8, NULL, 0);
+    if (n <= 0) {
+        int64_t none = -1;
+        zell_task_complete(r, &none);
+        return r;
+    }
+    allc_state *st = malloc(sizeof *st);
+    if (!st) zell_panic("out of memory (task_all)");
+    zell_retain(r);
+    st->result = r;
+    st->refs = n + 1;
+    st->winner = -1;
+    st->n = n;
+    st->inputs = malloc(sizeof *st->inputs * (size_t)n);
+    st->fallible = malloc((size_t)n);
+    if (!st->inputs || !st->fallible) zell_panic("out of memory (task_all)");
+    for (int64_t i = 0; i < n; i++) {
+        if (!tasks[i]) zell_panic_nil();
+        zell_retain(tasks[i]);
+        st->inputs[i] = tasks[i];
+        st->fallible[i] = fallible ? fallible[i] : 0;
+    }
+    for (int64_t i = 0; i < n; i++) {
+        allc_node *nd = malloc(sizeof *nd);
+        if (!nd) zell_panic("out of memory (task_all)");
+        nd->st = st;
+        nd->index = i;
+        if (!add_cont(tasks[i], allc_one_done, nd, false)) allc_one_done(nd);
+    }
+    allc_unref(st);
+    return r;
+}
+
 typedef struct any_state {
     zell_task *result;    /* owned */
     int64_t refs;          /* atomic: outstanding callbacks + guard */
@@ -2087,6 +2175,15 @@ zell_task *zell_task_any(zell_task *const *tasks, int64_t n) {
         if (!add_cont(tasks[i], any_one_done, nd, false)) any_one_done(nd);
     }
     any_unref(st);
+    return r;
+}
+
+zell_task *zell_task_all_cancel_uniform(zell_task *const *tasks, int64_t n, bool fallible) {
+    uint8_t *fl = n > 0 ? malloc((size_t)n) : NULL;
+    if (n > 0 && !fl) zell_panic("out of memory (task_all)");
+    if (fl) memset(fl, fallible ? 1 : 0, (size_t)n);
+    zell_task *r = zell_task_all_cancel(tasks, n, fl);
+    free(fl);
     return r;
 }
 

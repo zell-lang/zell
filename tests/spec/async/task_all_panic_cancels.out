@@ -1,0 +1,6 @@
+waiter defer
+variadic: true
+waiter cancelled: true
+waiter defer
+slice: true
+waiter cancelled: true

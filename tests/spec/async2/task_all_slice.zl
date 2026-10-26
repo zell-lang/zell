@@ -1,4 +1,4 @@
-// test: task.All and task.Any over a []Task<T> (or spread with ts...): results in input order, every task awaited, the first error in input order for fallible tasks; Task<void> slices; the result is a Task that can be stored
+// test: task.All and task.Any over a []Task<T> (or spread with ts...): results in input order, the first task to fail (in time) cancels the rest and gives its error; Task<void> slices; the result is a Task that can be stored
 // status: passing
 // run-flags: --leak-check
 namespace spec.async2.task_all_slice

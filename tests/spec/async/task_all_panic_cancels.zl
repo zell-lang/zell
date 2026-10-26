@@ -1,0 +1,36 @@
+// test: a panic in one task of task.All cancels the others, in the variadic and the slice form
+// status: passing
+// run-flags: --leak-check
+namespace spec.async.task_all_panic_cancels
+
+import io
+import errors
+
+async func Waiter(ch task.Channel<int>) int! {
+    defer println("waiter defer")
+    var v = await ch.Recv()?
+    return v
+}
+
+async func Panics() int! {
+    await task.Delay(5)
+    panic("kaboom")
+}
+
+async func main() {
+    var ch = task.Channel<int>(0)
+    var w = Waiter(ch)
+    try await task.All(w, Panics()) catch err {
+        println("variadic:", errors.Is(err, task.ErrPanic))
+    }
+    try await w catch err {
+        println("waiter cancelled:", errors.Is(err, task.ErrCancelled))
+    }
+    var w2 = Waiter(ch)
+    try await task.All([w2, Panics()]) catch err {
+        println("slice:", errors.Is(err, task.ErrPanic))
+    }
+    try await w2 catch err {
+        println("waiter cancelled:", errors.Is(err, task.ErrCancelled))
+    }
+}

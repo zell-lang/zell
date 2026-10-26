@@ -609,6 +609,10 @@ void zell_coro_link_panic(zell_error *e, void *value, int64_t size, int64_t err_
 void zell_lines_register(const void *table, int64_t len);
 zell_task *zell_task_delay(int64_t ms);
 zell_task *zell_task_all(zell_task *const *tasks, int64_t n);
+/* task.All with cancellation (ABI.md 10.11): 8-byte result = index of the first input that failed, -1 if none. fallible[i] != 0: input i is a Task<T!>; fallible may be NULL. +1 */
+zell_task *zell_task_all_cancel(zell_task *const *tasks, int64_t n, const uint8_t *fallible);
+/* Same with one flag for every input (the slice forms). */
+zell_task *zell_task_all_cancel_uniform(zell_task *const *tasks, int64_t n, bool fallible);
 zell_task *zell_task_any(zell_task *const *tasks, int64_t n); /* result: int64_t index */
 
 zell_mutex *zell_mutex_new(void);

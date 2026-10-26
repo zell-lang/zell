@@ -1,4 +1,4 @@
-// test: task.All over fallible tasks fails with the error of the first failing task in argument order
+// test: task.All over fallible tasks fails with the error of the first task to complete with one
 // status: passing
 namespace spec.async.task_all_errors
 

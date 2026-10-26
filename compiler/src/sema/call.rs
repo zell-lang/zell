@@ -762,6 +762,17 @@ impl<'a> Sema<'a> {
                 self.check_args_loose(args);
                 self.invalid(span)
             }
+            Special::TaskAllCancel => {
+                if args.len() != 2 {
+                    self.err("rtAllCancel takes a slice of tasks and a bool", span);
+                    self.check_args_loose(args);
+                    return self.invalid(span);
+                }
+                let ts = self.value(&args[0], None);
+                let fl = self.expr_to(&args[1], self.tt.bool_, Ctx::Other);
+                let ty = self.tt.task(self.tt.int);
+                mk(ExprKind::Builtin { op: Builtin::TaskAllCancel, args: vec![ts, fl] }, ty, span)
+            }
             Special::Println | Special::Print => {
                 let mut items = Vec::new();
                 let mut prev_str: Option<bool> = None;
