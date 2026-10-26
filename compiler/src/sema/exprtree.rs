@@ -648,12 +648,14 @@ impl<'a> Sema<'a> {
         let fns = mk(ExprKind::EnvClosures { funcs: vec![fid, vals, types], env }, fns_ty, span);
         let Some(site_sid) = self.expr_template("Site").and_then(|t| self.plain_std_struct(t, span)) else { return self.invalid(span) };
         let ints = |xs: &[i128]| ConstValue::List(xs.iter().map(|i| ConstValue::Int(*i)).collect());
+        self.tree_sites += 1;
         let attr = hir::Attr {
             kind: hir::AttrKind::User(site_sid),
             args: vec![
                 ("ops".into(), ints(&tb.ops)),
                 ("strs".into(), ConstValue::List(tb.strs.iter().map(|s| ConstValue::Str(s.clone())).collect())),
                 ("params".into(), ConstValue::Int(n as i128)),
+                ("id".into(), ConstValue::Int(self.tree_sites as i128)),
             ],
             span,
         };

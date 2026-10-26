@@ -128,6 +128,10 @@ pub(crate) struct ReflState {
     pub(crate) ct_descs: Vec<(usize, LocalId, super::reflect_unroll::CtDesc)>,
     /// `m.Args` structs by method (function id -> struct id).
     pub(crate) args_structs: HashMap<u32, u32>,
+    /// `reflect.Error` raised in a method of a generic struct instance:
+    /// reported only if the method is used (a call or a method value), see
+    /// [`Sema::reflect_flush_deferred`].
+    pub(crate) deferred: Vec<(FuncId, crate::diagnostics::Diagnostic)>,
     /// Locals of unrolled descriptor-loop copies: (file, span) used in some
     /// copy, and unused ones (file, span, name); reported when the
     /// outermost unrolled loop ends if unused in every copy.
@@ -275,6 +279,7 @@ impl<'a> Sema<'a> {
     /// abstract check of a generic body is rolled back; the module is
     /// loaded again on its next use).
     pub(crate) fn reflect_rollback(&mut self, funcs: usize) {
+        self.refl.deferred.retain(|(f, _)| (f.0 as usize) < funcs);
         while let Some(&(m, f)) = self.refl.loads.last() {
             if f < funcs {
                 break;
@@ -537,6 +542,32 @@ impl<'a> Sema<'a> {
                 }
                 let Some((_, fty, _, _)) = self.ct_member(sty, k) else { return Ok(self.invalid(span)) };
                 return Ok(mk(ExprKind::Field { base: Box::new(v), index: k }, fty, span));
+            }
+            // `f.Addr(p)`: the address of the field in `*p` (an interior
+            // pointer, `&p.<field>`), e.g. to scan a value into it.
+            if let (Some((_, _, sty, idx)), "Addr", None) = (ct, name.name.as_str(), targs) {
+                self.fcx().used[l.0 as usize] = true;
+                self.ct_field_use(l, -1);
+                if args.len() != 1 {
+                    self.err(format!("f.Addr takes one argument (a pointer to the struct), got {}", args.len()), span);
+                    self.check_args_loose(args);
+                    return Ok(self.invalid(span));
+                }
+                let v = self.value(&args[0], None);
+                let Some(k) = idx else { return Ok(self.invalid(span)) };
+                if self.tt.is_invalid(v.ty) {
+                    return Ok(self.invalid(span));
+                }
+                if !matches!(*self.tt.get(v.ty), Type::Pointer(p) if p == sty) {
+                    let (want, found) = (self.tn(sty), self.tn(v.ty));
+                    self.err(format!("f.Addr needs a *{want} (a pointer to the value of reflect.Fields<{want}>()), found {found}"), v.span);
+                    return Ok(self.invalid(span));
+                }
+                let Some((_, fty, _, _)) = self.ct_member(sty, k) else { return Ok(self.invalid(span)) };
+                let vspan = v.span;
+                let place = mk(ExprKind::Deref(Box::new(v)), sty, vspan);
+                let field = mk(ExprKind::Field { base: Box::new(place), index: k }, fty, span);
+                return Ok(self.addr_of(field));
             }
             if let (Some(_), "Set") = (ct, name.name.as_str()) {
                 self.err("f.Set(p, value) is a statement (it stores into the field), not a value", span);

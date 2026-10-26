@@ -52,7 +52,7 @@ impl<'a> Sema<'a> {
     /// type `p` (`func(T) U`) once the type parameters in its parameter
     /// types are inferred: a function type whose parameters are known (the
     /// result is inferred from the lambda's body).
-    fn lambda_hint(&mut self, a: &ast::Expr, p: &ast::TypeExpr, names: &[String], binds: &[Option<TypeId>], outer: &[(String, TypeId)]) -> Option<TypeId> {
+    fn lambda_hint(&mut self, a: &ast::Expr, p: &ast::TypeExpr, names: &[String], binds: &[Option<TypeId>], outer: &[(String, TypeId)], scope: (usize, NsIdx)) -> Option<TypeId> {
         if !untyped_lambda(a) {
             return None;
         }
@@ -73,9 +73,13 @@ impl<'a> Sema<'a> {
                 self.gen.tenv.push((name.clone(), *b));
             }
         }
+        // the parameter types are written in the template's scope
+        let saved = (self.cur_file, self.cur_ns);
+        (self.cur_file, self.cur_ns) = scope;
         self.gen.mute += 1;
         let ps: Vec<TypeId> = params.iter().map(|x| self.resolve_type(x)).collect();
         self.gen.mute -= 1;
+        (self.cur_file, self.cur_ns) = saved;
         self.gen.tenv.truncate(n);
         if ps.iter().any(|t| self.tt.is_invalid(*t)) {
             return None;
@@ -163,6 +167,7 @@ impl<'a> Sema<'a> {
         let names: Vec<String> = tm.generics.iter().map(|g| g.name.name.clone()).collect();
         let fname = tm.name.clone();
         let outer = tm.outer.clone();
+        let scope = (tm.file, tm.ns);
         let mut binds: Vec<Option<TypeId>> = vec![None; names.len()];
         let mut bad = false;
         for pass in 0..2 {
@@ -174,7 +179,7 @@ impl<'a> Sema<'a> {
                 if untyped != (pass == 1) {
                     continue;
                 }
-                let hint = bare_param(&p.ty, &names).and_then(|k| binds[k]).or_else(|| self.lambda_hint(a, &p.ty, &names, &binds, &outer));
+                let hint = bare_param(&p.ty, &names).and_then(|k| binds[k]).or_else(|| self.lambda_hint(a, &p.ty, &names, &binds, &outer, scope));
                 if hint.is_none() && matches!(expr::strip_parens(a).kind, ast::ExprKind::Nil) {
                     continue;
                 }
@@ -187,6 +192,11 @@ impl<'a> Sema<'a> {
                         let void = self.tt.void;
                         let h = self.tt.func(ps, void);
                         self.expr_tree_infer(a, h)
+                    }
+                    // `nil` for a parameter whose type is already bound
+                    (Some(h), _, ast::ExprKind::Nil) => {
+                        let v = self.value(a, hint);
+                        self.coerce(v, h, Ctx::Arg(i, fname.clone()))
                     }
                     _ => self.value(a, hint),
                 };

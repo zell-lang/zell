@@ -105,6 +105,8 @@ struct Site {
     ops []int
     strs []string
     params int
+    // unique in the program
+    id int
 }
 
 // `expr<F>`: an expression tree whose lambda has type `F`.
@@ -113,10 +115,9 @@ struct Expr<F> {
     // The compiled lambda, the values of the site (slot -> value) and its
     // types (index -> descriptor); one shared environment.
     fns (F, func(int) any, func(int) *reflect.TypeInfo)
-    // Trees built by combinators: their root, parameter names and types.
-    root *Node
-    names []string
-    ptypes []*reflect.TypeInfo
+    // A tree built by a combinator (site nil): its root, parameter names
+    // and types.
+    comb *combined
 
     // The lambda as an ordinary function (in-memory evaluation, tests).
     func Compile() F {
@@ -128,6 +129,15 @@ struct Expr<F> {
     // it (nil for a tree built by a combinator).
     func Site() *Site {
         return this.site
+    }
+
+    // A number identifying the lambda site in the program (-1 for a tree
+    // built by a combinator): the key of a translation cache.
+    func SiteId() int {
+        if this.site == nil {
+            return -1
+        }
+        return this.site.id
     }
 
     // Value of slot `k` in this evaluation (`Captured.index`; Slots maps
@@ -154,7 +164,7 @@ struct Expr<F> {
     // The root node (decoded from the site; a new tree on every call).
     func Root() *Node {
         if this.site == nil {
-            return this.root
+            return this.comb.root
         }
         var d = decoder{site: this.site, vals: this.fns.1, types: this.fns.2, pos: 0, slots: []}
         return d.node()
@@ -163,7 +173,7 @@ struct Expr<F> {
     // Static types of the lambda's parameters.
     func Params() []*reflect.TypeInfo {
         if this.site == nil {
-            return this.ptypes
+            return this.comb.ptypes
         }
         var out []*reflect.TypeInfo = []
         var types = this.fns.2
@@ -176,7 +186,7 @@ struct Expr<F> {
     // Names of the lambda's parameters.
     func ParamNames() []string {
         if this.site == nil {
-            return this.names
+            return this.comb.names
         }
         var out []string = []
         for i in 0..this.site.params {
@@ -197,6 +207,12 @@ struct Expr<F> {
         }
         return head + " => " + Format(this.Root(), names)
     }
+}
+
+struct combined {
+    root *Node
+    names []string
+    ptypes []*reflect.TypeInfo
 }
 
 struct decoder {
@@ -537,7 +553,7 @@ func combine<T>(op Op, ps []Expr<func(T) bool>) Expr<func(T) bool> {
         names = ps[0].ParamNames()
         ptypes = ps[0].Params()
     }
-    return Expr<func(T) bool>{site: nil, fns: (f, noValue, noType), root: root, names: names, ptypes: ptypes}
+    return Expr<func(T) bool>{site: nil, fns: (f, noValue, noType), comb: new combined{root: root, names: names, ptypes: ptypes}}
 }
 
 func noValue(i int) any {
@@ -575,5 +591,5 @@ func Not<T>(p Expr<func(T) bool>) Expr<func(T) bool> {
     var g = p.fns.0
     var f func(T) bool = (x T) => !g(x)
     var root = mk(Node.Unary(Op.Not, p.Root(), reflect.TypeOf<bool>()))
-    return Expr<func(T) bool>{site: nil, fns: (f, noValue, noType), root: root, names: p.ParamNames(), ptypes: p.Params()}
+    return Expr<func(T) bool>{site: nil, fns: (f, noValue, noType), comb: new combined{root: root, names: p.ParamNames(), ptypes: p.Params()}}
 }

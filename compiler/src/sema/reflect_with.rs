@@ -191,8 +191,53 @@ impl<'a> Sema<'a> {
         let sites = owner.and_then(|fid| self.gen.insts.get(&fid.0)).map(|i| i.sites.clone()).unwrap_or_default();
         let mut d = Diagnostic::error(msg, span).with_note(format!("raised by {by}"), None).in_file(self.cur_file);
         d.related = sites.into_iter().map(|(fi, s)| ("instantiated here".to_string(), fi, s)).collect();
+        // A method of a generic struct instance is checked with the
+        // struct; it is only reachable if something uses it.
+        if let Some(fid) = owner {
+            if let hir::FuncKind::Method { struct_id, .. } = self.funcs[fid.0 as usize].kind {
+                if self.gen.inst_structs.contains_key(&struct_id) {
+                    self.refl.deferred.push((fid, d));
+                    return true;
+                }
+            }
+        }
         self.push_diag(d);
         true
+    }
+
+    /// Reports the deferred `reflect.Error`s of methods that are used: a
+    /// call or a reference anywhere, or any method of a struct converted
+    /// to an interface (reachable through its method table).
+    pub(crate) fn reflect_flush_deferred(&mut self) {
+        if self.refl.deferred.is_empty() {
+            return;
+        }
+        let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut boxed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for f in &self.funcs {
+            crate::hir::ownership::walk_function_in(&self.tt, f, &mut |e, _| match &e.kind {
+                ExprKind::FuncRef(id) | ExprKind::Call { callee: hir::Callee::Func(id), .. } | ExprKind::Closure { func: id, .. } => {
+                    used.insert(id.0);
+                }
+                ExprKind::EnvClosures { funcs, .. } => used.extend(funcs.iter().map(|f| f.0)),
+                ExprKind::ToInterface { value } => {
+                    let t = match self.tt.get(value.ty) {
+                        Type::Pointer(x) => *x,
+                        _ => value.ty,
+                    };
+                    if let Type::Struct(d) = self.tt.get(t) {
+                        boxed.insert(d.0);
+                    }
+                }
+                _ => {}
+            });
+        }
+        for (fid, d) in std::mem::take(&mut self.refl.deferred) {
+            let in_boxed = matches!(self.funcs[fid.0 as usize].kind, hir::FuncKind::Method { struct_id, .. } if boxed.contains(&struct_id));
+            if used.contains(&fid.0) || in_boxed {
+                self.push_diag(d);
+            }
+        }
     }
 
     /// The value of a compile-time string expression, if `e` is one.
@@ -215,7 +260,7 @@ impl<'a> Sema<'a> {
                 let ti = self.refl.struct_id("TypeInfo")?;
                 let field = self.structs[ti as usize].fields.get(*index as usize)?;
                 match field.name.as_str() {
-                    "Name" => Some(self.tn(t)),
+                    "Name" => Some(self.tn_short(t)),
                     "FullName" => Some(self.tn_full(t)),
                     "Package" => Some(self.decl_package(t)),
                     _ => None,
@@ -223,6 +268,24 @@ impl<'a> Sema<'a> {
             }
             _ => None,
         }
+    }
+
+    /// `TypeInfo.Name` of `t` as at run time: declared names without their
+    /// namespace (`User`, `[]*Order`).
+    pub(crate) fn tn_short(&self, t: TypeId) -> String {
+        struct Short<'s, 'a>(&'s Sema<'a>);
+        impl crate::hir::dump::DeclNames for Short<'_, '_> {
+            fn struct_name(&self, id: u32) -> String {
+                self.0.structs[id as usize].name.clone()
+            }
+            fn interface_name(&self, id: u32) -> String {
+                self.0.interfaces[id as usize].name.clone()
+            }
+            fn enum_name(&self, id: u32) -> String {
+                self.0.enums[id as usize].name.clone()
+            }
+        }
+        crate::hir::dump::type_name(&self.tt, t, &Short(self))
     }
 
     /// Namespace path of a named type's declaration ("" for others).

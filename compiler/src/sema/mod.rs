@@ -373,6 +373,8 @@ pub(crate) struct Sema<'a> {
     /// Function contexts, innermost last.
     pub fns: Vec<FnCtx>,
     pub lambda_count: u32,
+    /// Expression tree sites created so far (`expr.Site.id`).
+    pub tree_sites: u32,
     /// Methods of enums by (enum id, name). They are ordinary functions
     /// whose first parameter is `this` (the enum value).
     pub enum_methods: HashMap<(u32, String), FuncId>,
@@ -394,6 +396,9 @@ pub(crate) struct Sema<'a> {
     /// pay for `net.http.Handler` (whose signatures pull in the whole
     /// stdlib) unless it names it.
     pub std_iface_lazy: HashMap<u32, NsIdx>,
+    /// Stdlib interfaces already resolved by [`Sema::force_iface`] (in
+    /// their namespace's scope; not resolved again in a user file's).
+    pub std_iface_forced: std::collections::HashSet<u32>,
     /// [`Sema::check_attributes`] ran: later struct instances evaluate
     /// their attributes themselves.
     pub attrs_done: bool,
@@ -449,6 +454,7 @@ impl<'a> Sema<'a> {
             cur_ns: 0,
             fns: Vec::new(),
             lambda_count: 0,
+            tree_sites: 0,
             enum_methods: HashMap::new(),
             variadic: Default::default(),
             enum_method_owner: HashMap::new(),
@@ -456,6 +462,7 @@ impl<'a> Sema<'a> {
             iface_default_owner: HashMap::new(),
             std_fn_ns: HashMap::new(),
             std_iface_lazy: HashMap::new(),
+            std_iface_forced: Default::default(),
             attrs_done: false,
             policy: None,
             ide: None,
@@ -514,6 +521,7 @@ impl<'a> Sema<'a> {
         if let Some(u) = self.unit.as_mut() {
             u.in_bodies = false;
         }
+        self.reflect_flush_deferred();
         self.check_unused_imports();
         if self.unit.is_some() {
             // The entry point is chosen over the whole program (see units).

@@ -166,31 +166,36 @@ pub fn pointer_pin<'e>(fid: FuncId, f: &Function, facts: &ParamFacts, e: &'e Exp
 /// Calls `f(expr, position)` for every expression of `func`'s body, parents
 /// before children.
 pub fn walk_function(p: &Program, func: &Function, f: &mut dyn FnMut(&Expr, Pos)) {
-    let mut w = Walker { p, f, s: None };
+    walk_function_in(&p.types, func, f);
+}
+
+/// [`walk_function`] with only the type table (during analysis).
+pub fn walk_function_in(types: &TypeTable, func: &Function, f: &mut dyn FnMut(&Expr, Pos)) {
+    let mut w = Walker { types, f, s: None };
     w.block(&func.body);
 }
 
 /// Calls `f` for every statement of `func`'s body (also those nested in
 /// blocks and in expressions such as `try ... catch`), outer first.
 pub fn walk_function_stmts(p: &Program, func: &Function, f: &mut dyn FnMut(&Stmt)) {
-    let mut w = Walker { p, f: &mut |_, _| {}, s: Some(f) };
+    let mut w = Walker { types: &p.types, f: &mut |_, _| {}, s: Some(f) };
     w.block(&func.body);
 }
 
 /// Calls `f` for every expression of block `b` (nested blocks included).
 pub fn walk_block(p: &Program, b: &Block, f: &mut dyn FnMut(&Expr, Pos)) {
-    let mut w = Walker { p, f, s: None };
+    let mut w = Walker { types: &p.types, f, s: None };
     w.block(b);
 }
 
 /// Calls `f` for `e` (in position `pos`) and all its subexpressions.
 pub fn walk_expr(p: &Program, e: &Expr, pos: Pos, f: &mut dyn FnMut(&Expr, Pos)) {
-    let mut w = Walker { p, f, s: None };
+    let mut w = Walker { types: &p.types, f, s: None };
     w.expr(e, pos);
 }
 
 struct Walker<'p, 'f> {
-    p: &'p Program,
+    types: &'p TypeTable,
     f: &'f mut dyn FnMut(&Expr, Pos),
     s: Option<&'f mut dyn FnMut(&Stmt)>,
 }
@@ -399,7 +404,7 @@ impl Walker<'_, '_> {
             }
             ExprKind::SubSlice { base, lo, hi } => {
                 // An array is sub-sliced in place: the slice points into it.
-                let arr = matches!(self.p.types.get(base.ty), Type::Array(..));
+                let arr = matches!(self.types.get(base.ty), Type::Array(..));
                 self.expr(base, if arr { AddrOf } else { Read });
                 for x in [lo, hi].into_iter().flatten() {
                     self.expr(x, Read);

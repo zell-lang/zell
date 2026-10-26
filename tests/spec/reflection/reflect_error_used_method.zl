@@ -1,0 +1,23 @@
+// error: Where after Select
+// status: passing
+// test: reflect.Error in a method of a generic struct instance is raised once the method is called
+namespace spec.reflection.reflect_error_used_method
+
+import io
+
+struct Rows<R> {
+    items []R
+
+    func Count() int {
+        return len(this.items)
+    }
+
+    func Where(p func(R) bool) Rows<R> {
+        reflect.Error("Where after Select")
+    }
+}
+
+func main() {
+    var r = Rows<string>{items: ["a", "b"]}
+    println(r.Where((s) => s != "").Count())
+}

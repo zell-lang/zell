@@ -353,7 +353,7 @@ impl<'a> Sema<'a> {
     /// `Name` / `FullName` / `Package` / `Kind` of type `t` as a constant.
     pub(crate) fn type_const(&mut self, t: TypeId, what: &str, span: Span) -> Option<hir::Expr> {
         Some(match what {
-            "Name" => mk(ExprKind::Const(ConstValue::Str(self.tn(t))), self.tt.string, span),
+            "Name" => mk(ExprKind::Const(ConstValue::Str(self.tn_short(t))), self.tt.string, span),
             "FullName" => mk(ExprKind::Const(ConstValue::Str(self.tn_full(t))), self.tt.string, span),
             "Package" => mk(ExprKind::Const(ConstValue::Str(self.decl_package(t))), self.tt.string, span),
             "Kind" => {

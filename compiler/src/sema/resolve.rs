@@ -950,7 +950,7 @@ impl<'a> Sema<'a> {
             self.resolve_enum_variants(eid);
         }
         for iid in 0..self.interfaces.len() {
-            if self.std_iface_lazy.contains_key(&(iid as u32)) {
+            if self.std_iface_lazy.contains_key(&(iid as u32)) || self.std_iface_forced.contains(&(iid as u32)) {
                 continue;
             }
             self.cur_file = self.interfaces[iid].file;
@@ -999,6 +999,7 @@ impl<'a> Sema<'a> {
     /// (see `std_iface_lazy`); a no-op for every other interface.
     pub(crate) fn force_iface(&mut self, iid: u32) {
         let Some(ns) = self.std_iface_lazy.remove(&iid) else { return };
+        self.std_iface_forced.insert(iid);
         let saved = (self.cur_file, self.cur_ns);
         self.cur_file = 0;
         self.cur_ns = ns;

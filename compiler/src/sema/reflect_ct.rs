@@ -189,7 +189,7 @@ impl<'a> Sema<'a> {
         let t = self.type_steps(t, steps.iter().map(|s| s.name.as_str()))?;
         self.refl.folds += 1;
         Some(match last {
-            "Name" => mk(ExprKind::Const(ConstValue::Str(self.tn(t))), self.tt.string, span),
+            "Name" => mk(ExprKind::Const(ConstValue::Str(self.tn_short(t))), self.tt.string, span),
             "FullName" => mk(ExprKind::Const(ConstValue::Str(self.tn_full(t))), self.tt.string, span),
             _ => {
                 let en = *self.refl.enums.get("Kind")?;

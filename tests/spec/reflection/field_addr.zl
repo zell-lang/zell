@@ -1,0 +1,35 @@
+// test: f.Addr(p) in an unrolled reflect.Fields<T>() loop is the address of the field in *p (an interior pointer with the field's static type), so a generic decoder writes into the field without a copy
+// status: passing
+// run-flags: --leak-check
+namespace spec.reflection.field_addr
+
+import io
+
+struct User {
+    Name string
+    Age  int
+    Tags []string
+}
+
+func setFrom<F>(p *F, v any) {
+    switch v {
+    case F x:
+        *p = x
+    }
+}
+
+// Fills the fields of *p from vals, by index.
+func decode<T>(p *T, vals []any) {
+    for f in reflect.Fields<T>() {
+        setFrom(f.Addr(p), vals[f.Index])
+    }
+}
+
+func main() {
+    var u = User{Name: "", Age: 0, Tags: []}
+    decode(&u, ["Ann", 34, ["x", "y"]])
+    println(u.Name, u.Age, u.Tags)
+    var t (int, string) = (0, "")
+    decode(&t, [7, "seven"])
+    println(t)
+}

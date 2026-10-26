@@ -871,6 +871,7 @@ impl<'a> Sema<'a> {
         self.funcs.truncate(m.funcs);
         self.func_src.truncate(m.funcs);
         self.sigs.truncate(m.funcs);
+        self.variadic.retain(|f| (*f as usize) < m.funcs);
         self.structs.truncate(m.structs);
         self.struct_src.truncate(m.structs);
         self.enums.truncate(m.enums);

@@ -1,0 +1,23 @@
+// test: reflect.Error in a method of a generic struct is raised only when the method is used (called, taken as a value, or reachable through an interface the struct is converted to): an instance whose misuse method is never called compiles
+// status: passing
+namespace spec.reflection.reflect_error_unused_method
+
+import io
+
+struct Rows<R> {
+    items []R
+
+    func Count() int {
+        return len(this.items)
+    }
+
+    // Filtering after a projection is a mistake: rejected where it is used.
+    func Where(p func(R) bool) Rows<R> {
+        reflect.Error("Where after Select")
+    }
+}
+
+func main() {
+    var r = Rows<string>{items: ["a", "b"]}
+    println(r.Count())
+}
