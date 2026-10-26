@@ -1350,14 +1350,14 @@ func entityFor<T>(cm *ctxModel) *Entity<T> {
 func scanEntity<T>(em *entModel, vals []any, off int, p *T) void! {
     for f in reflect.Fields<T>() {
         if !f.Embedded &&
-            (f.Attribute<data.jsonb>() != nil ||
-                !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
-                !(f.Type.Kind == reflect.Kind.Pointer &&
-                    f.Type.Elem.Kind == reflect.Kind.Struct &&
-                    f.Type.Elem != reflect.TypeOf<time.Time>() &&
-                    f.Type.Elem != reflect.TypeOf<time.Duration>() &&
-                    f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
-                    f.Type.Elem != reflect.TypeOf<encoding.json.Value>())) {
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct)) && f.Attribute<data.jsonb>() == nil) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<time.Duration>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>() &&
+                f.Attribute<data.jsonb>() == nil) {
             var ci = em.fieldCol[f.Index]
             if ci >= 0 {
                 if f.Attribute<data.jsonb>() != nil {
@@ -1379,14 +1379,14 @@ func valuesOf<T>(em *entModel, p *T) []any {
     var out []any = []
     for f in reflect.Fields<T>() {
         if !f.Embedded &&
-            (f.Attribute<data.jsonb>() != nil ||
-                !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
-                !(f.Type.Kind == reflect.Kind.Pointer &&
-                    f.Type.Elem.Kind == reflect.Kind.Struct &&
-                    f.Type.Elem != reflect.TypeOf<time.Time>() &&
-                    f.Type.Elem != reflect.TypeOf<time.Duration>() &&
-                    f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
-                    f.Type.Elem != reflect.TypeOf<encoding.json.Value>())) {
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct)) && f.Attribute<data.jsonb>() == nil) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<time.Duration>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>() &&
+                f.Attribute<data.jsonb>() == nil) {
             if em.fieldCol[f.Index] >= 0 {
                 if f.Attribute<data.jsonb>() != nil {
                     out = append(out, jsonArg(f.Get(p)))
@@ -1411,14 +1411,14 @@ func valuesOf<T>(em *entModel, p *T) []any {
 func columnValue<T>(em *entModel, p *T, i int) any {
     for f in reflect.Fields<T>() {
         if !f.Embedded &&
-            (f.Attribute<data.jsonb>() != nil ||
-                !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
-                !(f.Type.Kind == reflect.Kind.Pointer &&
-                    f.Type.Elem.Kind == reflect.Kind.Struct &&
-                    f.Type.Elem != reflect.TypeOf<time.Time>() &&
-                    f.Type.Elem != reflect.TypeOf<time.Duration>() &&
-                    f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
-                    f.Type.Elem != reflect.TypeOf<encoding.json.Value>())) {
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct)) && f.Attribute<data.jsonb>() == nil) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<time.Duration>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>() &&
+                f.Attribute<data.jsonb>() == nil) {
             if em.fieldCol[f.Index] == i {
                 if f.Attribute<data.jsonb>() != nil {
                     return jsonArg(f.Get(p))
@@ -1446,14 +1446,14 @@ func columnValue<T>(em *entModel, p *T, i int) any {
 func setColumn<T>(em *entModel, p *T, i int, v any) void! {
     for f in reflect.Fields<T>() {
         if !f.Embedded &&
-            (f.Attribute<data.jsonb>() != nil ||
-                !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
-                !(f.Type.Kind == reflect.Kind.Pointer &&
-                    f.Type.Elem.Kind == reflect.Kind.Struct &&
-                    f.Type.Elem != reflect.TypeOf<time.Time>() &&
-                    f.Type.Elem != reflect.TypeOf<time.Duration>() &&
-                    f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
-                    f.Type.Elem != reflect.TypeOf<encoding.json.Value>())) {
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct)) && f.Attribute<data.jsonb>() == nil) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<time.Duration>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>() &&
+                f.Attribute<data.jsonb>() == nil) {
             if em.fieldCol[f.Index] == i {
                 if f.Attribute<data.jsonb>() != nil {
                     jsonInto(f.Addr(p), v, em.meta.Columns[i].Name)?
