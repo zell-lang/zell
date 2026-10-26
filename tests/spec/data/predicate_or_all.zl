@@ -1,0 +1,46 @@
+// test: q.Where(expr.OrAll(ps)) with the predicates built in a loop from request data (one tree per name, each capturing its own value); expr.AndAll and Not combine too; an empty OrAll is false, an empty AndAll true; combined trees are translated on every call (no lambda site to cache by)
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.predicate_or_all
+
+import io
+
+struct User {
+    Id   int
+    Name string
+    Age  int
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+// The predicates of a search request: name=Ann&name=Cid&min=18.
+func search(names []string, min int) expr<func(*User) bool> {
+    var ps []expr<func(*User) bool> = []
+    for n in names {
+        ps = append(ps, (u) => u.Name == n)
+    }
+    var byName = expr.OrAll(ps)
+    var adult expr<func(*User) bool> = (u) => u.Age >= min
+    return expr.AndAll([byName, adult])
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    await ctx.EnsureCreated()?
+    ctx.Users.AddRange([new User{Name: "Ann", Age: 34}, new User{Name: "Bob", Age: 17}, new User{Name: "Cid", Age: 51}, new User{Name: "Dee", Age: 12}])
+    _ = await ctx.SaveChanges()?
+    var p = search(["Ann", "Cid", "Dee"], 18)
+    println(p)
+    var q = ctx.Users.Where(p).OrderBy((u) => u.Name)
+    println(q.ToSql(), q.Args())
+    for u in await q.ToList()? {
+        println(" ", u.Name)
+    }
+    var none []expr<func(*User) bool> = []
+    println(await ctx.Users.Count(expr.OrAll(none))?, await ctx.Users.Count(expr.AndAll(none))?)
+    var notAnn = expr.Not(search(["Ann"], 0))
+    println(ctx.Users.Where(notAnn).ToSql(), await ctx.Users.Count(notAnn)?)
+}

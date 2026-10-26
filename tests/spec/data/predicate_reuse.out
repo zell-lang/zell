@@ -1,0 +1,6 @@
+[pad pen]
+SELECT t0."id", t0."name", t0."price", t0."stock" FROM "items" AS t0 WHERE ((t0."price" < ?)) AND ((t0."stock" > ?)) ORDER BY t0."stock" DESC [5 0]
+pen 2 true
+0 2
+1 0
+2 0

@@ -1,0 +1,6 @@
+u => (u.Name == n || u.Name == n || u.Name == n) && u.Age >= min
+SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE ((((t0."name" = ?) OR (t0."name" = ?)) OR (t0."name" = ?)) AND (t0."age" >= ?)) ORDER BY t0."name" ASC [Ann Cid Dee 18]
+  Ann
+  Cid
+0 4
+SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (NOT ((t0."name" = ?) AND (t0."age" >= ?))) 3

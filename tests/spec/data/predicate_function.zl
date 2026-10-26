@@ -1,0 +1,52 @@
+// test: a query predicate returned from a function (a filter built from request data); its captured values are the function's arguments at the time the tree was built
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.predicate_function
+
+import io
+
+struct User {
+    Id    int
+    Name  string
+    Email string
+    Age   int
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+struct Filter {
+    Domain string
+    MinAge int
+}
+
+func matching(f Filter) expr<func(*User) bool> {
+    return (u) => strings.HasSuffix(u.Email, f.Domain) && u.Age >= f.MinAge
+}
+
+func olderThan(n int) expr<func(*User) bool> {
+    return (u) => u.Age > n
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    ctx.Users.AddRange([
+        new User{Name: "Ann", Email: "ann@a.io", Age: 34},
+        new User{Name: "Bob", Email: "bob@b.io", Age: 17},
+        new User{Name: "Cid", Email: "cid@a.io", Age: 16},
+    ])
+    _ = await ctx.SaveChanges()?
+    var p = matching(Filter{Domain: "@a.io", MinAge: 18})
+    println(p)
+    var q = ctx.Users.Where(p)
+    println(q.ToSql(), q.Args())
+    println(pg.Users.Where(p).ToSql())
+    println((await q.Single()?).Name)
+    for n in [15, 20, 40] {
+        println(n, await ctx.Users.Count(olderThan(n))?)
+    }
+}

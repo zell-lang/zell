@@ -1,0 +1,7 @@
+u => strings.HasSuffix(u.Email, f.Domain) && u.Age >= f.MinAge
+SELECT t0."id", t0."name", t0."email", t0."age" FROM "users" AS t0 WHERE ((length(?) = 0 OR substr(t0."email", -length(?)) = ?) AND (t0."age" >= ?)) [@a.io @a.io @a.io 18]
+SELECT t0."id", t0."name", t0."email", t0."age" FROM "users" AS t0 WHERE ((right(t0."email", length($1)) = $2) AND (t0."age" >= $3))
+Ann
+15 3
+20 1
+40 0

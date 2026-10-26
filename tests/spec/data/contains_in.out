@@ -1,0 +1,7 @@
+SELECT t0."id", t0."name" FROM "users" AS t0 WHERE (t0."name" IN (?, ?)) ORDER BY t0."id" ASC [Ann Cid]
+SELECT t0."id", t0."name" FROM "users" AS t0 WHERE (t0."name" IN ($1))
+  Ann
+  Cid
+0
+SELECT t0."id", t0."name" FROM "users" AS t0 WHERE EXISTS (SELECT 1 FROM "orders" AS s1 WHERE s1."user_id" = t0."id" AND ((s1."product" IN (?, ?, ?)))) [ink ink glue]
+Bob

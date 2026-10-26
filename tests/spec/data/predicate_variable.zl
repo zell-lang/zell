@@ -1,0 +1,34 @@
+// test: a query predicate stored in a variable of type expr<func(*User) bool> (the lambda is an expression tree, not a closure) is translated like a literal; a closure value is still rejected (spec/expr/err_not_a_lambda)
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.predicate_variable
+
+import io
+
+struct User {
+    Id   int
+    Name string
+    Age  int
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    await ctx.EnsureCreated()?
+    ctx.Users.AddRange([new User{Name: "Ann", Age: 34}, new User{Name: "Bob", Age: 17}, new User{Name: "Cid", Age: 51}])
+    _ = await ctx.SaveChanges()?
+    var min = 18
+    var adult expr<func(*User) bool> = (u) => u.Age >= min
+    min = 40
+    var q = ctx.Users.Where(adult).OrderBy((u) => u.Name)
+    println(adult)
+    println(q.ToSql(), q.Args())
+    for u in await q.ToList()? {
+        println(" ", u.Name)
+    }
+    println(await ctx.Users.Count(adult)?, adult.Compile()(new User{Name: "Dee", Age: 20}))
+}

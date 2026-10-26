@@ -1,0 +1,37 @@
+// test: one predicate tree reused across two queries of the same set (Where, Count, Any, First) and with different further operators; the translation of its lambda site is cached, the arguments are read from its slots on every use
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.predicate_reuse
+
+import io
+
+struct Item {
+    Id    int
+    Name  string
+    Price int
+    Stock int
+}
+
+struct Store {
+    data.Context
+    Items data.Set<Item>
+}
+
+async func main() void! {
+    var ctx = data.Open<Store>(data.Provider.Sqlite, ":memory:")?
+    await ctx.EnsureCreated()?
+    ctx.Items.AddRange([new Item{Name: "pen", Price: 2, Stock: 10}, new Item{Name: "ink", Price: 9, Stock: 0}, new Item{Name: "pad", Price: 4, Stock: 3}])
+    _ = await ctx.SaveChanges()?
+    var cheap expr<func(*Item) bool> = (i) => i.Price < 5
+    var inStock expr<func(*Item) bool> = (i) => i.Stock > 0
+    var names = await ctx.Items.Where(cheap).OrderBy((i) => i.Name).Select((i) => i.Name).ToList()?
+    println(names)
+    var q = ctx.Items.Where(cheap).Where(inStock).OrderByDescending((i) => i.Stock)
+    println(q.ToSql(), q.Args())
+    println((await q.First()?).Name, await ctx.Items.Count(cheap)?, await ctx.Items.Any(inStock)?)
+    for round in 0..3 {
+        var limit = round * 4
+        var p expr<func(*Item) bool> = (i) => i.Price > limit
+        println(round, await ctx.Items.Count(p, inStock)?)
+    }
+}

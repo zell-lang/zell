@@ -1,0 +1,5 @@
+u => u.Age >= min
+SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (t0."age" >= ?) ORDER BY t0."name" ASC [18]
+  Ann
+  Cid
+2 true

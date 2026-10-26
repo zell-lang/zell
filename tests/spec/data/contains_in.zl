@@ -1,0 +1,51 @@
+// test: slices.Contains over a captured slice is `IN (...)` with one parameter per element (strings, ints; an empty slice matches nothing), the slice is read when the tree is built; also inside a navigation predicate (data.Any)
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.contains_in
+
+import io
+
+struct User {
+    Id     int
+    Name   string
+    Orders []*Order
+}
+
+struct Order {
+    Id      int
+    UserId  int
+    Product string
+}
+
+struct Shop {
+    data.Context
+    Users  data.Set<User>
+    Orders data.Set<Order>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    var ann = new User{Name: "Ann"}
+    var bob = new User{Name: "Bob"}
+    ctx.Users.AddRange([ann, bob, new User{Name: "Cid"}])
+    _ = await ctx.SaveChanges()?
+    ctx.Orders.AddRange([new Order{UserId: ann.Id, Product: "pen"}, new Order{UserId: bob.Id, Product: "ink"}])
+    _ = await ctx.SaveChanges()?
+
+    var names = ["Ann", "Cid"]
+    var q = ctx.Users.Where((u) => slices.Contains(names, u.Name)).OrderBy((u) => u.Id)
+    names = ["Bob"]
+    println(q.ToSql(), q.Args())
+    println(pg.Users.Where((u) => slices.Contains(names, u.Name)).ToSql())
+    for u in await q.ToList()? {
+        println(" ", u.Name)
+    }
+    var ids []int = []
+    println(await ctx.Users.Count((u) => slices.Contains(ids, u.Id))?)
+    var products = ["ink", "ink", "glue"]
+    var buyers = ctx.Users.Where((u) => data.Any(u.Orders, (o) => slices.Contains(products, o.Product)))
+    println(buyers.ToSql(), buyers.Args())
+    println((await buyers.Single()?).Name)
+}
