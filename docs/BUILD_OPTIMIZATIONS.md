@@ -19,7 +19,7 @@ peak (610 / 610 MB debug, 305 / 300 MB release). The runtime archive is small:
 `libzell_rt.a` is 5 MB, of which 2 MB is DWARF.
 
 It is **parallel code generation** (`compiler/src/parcodegen.rs`). The module is
-compiled to machine code on `min(cores, 8)` threads, and each thread holds its own
+compiled to machine code on `min(cores, 8)` threads (capped at 4 since 2026-10-26), and each thread holds its own
 copy of the module:
 
 | `ZELL_CODEGEN_THREADS` | peak RSS | debug build time |

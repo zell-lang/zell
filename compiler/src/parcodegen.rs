@@ -32,12 +32,14 @@ const MIN_INSTRUCTIONS: usize = 60_000;
 const PER_PARTITION: usize = 40_000;
 
 /// Number of code generation threads (`ZELL_CODEGEN_THREADS`, default:
-/// the available parallelism, at most 8; 1 disables the split).
+/// the available parallelism, at most 4; 1 disables the split). Every
+/// thread parses the whole module (about 50 MB for a 1500-line program), and
+/// past 4 threads the build gets no faster (docs/BUILD_OPTIMIZATIONS.md).
 fn threads() -> usize {
     if let Some(n) = std::env::var("ZELL_CODEGEN_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
         return n.clamp(1, 64);
     }
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4)
 }
 
 fn instructions(f: inkwell::values::FunctionValue) -> usize {
