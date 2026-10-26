@@ -1,0 +1,1192 @@
+namespace data
+
+// Translation of query lambdas to SQL (docs/FRAMEWORK.md section 3).
+//
+// A query operator takes its lambda as an expression tree (Where(p
+// expr<func(*T) bool>), DESIGN.md "Деревья выражений"). The tree is walked
+// with every parameter bound to a table alias (t0 for the query's entity,
+// sN for the entities of correlated subqueries, a group for GroupBy):
+// fields become columns of the context model, operators and the supported
+// calls become SQL for both dialects (PostgreSQL and SQLite). Every Const
+// and Captured node becomes an argument, never text: {?i} in the
+// fragment, {*i} for a list (expanded to one placeholder per element when
+// the statement is written). The result, a plan, is cached per lambda site
+// and context model, so a hot query takes its SQL from the cache and only
+// reads the values of the tree's slots.
+
+// A translated subexpression: SQL for both dialects and what it is.
+@acyclic
+struct sv {
+    pg    string
+    lite  string
+    // static type of the value (scalars)
+    t     *reflect.TypeInfo
+    // 0 scalar, 1 entity row, 2 collection navigation, 3 reference
+    // navigation, 4 group, 5 composite group key
+    kind  int
+    // the entity (1), the owner of the navigation (2, 3), the grouped
+    // entity (4)
+    em    *entModel
+    alias string
+    nav   *navMeta
+    keys  []sv
+    // the constant nil
+    isNil bool
+    // a list argument ({*i})
+    isList bool
+}
+
+func scalarSv(pg string, lite string, t *reflect.TypeInfo) sv {
+    return sv{pg: pg, lite: lite, t: t}
+}
+
+func sameSv(s string, t *reflect.TypeInfo) sv {
+    return sv{pg: s, lite: s, t: t}
+}
+
+// `a` + x + `b` in both dialects.
+func around(a string, x sv, b string, t *reflect.TypeInfo) sv {
+    return sv{pg: a + x.pg + b, lite: a + x.lite + b, t: t}
+}
+
+// `a` + x + `mid` + y + `b` in both dialects.
+func around2(a string, x sv, mid string, y sv, b string, t *reflect.TypeInfo) sv {
+    return sv{pg: a + x.pg + mid + y.pg + b, lite: a + x.lite + mid + y.lite + b, t: t}
+}
+
+// What a parameter of the tree is bound to.
+@acyclic
+struct tbind {
+    // 0 unbound, 1 an entity row at alias, 2 a group
+    kind  int
+    em    *entModel
+    alias string
+    keys  []sv
+}
+
+// Translation state of one tree.
+@acyclic
+struct tcx {
+    cm    *ctxModel
+    binds []tbind
+    // every Const and Captured node, in walk order
+    vnodes []*expr.Node
+    // per argument marker: the ordinal of its value node, and whether it
+    // is a list
+    args  []int
+    lists []bool
+    // how each argument becomes a driver value (see argOfKind)
+    convs []int
+    // number of the first marker (fragments sharing an argument list)
+    base  int
+    // last correlated subquery alias (s1, s2, ...)
+    sub   int
+
+    func bindEntity(i int, em *entModel, alias string) {
+        for len(this.binds) <= i {
+            this.binds = append(this.binds, tbind{})
+        }
+        this.binds[i] = tbind{kind: 1, em: em, alias: alias, keys: []}
+    }
+
+    func bindGroup(i int, em *entModel, alias string, keys []sv) {
+        for len(this.binds) <= i {
+            this.binds = append(this.binds, tbind{})
+        }
+        this.binds[i] = tbind{kind: 2, em: em, alias: alias, keys: keys}
+    }
+
+    func binding(i int) tbind {
+        if i < len(this.binds) {
+            return this.binds[i]
+        }
+        return tbind{}
+    }
+
+    // The marker of an argument with the value of node n (of static type t).
+    func marker(n *expr.Node, list bool, t *reflect.TypeInfo) string {
+        var j = this.base + len(this.args)
+        var o = -1
+        for i, x in this.vnodes {
+            if x == n {
+                o = i
+            }
+        }
+        this.args = append(this.args, o)
+        this.lists = append(this.lists, list)
+        this.convs = append(this.convs, convKind(t))
+        if list {
+            return "{*" + strconv.Itoa(j) + "}"
+        }
+        return "{?" + strconv.Itoa(j) + "}"
+    }
+
+    func newAlias() string {
+        this.sub += 1
+        return "s" + strconv.Itoa(this.sub)
+    }
+}
+
+func newTcx(cm *ctxModel, root *expr.Node, base int) *tcx {
+    var cx = new tcx{cm: cm, binds: [], vnodes: [], args: [], lists: [], convs: [], base: base, sub: 0}
+    expr.Walk(root, (x) => {
+        switch *x {
+        case expr.Node.Const(_, _):
+            cx.vnodes = append(cx.vnodes, x)
+        case expr.Node.Captured(_, _, _, _):
+            cx.vnodes = append(cx.vnodes, x)
+        }
+        return true
+    })
+    return cx
+}
+
+func untranslatable(why string) error {
+    return error(
+        "data: expression cannot be translated to SQL: " +
+            why +
+            " (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)",
+    )
+}
+
+// ---- types ----------------------------------------------------------------------
+
+// The value type of t without nullability (*int -> int, sql.Null<int> -> int).
+func baseOf(t *reflect.TypeInfo) *reflect.TypeInfo {
+    if t == nil {
+        return nil
+    }
+    if t.Kind == reflect.Kind.Pointer {
+        return t.Elem
+    }
+    if t.Kind == reflect.Kind.Struct && strings.HasPrefix(t.FullName, "database.sql.Null<") && len(t.Fields) > 0 {
+        return t.Fields[0].Type
+    }
+    return t
+}
+
+func isStrTy(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    return b != nil && b.Kind == reflect.Kind.String
+}
+
+func isIntKind(k reflect.Kind) bool {
+    return k == reflect.Kind.Int ||
+        k == reflect.Kind.Int8 ||
+        k == reflect.Kind.Int16 ||
+        k == reflect.Kind.Int32 ||
+        k == reflect.Kind.Uint ||
+        k == reflect.Kind.Uint8 ||
+        k == reflect.Kind.Uint16 ||
+        k == reflect.Kind.Uint32
+}
+
+func isIntTy(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    return b != nil && isIntKind(b.Kind)
+}
+
+func isBoolTy(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    return b != nil && b.Kind == reflect.Kind.Bool
+}
+
+func tyName(t *reflect.TypeInfo) string {
+    if t == nil {
+        return "a value"
+    }
+    return t.Name
+}
+
+func describe(v sv) string {
+    if v.kind == 1 {
+        return "the entity " + v.em.meta.Entity
+    }
+    if v.kind == 2 || v.kind == 3 {
+        return "the navigation " + v.nav.field
+    }
+    if v.kind == 4 {
+        return "a group"
+    }
+    if v.kind == 5 {
+        return "a composite key"
+    }
+    if v.isNil {
+        return "nil"
+    }
+    return tyName(v.t)
+}
+
+
+// ---- expressions ------------------------------------------------------------------
+
+// Translates a predicate (a bool scalar).
+func trPred(cx *tcx, n *expr.Node) sv! {
+    var v = trValue(cx, n)?
+    if !isBoolTy(v.t) {
+        return untranslatable("expected a condition (bool), found " + describe(v))
+    }
+    return v
+}
+
+// Translates a scalar expression.
+func trValue(cx *tcx, n *expr.Node) sv! {
+    var v = tr(cx, n)?
+    return scalarOnly(v)?
+}
+
+func scalarOnly(v sv) sv! {
+    if v.kind == 1 {
+        return untranslatable("the entity " + v.em.meta.Entity + " itself is not a value (use one of its columns)")
+    }
+    if v.kind == 2 {
+        return untranslatable("the collection " + v.nav.field + " is not a value (use len(...), data.Any, data.Count, data.Sum, ...)")
+    }
+    if v.kind == 3 {
+        return untranslatable("the navigation " + v.nav.field + " is not a value (use one of its columns, or compare it with nil)")
+    }
+    if v.kind == 4 {
+        return untranslatable("a group is not a value (use g.Key, g.Count(), g.Sum(...))")
+    }
+    if v.kind == 5 {
+        return untranslatable("a composite key can only be selected (use one of its columns elsewhere)")
+    }
+    return v
+}
+
+func tr(cx *tcx, n *expr.Node) sv! {
+    switch *n {
+    case expr.Node.Param(i, t):
+        var b = cx.binding(i)
+        if b.kind == 1 {
+            return sv{pg: b.alias, lite: b.alias, t: t, kind: 1, em: b.em, alias: b.alias}
+        }
+        if b.kind == 2 {
+            return sv{t: t, kind: 4, em: b.em, alias: b.alias, keys: b.keys}
+        }
+        return untranslatable("a lambda parameter outside a query")
+    case expr.Node.Field(base, name, _, t, _):
+        var b = tr(cx, base)?
+        return member(cx, b, name, t)?
+    case expr.Node.Const(v, t):
+        return valueArg(cx, n, v, t, true)?
+    case expr.Node.Captured(_, _, v, t):
+        return valueArg(cx, n, v, t, false)?
+    case expr.Node.Binary(op, l, r, t):
+        return binary(cx, op, l, r, t)?
+    case expr.Node.Unary(op, x, t):
+        if op == expr.Op.Not {
+            var v = trPred(cx, x)?
+            return around("(NOT ", v, ")", reflect.TypeOf<bool>())
+        }
+        var v = trValue(cx, x)?
+        return around("(-", v, ")", v.t)
+    case expr.Node.IsNil(x, negated):
+        return isNil(cx, x, negated)?
+    case expr.Node.Call(fname, args, t):
+        return call(cx, fname, args, t)?
+    case expr.Node.Convert(x, t):
+        return convert(cx, x, t)?
+    case expr.Node.Index(_, _, _):
+        return untranslatable("indexing is not supported in queries")
+    case expr.Node.Tuple(_, _):
+        return untranslatable("a tuple is only allowed as the result of Select, OrderBy, GroupBy or a key")
+    case expr.Node.Struct(_, _):
+        return untranslatable("a struct literal is only allowed as the result of Select")
+    case expr.Node.Lambda(_, _, _, _):
+        return untranslatable("a nested lambda is only allowed as the argument of data.Any, data.All, data.Count, data.Sum, data.Min, data.Max, data.Average or a group's aggregate")
+    }
+    return untranslatable("this kind of expression is not supported")
+}
+
+// A Const or Captured value: an argument (a list for a slice).
+func valueArg(cx *tcx, n *expr.Node, v any, t *reflect.TypeInfo, isConst bool) sv! {
+    if isConst && v == nil {
+        return sv{pg: "NULL", lite: "NULL", t: t, isNil: true}
+    }
+    if t != nil && t.Kind == reflect.Kind.Slice && !(t.Elem.Kind == reflect.Kind.Uint8) {
+        var m = cx.marker(n, true, t)
+        return sv{pg: m, lite: m, t: t, isList: true}
+    }
+    var m = cx.marker(n, false, t)
+    return sameSv(m, t)
+}
+
+// `b.name`.
+func member(cx *tcx, b sv, name string, t *reflect.TypeInfo) sv! {
+    if b.kind == 1 {
+        return colSv(cx, b.em, b.alias, name, t)?
+    }
+    if b.kind == 3 {
+        // a column of the referenced entity: a scalar subquery
+        var target = cx.cm.ent(b.nav.target)
+        var alias = cx.newAlias()
+        var col = colSv(cx, target, alias, name, t)?
+        if col.kind != 0 {
+            return untranslatable(b.nav.field + "." + name + ": only columns of a reference navigation can be used (not nested navigations)")
+        }
+        var corr = correlate(b.nav, b.em, b.alias, target, alias)?
+        return around("(SELECT ", col, " FROM " + corr + ")", t)
+    }
+    if b.kind == 4 {
+        if name != "Key" {
+            return untranslatable("a group has no member " + name + " (use g.Key, g.Count(), g.Sum(...), g.Min, g.Max, g.Average)")
+        }
+        if len(b.keys) == 1 {
+            return b.keys[0]
+        }
+        return sv{t: t, kind: 5, keys: b.keys}
+    }
+    if b.kind == 2 {
+        return untranslatable("the collection " + b.nav.field + " has no member " + name + " (use data.Any, data.All, data.Count, data.Sum, data.Min, data.Max, data.Average)")
+    }
+    if b.kind == 5 {
+        return untranslatable("members of a composite key cannot be used in SQL")
+    }
+    return untranslatable(describe(b) + " has no member " + name + " in SQL")
+}
+
+// The column (or navigation) `name` of entity em at alias a.
+func colSv(cx *tcx, em *entModel, a string, name string, t *reflect.TypeInfo) sv! {
+    var ci = em.colOf(name)
+    if ci >= 0 {
+        return sameSv(a + "." + quoteIdent(em.meta.Columns[ci].Name), t)
+    }
+    var n = em.nav(name)
+    if n != nil {
+        var k = 3
+        if n.many {
+            k = 2
+        }
+        return sv{t: t, kind: k, em: em, alias: a, nav: n}
+    }
+    if em.t.Field(name) != nil {
+        return untranslatable(em.meta.Entity + "." + name + " is not mapped to a column (@ignore)")
+    }
+    return untranslatable(em.meta.Entity + " has no field " + name)
+}
+
+// `"target" AS ta WHERE <correlation with the owner at oa>`: the FROM and
+// WHERE of a correlated subquery over navigation n.
+func correlate(n *navMeta, owner *entModel, oa string, target *entModel, ta string) string! {
+    if n.kind == 0 || n.kind == 1 {
+        var fk = target.colOf(n.fk)
+        if fk < 0 || owner.meta.Key < 0 {
+            return untranslatable("the navigation " + n.field + " has no foreign key")
+        }
+        return quoteIdent(target.meta.Table) + " AS " + ta + " WHERE " + ta + "." + quoteIdent(target.meta.Columns[fk].Name) + " = " + oa + "." + quoteIdent(owner.meta.Columns[owner.meta.Key].Name)
+    }
+    if n.kind == 2 {
+        var fk = owner.colOf(n.fk)
+        if fk < 0 || target.meta.Key < 0 {
+            return untranslatable("the navigation " + n.field + " has no foreign key")
+        }
+        return quoteIdent(target.meta.Table) + " AS " + ta + " WHERE " + ta + "." + quoteIdent(target.meta.Columns[target.meta.Key].Name) + " = " + oa + "." + quoteIdent(owner.meta.Columns[fk].Name)
+    }
+    if owner.meta.Key < 0 || target.meta.Key < 0 {
+        return untranslatable("the navigation " + n.field + " needs keys")
+    }
+    var j = "j" + ta[1..len(ta)]
+    return quoteIdent(target.meta.Table) +
+        " AS " +
+        ta +
+        " JOIN " +
+        quoteIdent(n.through) +
+        " AS " +
+        j +
+        " ON " +
+        j +
+        "." +
+        quoteIdent(n.targetCol) +
+        " = " +
+        ta +
+        "." +
+        quoteIdent(target.meta.Columns[target.meta.Key].Name) +
+        " WHERE " +
+        j +
+        "." +
+        quoteIdent(n.ownerCol) +
+        " = " +
+        oa +
+        "." +
+        quoteIdent(owner.meta.Columns[owner.meta.Key].Name)
+}
+
+func binary(cx *tcx, op expr.Op, left *expr.Node, right *expr.Node, t *reflect.TypeInfo) sv! {
+    if op == expr.Op.And || op == expr.Op.Or {
+        var l = trPred(cx, left)?
+        var r = trPred(cx, right)?
+        var kw = " OR "
+        if op == expr.Op.And {
+            kw = " AND "
+        }
+        return around2("(", l, kw, r, ")", reflect.TypeOf<bool>())
+    }
+    if op == expr.Op.Eq || op == expr.Op.Ne {
+        var l = tr(cx, left)?
+        var r = tr(cx, right)?
+        if r.isNil {
+            return nilTest(cx, l, op == expr.Op.Ne)?
+        }
+        if l.isNil {
+            return nilTest(cx, r, op == expr.Op.Ne)?
+        }
+        var ls = scalarOnly(l)?
+        var rs = scalarOnly(r)?
+        var o = " <> "
+        if op == expr.Op.Eq {
+            o = " = "
+        }
+        return around2("(", ls, o, rs, ")", reflect.TypeOf<bool>())
+    }
+    var l = trValue(cx, left)?
+    var r = trValue(cx, right)?
+    if op == expr.Op.Lt || op == expr.Op.Le || op == expr.Op.Gt || op == expr.Op.Ge {
+        return around2("(", l, " " + op.Symbol() + " ", r, ")", reflect.TypeOf<bool>())
+    }
+    if op == expr.Op.Add && (isStrTy(l.t) || isStrTy(r.t)) {
+        return around2("(", l, " || ", r, ")", t)
+    }
+    return around2("(", l, " " + op.Symbol() + " ", r, ")", t)
+}
+
+func isNil(cx *tcx, x *expr.Node, negated bool) sv! {
+    var v = tr(cx, x)?
+    return nilTest(cx, v, negated)?
+}
+
+// `v == nil` (`!= nil` when negated).
+func nilTest(cx *tcx, v sv, negated bool) sv! {
+    var not = ""
+    if negated {
+        not = " NOT"
+    }
+    if v.kind == 3 {
+        var n = v.nav
+        if n.kind == 2 {
+            var fk = v.em.colOf(n.fk)
+            if fk < 0 {
+                return untranslatable("the navigation " + n.field + " has no foreign key")
+            }
+            var c = v.em.meta.Columns[fk]
+            if !c.Nullable {
+                return untranslatable(n.field + " is never nil (its foreign key " + c.Field + " is not nullable)")
+            }
+            return sameSv("(" + v.alias + "." + quoteIdent(c.Name) + " IS" + not + " NULL)", reflect.TypeOf<bool>())
+        }
+        var target = cx.cm.ent(n.target)
+        var alias = cx.newAlias()
+        var corr = correlate(n, v.em, v.alias, target, alias)?
+        var kw = "NOT EXISTS"
+        if negated {
+            kw = "EXISTS"
+        }
+        return sameSv("(" + kw + " (SELECT 1 FROM " + corr + "))", reflect.TypeOf<bool>())
+    }
+    if v.kind != 0 {
+        return untranslatable(describe(v) + " cannot be compared with nil")
+    }
+    return around("(", v, " IS" + not + " NULL)", reflect.TypeOf<bool>())
+}
+
+func convert(cx *tcx, x *expr.Node, t *reflect.TypeInfo) sv! {
+    if t.Kind == reflect.Kind.Any || t.Kind == reflect.Kind.Interface {
+        return tr(cx, x)?
+    }
+    var v = trValue(cx, x)?
+    var b = baseOf(v.t)
+    if b != nil && !(isIntKind(b.Kind) || b.Kind == reflect.Kind.Float || b.Kind == reflect.Kind.Float32) {
+        return untranslatable("cannot convert " + describe(v) + " to " + t.Name)
+    }
+    if t.Kind == reflect.Kind.Float || t.Kind == reflect.Kind.Float32 {
+        return scalarSv("CAST(" + v.pg + " AS double precision)", "CAST(" + v.lite + " AS REAL)", t)
+    }
+    if t.Kind == reflect.Kind.Int32 {
+        return scalarSv("CAST(" + v.pg + " AS integer)", "CAST(" + v.lite + " AS INTEGER)", t)
+    }
+    if isIntKind(t.Kind) {
+        return scalarSv("CAST(" + v.pg + " AS bigint)", "CAST(" + v.lite + " AS INTEGER)", t)
+    }
+    return untranslatable("conversion to " + t.Name + " is not supported")
+}
+
+// Calls: string functions, collection aggregates, group aggregates, `len`,
+// `slices.Contains`, `math.Abs`.
+func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
+    if fname == "len" {
+        var v = tr(cx, args[0])?
+        if v.kind == 2 {
+            return collOp(cx, v, "Count", nil)?
+        }
+        if v.kind == 0 && isStrTy(v.t) {
+            return scalarSv("char_length(" + v.pg + ")", "length(" + v.lite + ")", reflect.TypeOf<int>())
+        }
+        return untranslatable("len of " + describe(v) + " is not supported")
+    }
+    if fname == "strings.HasPrefix" || fname == "strings.HasSuffix" || fname == "strings.Contains" {
+        var x = trValue(cx, args[0])?
+        var a = trValue(cx, args[1])?
+        return stringFn(fname[8..len(fname)], x, a)?
+    }
+    if fname == "strings.ToUpper" || fname == "strings.ToLower" || fname == "strings.Trim" {
+        var x = trValue(cx, args[0])?
+        var f = "trim("
+        if fname == "strings.ToUpper" {
+            f = "upper("
+        } else if fname == "strings.ToLower" {
+            f = "lower("
+        }
+        return around(f, x, ")", x.t)
+    }
+    if fname == "slices.Contains" {
+        var list = tr(cx, args[0])?
+        if !list.isList {
+            return untranslatable("the slice of slices.Contains must not depend on the row (it is passed as a parameter list)")
+        }
+        var x = trValue(cx, args[1])?
+        return around2("(", x, " IN (", list, "))", reflect.TypeOf<bool>())
+    }
+    if fname == "math.Abs" {
+        var x = trValue(cx, args[0])?
+        return around("abs(", x, ")", x.t)
+    }
+    if strings.HasPrefix(fname, "data.Group.") {
+        var g = tr(cx, args[0])?
+        if g.kind != 4 {
+            return untranslatable(fname + " needs a group")
+        }
+        var lam *expr.Node = nil
+        if len(args) > 1 {
+            lam = args[1]
+        }
+        return groupOp(cx, g, fname[11..len(fname)], lam)?
+    }
+    if fname == "data.Any" ||
+        fname == "data.All" ||
+        fname == "data.Count" ||
+        fname == "data.Sum" ||
+        fname == "data.Min" ||
+        fname == "data.Max" ||
+        fname == "data.Average" {
+        var c = tr(cx, args[0])?
+        if c.kind != 2 {
+            return untranslatable(fname + " needs a collection navigation of the row (u.Orders), found " + describe(c))
+        }
+        var lam *expr.Node = nil
+        if len(args) > 1 {
+            lam = args[1]
+        }
+        return collOp(cx, c, fname[5..len(fname)], lam)?
+    }
+    return untranslatable("function " + fname + " cannot be translated")
+}
+
+// String functions for both dialects.
+func stringFn(m string, x sv, a sv) sv! {
+    if m == "Contains" {
+        return scalarSv("(strpos(" + x.pg + ", " + a.pg + ") > 0)", "(instr(" + x.lite + ", " + a.lite + ") > 0)", reflect.TypeOf<bool>())
+    }
+    if m == "HasPrefix" {
+        return scalarSv("starts_with(" + x.pg + ", " + a.pg + ")", "(substr(" + x.lite + ", 1, length(" + a.lite + ")) = " + a.lite + ")", reflect.TypeOf<bool>())
+    }
+    return scalarSv(
+        "(right(" + x.pg + ", length(" + a.pg + ")) = " + a.pg + ")",
+        "(length(" + a.lite + ") = 0 OR substr(" + x.lite + ", -length(" + a.lite + ")) = " + a.lite + ")",
+        reflect.TypeOf<bool>(),
+    )
+}
+
+// Aggregate SQL for both dialects: SUM/AVG need casts on PostgreSQL
+// (numeric results).
+func aggregate(f string, x sv, coalesce bool) sv {
+    if f == "Sum" {
+        var s = sv{pg: "SUM(" + x.pg + ")", lite: "SUM(" + x.lite + ")", t: baseOf(x.t)}
+        if isIntTy(x.t) {
+            s.pg = "CAST(SUM(" + x.pg + ") AS bigint)"
+        }
+        if coalesce {
+            s.pg = "COALESCE(" + s.pg + ", 0)"
+            s.lite = "COALESCE(" + s.lite + ", 0)"
+        }
+        return s
+    }
+    if f == "Average" {
+        return scalarSv("CAST(AVG(" + x.pg + ") AS double precision)", "AVG(" + x.lite + ")", reflect.TypeOf<float>())
+    }
+    if f == "Min" {
+        return around("MIN(", x, ")", x.t)
+    }
+    return around("MAX(", x, ")", x.t)
+}
+
+func isNumTy(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    return b != nil && (isIntKind(b.Kind) || b.Kind == reflect.Kind.Float || b.Kind == reflect.Kind.Float32 || b.FullName == "math.big.Decimal")
+}
+
+// The body of lambda node lam with its parameter bound to em at alias.
+func lambdaBody(cx *tcx, lam *expr.Node, em *entModel, alias string) *expr.Node {
+    switch *lam {
+    case expr.Node.Lambda(first, _, body, _):
+        cx.bindEntity(first, em, alias)
+        return body
+    }
+    return lam
+}
+
+// `data.Any(u.Orders, pred)`, `data.All`, `data.Count`, `len(u.Orders)`,
+// `data.Sum(u.Orders, sel)`, `Min`, `Max`, `Average`: correlated subqueries.
+func collOp(cx *tcx, v sv, m string, lam *expr.Node) sv! {
+    var n = v.nav
+    var target = cx.cm.ent(n.target)
+    var alias = cx.newAlias()
+    var corr = correlate(n, v.em, v.alias, target, alias)?
+    if m == "Any" || m == "Count" {
+        var w = ""
+        var wl = ""
+        if lam != nil {
+            var p = trPred(cx, lambdaBody(cx, lam, target, alias))?
+            w = " AND (" + p.pg + ")"
+            wl = " AND (" + p.lite + ")"
+        }
+        if m == "Any" {
+            return scalarSv("EXISTS (SELECT 1 FROM " + corr + w + ")", "EXISTS (SELECT 1 FROM " + corr + wl + ")", reflect.TypeOf<bool>())
+        }
+        return scalarSv("(SELECT COUNT(*) FROM " + corr + w + ")", "(SELECT COUNT(*) FROM " + corr + wl + ")", reflect.TypeOf<int>())
+    }
+    if lam == nil {
+        return untranslatable("data." + m + " needs a lambda")
+    }
+    var body = lambdaBody(cx, lam, target, alias)
+    if m == "All" {
+        var p = trPred(cx, body)?
+        return around("NOT EXISTS (SELECT 1 FROM " + corr + " AND NOT (", p, "))", reflect.TypeOf<bool>())
+    }
+    var x = trValue(cx, body)?
+    if m != "Min" && m != "Max" && !isNumTy(x.t) {
+        return untranslatable("data." + m + " needs a number, found " + describe(x))
+    }
+    var agg = aggregate(m, x, m == "Sum")
+    return around("(SELECT ", agg, " FROM " + corr + ")", agg.t)
+}
+
+// `g.Count()`, `g.Sum(sel)`, ... of a group (GroupBy).
+func groupOp(cx *tcx, g sv, m string, lam *expr.Node) sv! {
+    if m == "Count" {
+        if lam == nil {
+            return sameSv("COUNT(*)", reflect.TypeOf<int>())
+        }
+        var p = trPred(cx, lambdaBody(cx, lam, g.em, g.alias))?
+        return around("SUM(CASE WHEN ", p, " THEN 1 ELSE 0 END)", reflect.TypeOf<int>())
+    }
+    if lam == nil {
+        return untranslatable("g." + m + " takes one lambda: g." + m + "((o) => o.Total)")
+    }
+    var x = trValue(cx, lambdaBody(cx, lam, g.em, g.alias))?
+    if m != "Min" && m != "Max" && !isNumTy(x.t) {
+        return untranslatable(m + " needs a number, found " + describe(x))
+    }
+    return aggregate(m, x, false)
+}
+
+// The values of a key lambda body: one value, a tuple of values, or a
+// composite group key.
+func keyValues(cx *tcx, n *expr.Node) []sv! {
+    var x = n
+    switch *n {
+    case expr.Node.Convert(inner, t):
+        if t.Kind == reflect.Kind.Any || t.Kind == reflect.Kind.Interface {
+            x = inner
+        }
+    }
+    var out []sv = []
+    switch *x {
+    case expr.Node.Tuple(elems, _):
+        for e in elems {
+            var v = trValue(cx, e)?
+            out = append(out, v)
+        }
+        return out
+    }
+    var v = tr(cx, x)?
+    if v.kind == 5 {
+        for k in v.keys {
+            out = append(out, k)
+        }
+        return out
+    }
+    var s = scalarOnly(v)?
+    out = append(out, s)
+    return out
+}
+
+// `key ASC, key2 ASC` of an ordering lambda body.
+func orderKeys(cx *tcx, n *expr.Node, desc bool) sv! {
+    var keys = keyValues(cx, n)?
+    var dir = " ASC"
+    if desc {
+        dir = " DESC"
+    }
+    var r = sv{pg: "", lite: ""}
+    for i, k in keys {
+        if i > 0 {
+            r.pg = r.pg + ", "
+            r.lite = r.lite + ", "
+        }
+        r.pg = r.pg + k.pg + dir
+        r.lite = r.lite + k.lite + dir
+    }
+    return r
+}
+
+// ---- projections ------------------------------------------------------------------
+
+// The shape of a projection's result: how the selected columns map to R.
+@acyclic
+struct rowShape {
+    // 0 one column, 1 a tuple, 2 a struct
+    kind   int
+    leaf   int
+    elems  []*rowShape
+    // struct: the column of each field (-1: not selected)
+    fields []int
+}
+
+// The shape of projection body n; the columns are appended to leaves.
+func shapeOf(cx *tcx, n *expr.Node, leaves *[]sv, top bool) *rowShape! {
+    switch *n {
+    case expr.Node.Tuple(elems, _):
+        var sh = new rowShape{kind: 1, leaf: -1, elems: [], fields: []}
+        for e in elems {
+            var s = shapeOf(cx, e, leaves, false)?
+            sh.elems = append(sh.elems, s)
+        }
+        return sh
+    case expr.Node.Struct(t, fields):
+        if !top {
+            return untranslatable("a struct literal is only allowed as the result of Select")
+        }
+        var sh = new rowShape{kind: 2, leaf: -1, elems: [], fields: []}
+        for len(sh.fields) < len(t.Fields) {
+            sh.fields = append(sh.fields, -1)
+        }
+        for fi in fields {
+            var v = trValue(cx, fi.Value)?
+            sh.fields[fi.Index] = len(*leaves)
+            *leaves = append(*leaves, v)
+        }
+        return sh
+    }
+    var v = tr(cx, n)?
+    if v.kind == 5 {
+        var sh = new rowShape{kind: 1, leaf: -1, elems: [], fields: []}
+        for k in v.keys {
+            sh.elems = append(sh.elems, new rowShape{kind: 0, leaf: len(*leaves), elems: [], fields: []})
+            *leaves = append(*leaves, k)
+        }
+        return sh
+    }
+    var s = scalarOnly(v)?
+    var sh = new rowShape{kind: 0, leaf: len(*leaves), elems: [], fields: []}
+    *leaves = append(*leaves, s)
+    return sh
+}
+
+// Translates projection body n into the plan (the select list and shape).
+func projection(cx *tcx, n *expr.Node, p *plan) void! {
+    var leaves []sv = []
+    p.shape = shapeOf(cx, n, &leaves, true)?
+    for i, l in leaves {
+        if i > 0 {
+            p.pg = p.pg + ", "
+            p.lite = p.lite + ", "
+        }
+        p.pg = p.pg + l.pg
+        p.lite = p.lite + l.lite
+    }
+}
+
+// Stores the columns of a row into r by shape sh (the static type R
+// decides how: tuple elements, struct fields, or one value).
+func mapRow<R>(sh *rowShape, vals []any, r *R) void! {
+    if reflect.TypeOf<R>().Kind == reflect.Kind.Tuple {
+        for f in reflect.Fields<R>() {
+            var x f.Type
+            mapRow<f.Type>(sh.elems[f.Index], vals, &x)?
+            f.Set(r, x)
+        }
+    } else if reflect.TypeOf<R>().Kind == reflect.Kind.Struct &&
+        reflect.TypeOf<R>() != reflect.TypeOf<time.Time>() &&
+        reflect.TypeOf<R>() != reflect.TypeOf<math.big.Decimal>() &&
+        reflect.TypeOf<R>() != reflect.TypeOf<encoding.json.Value>() {
+        if sh.kind == 2 {
+            for f in reflect.Fields<R>() {
+                var li = sh.fields[f.Index]
+                if li >= 0 {
+                    var x f.Type
+                    database.sql.convertInto(&x, vals[li], f.Name)?
+                    f.Set(r, x)
+                }
+            }
+        } else {
+            database.sql.convertInto(r, vals[sh.leaf], strconv.Itoa(sh.leaf))?
+        }
+    } else {
+        database.sql.convertInto(r, vals[sh.leaf], strconv.Itoa(sh.leaf))?
+    }
+}
+
+// ---- plans --------------------------------------------------------------------------
+
+// A translated lambda: SQL for both dialects and where its arguments
+// come from.
+@acyclic
+struct plan {
+    pg     string
+    lite   string
+    // per argument marker: the walk ordinal of its value node, whether
+    // it is a list, and how it becomes a driver value
+    ords   []int
+    lists  []bool
+    convs  []int
+    // cached: the slot of each marker's value
+    // a lambda site's tree (cached): the slot of every value node
+    cached bool
+    slots  []int
+    // a tree built by a combinator (not cached): its values
+    vals   []any
+    err    string
+    // projections
+    shape  *rowShape
+    // GROUP BY: one fragment per key
+    pgs    []string
+    lites  []string
+}
+
+// The plans of one lambda site, by role.
+@acyclic
+struct sitePlans {
+    byRole []*plan
+}
+
+// Roles of a lambda in a query (the SQL differs).
+//   0 predicate over t0, 1 ascending keys, 2 descending keys, 3 projection,
+//   4 Sum, 5 Min, 6 Max, 7 Average, 8 group keys
+func lookupPlan(cm *ctxModel, site int, role int) *plan {
+    if site < 0 {
+        return nil
+    }
+    lockInt(&cm.lock)
+    var sp = cm.plans[site]
+    var p *plan = nil
+    if sp != nil {
+        p = sp.byRole[role]
+    }
+    unlockInt(&cm.lock)
+    return p
+}
+
+func storePlan(cm *ctxModel, site int, role int, p *plan) {
+    lockInt(&cm.lock)
+    var sp = cm.plans[site]
+    if sp == nil {
+        sp = new sitePlans{byRole: [nil, nil, nil, nil, nil, nil, nil, nil, nil]}
+        cm.plans[site] = sp
+    }
+    sp.byRole[role] = p
+    unlockInt(&cm.lock)
+}
+
+// Finishes plan p of tree e translated by cx (caching it when the tree
+// belongs to a lambda site).
+func finishPlan<F>(cm *ctxModel, e expr.Expr<F>, root *expr.Node, role int, cx *tcx, p *plan) *plan {
+    p.ords = cx.args
+    p.lists = cx.lists
+    p.convs = cx.convs
+    var site = e.SiteId()
+    if site >= 0 {
+        p.cached = true
+        p.slots = markerSlots(e.Slots(), cx.args)
+        storePlan(cm, site, role, p)
+    } else {
+        p.vals = expr.Values(root)
+    }
+    return p
+}
+
+func newPlan() *plan {
+    return new plan{pg: "", lite: "", ords: [], lists: [], convs: [], cached: false, slots: [], vals: [], err: "", shape: nil, pgs: [], lites: []}
+}
+
+// The slot of each argument marker (the slot of its value node).
+func markerSlots(slots []int, ords []int) []int {
+    var out []int = []
+    for o in ords {
+        out = append(out, slots[o])
+    }
+    return out
+}
+
+// The arguments of plan p for this evaluation of its tree.
+func planArgs<F>(p *plan, e *expr.Expr<F>) []any {
+    var out []any = []
+    for i, c in p.convs {
+        var v any = nil
+        if p.cached {
+            v = e.Value(p.slots[i])
+        } else {
+            v = p.vals[p.ords[i]]
+        }
+        if p.lists[i] {
+            out = append(out, listValue(v))
+        } else if c == 0 {
+            out = append(out, v)
+        } else {
+            out = append(out, argValue(v))
+        }
+    }
+    return out
+}
+
+// How a value of static type t becomes a driver value: 0 as it is (int,
+// float, bool, string, time.Time, []byte), 1 converted (argValue).
+func convKind(t *reflect.TypeInfo) int {
+    if t == nil {
+        return 1
+    }
+    var k = t.Kind
+    if k == reflect.Kind.Int || k == reflect.Kind.Float || k == reflect.Kind.Bool || k == reflect.Kind.String || t.FullName == "time.Time" {
+        return 0
+    }
+    if k == reflect.Kind.Slice && t.Elem.Kind == reflect.Kind.Uint8 {
+        return 0
+    }
+    return 1
+}
+
+// The driver value of a captured or constant value: pointers are
+// dereferenced (nil is NULL), enums are stored by name.
+func argValue(v any) any {
+    switch v {
+    case nil:
+        return nil
+    case *int p:
+        if p == nil {
+            return nil
+        }
+        return *p
+    case *string p:
+        if p == nil {
+            return nil
+        }
+        return *p
+    case *float p:
+        if p == nil {
+            return nil
+        }
+        return *p
+    case *bool p:
+        if p == nil {
+            return nil
+        }
+        return *p
+    case *time.Time p:
+        if p == nil {
+            return nil
+        }
+        return *p
+    case *int32 p:
+        if p == nil {
+            return nil
+        }
+        return int(*p)
+    }
+    var t = typeof(v)
+    if t != nil && t.Kind == reflect.Kind.Enum {
+        return fmt.Format("{0}", v)
+    }
+    return database.sql.driverValue(v)
+}
+
+// A list argument: the driver values of a captured slice.
+func listValue(v any) any {
+    var d = database.sql.driverValue(v)
+    switch d {
+    case []any xs:
+        return xs
+    }
+    var out []any = []
+    return out
+}
+
+// The plan of predicate tree e over entity em (role 0).
+func predPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>) *plan {
+    var root = e.Root()
+    var cx = newTcx(cm, root, 0)
+    cx.bindEntity(0, em, "t0")
+    var p = newPlan()
+    try predInto(cx, root, p) catch err {
+        p.err = err.Message()
+    }
+    return finishPlan(cm, e, root, 0, cx, p)
+}
+
+func predInto(cx *tcx, root *expr.Node, p *plan) void! {
+    var v = trPred(cx, root)?
+    p.pg = v.pg
+    p.lite = v.lite
+}
+
+// The plan of an ordering tree over em (role 1 or 2).
+func orderPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>, desc bool) *plan {
+    var root = e.Root()
+    var cx = newTcx(cm, root, 0)
+    cx.bindEntity(0, em, "t0")
+    var p = newPlan()
+    try orderInto(cx, root, desc, p) catch err {
+        p.err = err.Message()
+    }
+    var role = 1
+    if desc {
+        role = 2
+    }
+    return finishPlan(cm, e, root, role, cx, p)
+}
+
+func orderInto(cx *tcx, root *expr.Node, desc bool, p *plan) void! {
+    var v = orderKeys(cx, root, desc)?
+    p.pg = v.pg
+    p.lite = v.lite
+}
+
+// The plan of a projection tree over em (role 3).
+func selectPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>) *plan {
+    var root = e.Root()
+    var cx = newTcx(cm, root, 0)
+    cx.bindEntity(0, em, "t0")
+    var p = newPlan()
+    try projection(cx, root, p) catch err {
+        p.err = err.Message()
+    }
+    return finishPlan(cm, e, root, 3, cx, p)
+}
+
+// The plan of an aggregate's value tree over em (roles 4-7).
+func aggPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>, f string, role int) *plan {
+    var root = e.Root()
+    var cx = newTcx(cm, root, 0)
+    cx.bindEntity(0, em, "t0")
+    var p = newPlan()
+    try aggInto(cx, root, f, p) catch err {
+        p.err = err.Message()
+    }
+    return finishPlan(cm, e, root, role, cx, p)
+}
+
+func aggInto(cx *tcx, root *expr.Node, f string, p *plan) void! {
+    var x = trValue(cx, root)?
+    if (f == "Sum" || f == "Average") && !isNumTy(x.t) {
+        return untranslatable(f + " needs a number, found " + describe(x))
+    }
+    var a = aggregate(f, x, false)
+    p.pg = a.pg
+    p.lite = a.lite
+}
+
+// The plan of a GroupBy key tree over em (role 8).
+func groupKeyPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>) *plan {
+    var root = e.Root()
+    var cx = newTcx(cm, root, 0)
+    cx.bindEntity(0, em, "t0")
+    var p = newPlan()
+    try groupKeysInto(cx, root, p) catch err {
+        p.err = err.Message()
+    }
+    return finishPlan(cm, e, root, 8, cx, p)
+}
+
+func groupKeysInto(cx *tcx, root *expr.Node, p *plan) void! {
+    var keys = keyValues(cx, root)?
+    for k in keys {
+        p.pgs = append(p.pgs, k.pg)
+        p.lites = append(p.lites, k.lite)
+    }
+}
+
+// The plan of a tree over a group (Where as HAVING, OrderBy, Select of a
+// GroupBy); not cached (it depends on the keys). what: 0 predicate, 1/2
+// ascending/descending keys, 3 projection.
+func groupPlan<F>(cm *ctxModel, em *entModel, keys []sv, e expr.Expr<F>, what int) *plan {
+    var root = e.Root()
+    var cx = newTcx(cm, root, 0)
+    cx.bindGroup(0, em, "t0", keys)
+    var p = newPlan()
+    try groupInto(cx, root, what, p) catch err {
+        p.err = err.Message()
+    }
+    p.ords = cx.args
+    p.lists = cx.lists
+    p.convs = cx.convs
+    if e.SiteId() >= 0 {
+        p.cached = true
+        p.slots = markerSlots(e.Slots(), cx.args)
+    } else {
+        p.vals = expr.Values(root)
+    }
+    return p
+}
+
+func groupInto(cx *tcx, root *expr.Node, what int, p *plan) void! {
+    if what == 3 {
+        projection(cx, root, p)?
+        return
+    }
+    if what == 0 {
+        predInto(cx, root, p)?
+        return
+    }
+    orderInto(cx, root, what == 2, p)?
+}
+
+// The fields a selector lambda reads: (u) => u.Email or (u) => (u.A, u.B).
+func selectedFields(root *expr.Node) []string {
+    var n = root
+    switch *root {
+    case expr.Node.Convert(x, _):
+        n = x
+    }
+    var out []string = []
+    switch *n {
+    case expr.Node.Tuple(elems, _):
+        for e in elems {
+            var f = paramField(e)
+            if f == "" {
+                var none []string = []
+                return none
+            }
+            out = append(out, f)
+        }
+        return out
+    }
+    var f = paramField(n)
+    if f != "" {
+        out = append(out, f)
+    }
+    return out
+}
+
+// `p.F` (through a pointer) of the lambda's parameter 0: "F".
+func paramField(n *expr.Node) string {
+    switch *n {
+    case expr.Node.Field(b, name, _, _, _):
+        switch *b {
+        case expr.Node.Param(i, _):
+            if i == 0 {
+                return name
+            }
+        }
+    case expr.Node.Convert(x, _):
+        return paramField(x)
+    }
+    return ""
+}

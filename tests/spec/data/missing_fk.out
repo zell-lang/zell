@@ -1,0 +1,1 @@
+data: navigation Blog.Posts: Post has no foreign key field BlogId (add it, or name it with @hasMany(foreignKey: "..."))

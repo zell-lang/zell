@@ -1,0 +1,1712 @@
+namespace data
+
+// The model of a context (docs/FRAMEWORK.md section 3), built by library
+// code from static and run-time reflection; there is no compiler support.
+//
+// The model of a context type C is built once per program, the first time
+// a context of type C is opened: every entity reachable from the Set<T>
+// fields of C (through navigations) is described from its reflection
+// table (reflect.TypeOf<T>(): fields, field types, attributes), the
+// conventions (Id keys, snake_case plural tables and columns,
+// <Entity>Id foreign keys) and the Configure method of C, which runs on a
+// ModelBuilder. The typed accessors of an entity (row scanning, column
+// values, navigation loaders) are unrolled over reflect.Fields<T>() at
+// compile time, where the field types are also checked: a field that
+// cannot be mapped is a compile error (reflect.Error).
+
+// A navigation of an entity. kind: 0 many ([]E, foreign key on E), 1 one
+// (*E, foreign key on E), 2 belongs (*P, foreign key on this entity),
+// 3 many-to-many ([]E through a join table).
+@acyclic
+struct navMeta {
+    field     string
+    index     int
+    kind      int
+    target    *reflect.TypeInfo
+    ptr       bool
+    many      bool
+    fk        string
+    through   string
+    ownerCol  string
+    targetCol string
+}
+
+// An entity of a context model.
+@acyclic
+struct entModel {
+    t        *reflect.TypeInfo
+    meta     *EntityMeta
+    navs     []*navMeta
+    // per field of the struct: its column (-1: none) and navigation
+    fieldCol []int
+    fieldNav []*navMeta
+    // the value type of every column (int for *int)
+    bases    []*reflect.TypeInfo
+
+    // The column of field f (-1: not mapped).
+    func colOf(f string) int {
+        for i, c in this.meta.Columns {
+            if c.Field == f {
+                return i
+            }
+        }
+        return -1
+    }
+
+    func nav(f string) *navMeta {
+        for n in this.navs {
+            if n.field == f {
+                return n
+            }
+        }
+        return nil
+    }
+}
+
+// ---- model builder (Configure) ------------------------------------------------
+
+@acyclic
+struct propCfg {
+    field    string
+    column   string
+    // -1: not set
+    maxLen   int
+    required bool
+    hasDef   bool
+    def      string
+    token    bool
+    sqlType  string
+    // 0 not set, 1 generated on add, 2 never generated
+    auto     int
+}
+
+@acyclic
+struct idxCfg {
+    fields []string
+    unique bool
+    name   string
+}
+
+@acyclic
+struct navCfg {
+    field   string
+    fk      string
+    through string
+    kind    int
+}
+
+// The fluent configuration of one entity.
+@acyclic
+struct entCfg {
+    t       *reflect.TypeInfo
+    table   string
+    key     string
+    ignore  []string
+    props   []*propCfg
+    indexes []*idxCfg
+    navs    []*navCfg
+
+    func prop(field string) *propCfg {
+        for p in this.props {
+            if p.field == field {
+                return p
+            }
+        }
+        return nil
+    }
+
+    func propFor(field string) *propCfg {
+        var p = this.prop(field)
+        if p == nil {
+            p = new propCfg{field: field, column: "", maxLen: -1, required: false, hasDef: false, def: "", token: false, sqlType: "", auto: 0}
+            this.props = append(this.props, p)
+        }
+        return p
+    }
+
+    func ignored(field string) bool {
+        for f in this.ignore {
+            if f == field {
+                return true
+            }
+        }
+        return false
+    }
+
+    func nav(field string) *navCfg {
+        for n in this.navs {
+            if n.field == field {
+                return n
+            }
+        }
+        return nil
+    }
+}
+
+// The argument of a context's Configure method, which runs once, when the
+// model of the context type is built (the first data.Open of it):
+// m.Entity<User>().HasIndex((u) => u.Email).IsUnique().
+@acyclic
+struct ModelBuilder {
+    cfgs []*entCfg
+    err  string
+
+    func Entity<T>() EntityBuilder<T> {
+        return EntityBuilder<T>{c: this.cfgOf(reflect.TypeOf<T>()), mb: this}
+    }
+
+    func cfgOf(t *reflect.TypeInfo) *entCfg {
+        for c in this.cfgs {
+            if c.t == t {
+                return c
+            }
+        }
+        var c = new entCfg{t: t, table: "", key: "", ignore: [], props: [], indexes: [], navs: []}
+        this.cfgs = append(this.cfgs, c)
+        return c
+    }
+
+    func fail(msg string) {
+        if this.err == "" {
+            this.err = msg
+        }
+    }
+}
+
+// The configuration of entity T in Configure.
+struct EntityBuilder<T> {
+    c  *entCfg
+    mb *ModelBuilder
+
+    // The table name.
+    func ToTable(name string) EntityBuilder<T> {
+        this.c.table = name
+        return *this
+    }
+
+    // The key: HasKey((u) => u.Code).
+    func HasKey(key expr<func(*T) any>) EntityBuilder<T> {
+        var fs = this.fields("HasKey", key.Root(), false)
+        if len(fs) == 1 {
+            this.c.key = fs[0]
+        }
+        return *this
+    }
+
+    // A field that is not mapped: Ignore((u) => u.Cache).
+    func Ignore(field expr<func(*T) any>) EntityBuilder<T> {
+        for f in this.fields("Ignore", field.Root(), false) {
+            this.c.ignore = append(this.c.ignore, f)
+        }
+        return *this
+    }
+
+    // The column settings of a field: Property((u) => u.Name).HasMaxLength(80).
+    func Property(field expr<func(*T) any>) PropertyBuilder {
+        var fs = this.fields("Property", field.Root(), false)
+        var name = ""
+        if len(fs) == 1 {
+            name = fs[0]
+        }
+        return PropertyBuilder{p: this.c.propFor(name)}
+    }
+
+    // An index: HasIndex((u) => u.Email) or HasIndex((u) => (u.A, u.B)).
+    func HasIndex(fields expr<func(*T) any>) IndexBuilder {
+        var ix = new idxCfg{fields: this.fields("HasIndex", fields.Root(), true), unique: false, name: ""}
+        this.c.indexes = append(this.c.indexes, ix)
+        return IndexBuilder{ix: ix}
+    }
+
+    // Navigations: HasMany((u) => u.Orders).WithForeignKey("OwnerId").
+    func HasMany(nav expr<func(*T) any>) NavBuilder {
+        return this.navOf("HasMany", nav.Root(), 0)
+    }
+
+    func HasOne(nav expr<func(*T) any>) NavBuilder {
+        return this.navOf("HasOne", nav.Root(), 1)
+    }
+
+    func BelongsTo(nav expr<func(*T) any>) NavBuilder {
+        return this.navOf("BelongsTo", nav.Root(), 2)
+    }
+
+    func HasManyToMany(nav expr<func(*T) any>) NavBuilder {
+        return this.navOf("HasManyToMany", nav.Root(), 3)
+    }
+
+    func navOf(what string, root *expr.Node, kind int) NavBuilder {
+        var fs = this.fields(what, root, false)
+        var name = ""
+        if len(fs) == 1 {
+            name = fs[0]
+        }
+        var n = this.c.nav(name)
+        if n == nil {
+            n = new navCfg{field: name, fk: "", through: "", kind: kind}
+            this.c.navs = append(this.c.navs, n)
+        }
+        n.kind = kind
+        return NavBuilder{n: n}
+    }
+
+    func fields(what string, root *expr.Node, multi bool) []string {
+        var fs = selectedFields(root)
+        if len(fs) == 0 || (!multi && len(fs) != 1) {
+            var want = "(u) => u.Email"
+            if multi {
+                want = "(u) => u.Email or (u) => (u.A, u.B)"
+            }
+            this.mb.fail("data: " + what + " needs a lambda selecting fields of " + reflect.TypeOf<T>().Name + ": " + what + "(" + want + ")")
+        }
+        return fs
+    }
+}
+
+struct PropertyBuilder {
+    p *propCfg
+
+    func HasColumnName(name string) PropertyBuilder {
+        this.p.column = name
+        return *this
+    }
+
+    func HasMaxLength(n int) PropertyBuilder {
+        this.p.maxLen = n
+        return *this
+    }
+
+    func IsRequired() PropertyBuilder {
+        this.p.required = true
+        return *this
+    }
+
+    func HasDefaultSql(sql string) PropertyBuilder {
+        this.p.hasDef = true
+        this.p.def = sql
+        return *this
+    }
+
+    func IsConcurrencyToken() PropertyBuilder {
+        this.p.token = true
+        return *this
+    }
+
+    func HasColumnType(t string) PropertyBuilder {
+        this.p.sqlType = t
+        return *this
+    }
+
+    func ValueGeneratedOnAdd() PropertyBuilder {
+        this.p.auto = 1
+        return *this
+    }
+
+    func ValueGeneratedNever() PropertyBuilder {
+        this.p.auto = 2
+        return *this
+    }
+}
+
+struct IndexBuilder {
+    ix *idxCfg
+
+    func IsUnique() IndexBuilder {
+        this.ix.unique = true
+        return *this
+    }
+
+    func HasName(name string) IndexBuilder {
+        this.ix.name = name
+        return *this
+    }
+
+    func HasDatabaseName(name string) IndexBuilder {
+        this.ix.name = name
+        return *this
+    }
+}
+
+struct NavBuilder {
+    n *navCfg
+
+    func WithForeignKey(field string) NavBuilder {
+        this.n.fk = field
+        return *this
+    }
+
+    func UsingTable(name string) NavBuilder {
+        this.n.through = name
+        return *this
+    }
+}
+
+// A context type with a Configure method.
+interface configurer {
+    func Configure(m *ModelBuilder)
+}
+
+// ---- context models -------------------------------------------------------------
+
+// The model of a context type: its entities, join tables and the cached
+// translations of its queries.
+@acyclic
+struct ctxModel {
+    name      string
+    namespace string
+    sets      []string
+    roots     []*reflect.TypeInfo
+    cfgs      []*entCfg
+    ents      []*entModel
+    joins     []*EntityMeta
+    // the tables, referenced tables first (DDL order)
+    tables    []*EntityMeta
+    // *Entity<T> by the entity's full name
+    typed     map[string]any
+    plans     map[int]*sitePlans
+    lock      sync.AtomicInt
+    err       string
+
+    func ent(t *reflect.TypeInfo) *entModel {
+        for e in this.ents {
+            if e.t == t {
+                return e
+            }
+        }
+        return nil
+    }
+
+    func cfg(t *reflect.TypeInfo) *entCfg {
+        for c in this.cfgs {
+            if c.t == t {
+                return c
+            }
+        }
+        return nil
+    }
+}
+
+func lockInt(l *sync.AtomicInt) {
+    for !l.CompareAndSwap(0, 1) {}
+}
+
+func unlockInt(l *sync.AtomicInt) {
+    l.Store(0)
+}
+
+// The models of the context types opened so far, by full name (in the
+// runtime's slot map, guarded by its lock).
+@acyclic
+struct modelsHolder {
+    m map[string]*ctxModel
+}
+
+func modelRegistry() map[string]*ctxModel {
+    var slots = diag.rtSlots()
+    if slots == nil {
+        slots = map[string]any{}
+        diag.rtSetSlots(slots)
+    }
+    switch slots["data.models"] {
+        case modelsHolder h:
+            return h.m
+    }
+    var m = map[string]*ctxModel{}
+    slots["data.models"] = modelsHolder{m: m}
+    return m
+}
+
+
+
+// The model of context type C (built once).
+func contextModel<C>() *ctxModel! {
+    var key = reflect.TypeOf<C>().FullName
+    diag.rtLock()
+    var cm = modelRegistry()[key]
+    diag.rtUnlock()
+    if cm == nil {
+        cm = buildContextModel<C>()
+        diag.rtLock()
+        var models = modelRegistry()
+        var other = models[key]
+        if other != nil {
+            cm = other
+        } else {
+            models[key] = cm
+        }
+        diag.rtUnlock()
+    }
+    if cm.err != "" {
+        return error(cm.err)
+    }
+    return cm
+}
+
+func buildContextModel<C>() *ctxModel {
+    var t = reflect.TypeOf<C>()
+    var cm = new ctxModel{
+        name: t.Name,
+        namespace: t.Package,
+        sets: [],
+        roots: [],
+        cfgs: [],
+        ents: [],
+        joins: [],
+        tables: [],
+        typed: map[string]any{},
+        plans: map[int]*sitePlans{},
+        err: "",
+    }
+    // Configure, on a zero context
+    var c C
+    var mb = new ModelBuilder{cfgs: [], err: ""}
+    switch c {
+    case configurer x:
+        x.Configure(mb)
+    }
+    cm.cfgs = mb.cfgs
+    if mb.err != "" {
+        cm.err = mb.err
+        return cm
+    }
+    for f in reflect.Fields<C>() {
+        var probe f.Type
+        switch probe {
+        case setLike s:
+            cm.sets = append(cm.sets, f.Name)
+            cm.roots = append(cm.roots, s.entityType_())
+        }
+    }
+    try buildEntities(cm) catch err {
+        cm.err = err.Message()
+    }
+    return cm
+}
+
+// The entities reachable from the sets (in set order, then navigation
+// targets), their relations and the table order.
+func buildEntities(cm *ctxModel) void! {
+    var todo []*reflect.TypeInfo = []
+    for r in cm.roots {
+        todo = append(todo, r)
+    }
+    var i = 0
+    for i < len(todo) {
+        var t = todo[i]
+        i += 1
+        if cm.ent(t) != nil {
+            continue
+        }
+        var em = buildEntity(cm, t)?
+        cm.ents = append(cm.ents, em)
+        for n in em.navs {
+            todo = append(todo, n.target)
+        }
+    }
+    relations(cm)?
+    var all []*EntityMeta = []
+    for e in cm.ents {
+        all = append(all, e.meta)
+    }
+    for j in cm.joins {
+        all = append(all, j)
+    }
+    cm.tables = orderTables(all)
+}
+
+// The column type of a field type: kind (int64, int32, int16, float,
+// float32, bool, string, bytes, time, decimal, json, enum), whether it is
+// nullable, and the value type; kind "" if t is not a column type.
+@acyclic
+struct colType {
+    kind     string
+    nullable bool
+    base     *reflect.TypeInfo
+}
+
+func scalarKind(t *reflect.TypeInfo) string {
+    var k = t.Kind
+    if k == reflect.Kind.Int || k == reflect.Kind.Uint || k == reflect.Kind.Uint32 {
+        return "int64"
+    }
+    if k == reflect.Kind.Int32 || k == reflect.Kind.Uint16 {
+        return "int32"
+    }
+    if k == reflect.Kind.Int16 || k == reflect.Kind.Int8 || k == reflect.Kind.Uint8 {
+        return "int16"
+    }
+    if k == reflect.Kind.Float {
+        return "float"
+    }
+    if k == reflect.Kind.Float32 {
+        return "float32"
+    }
+    if k == reflect.Kind.Bool {
+        return "bool"
+    }
+    if k == reflect.Kind.String {
+        return "string"
+    }
+    if k == reflect.Kind.Slice && t.Elem.Kind == reflect.Kind.Uint8 {
+        return "bytes"
+    }
+    if k == reflect.Kind.Enum {
+        for v in t.Variants {
+            if len(v.Fields) > 0 {
+                return ""
+            }
+        }
+        return "enum"
+    }
+    if k == reflect.Kind.Struct {
+        if t.FullName == "time.Time" {
+            return "time"
+        }
+        if t.FullName == "math.big.Decimal" {
+            return "decimal"
+        }
+        if t.FullName == "encoding.json.Value" {
+            return "json"
+        }
+    }
+    return ""
+}
+
+func columnType(t *reflect.TypeInfo) colType {
+    var k = scalarKind(t)
+    if k != "" {
+        return colType{kind: k, nullable: k == "json", base: t}
+    }
+    if t.Kind == reflect.Kind.Pointer {
+        k = scalarKind(t.Elem)
+        if k != "" && k != "enum" {
+            return colType{kind: k, nullable: true, base: t.Elem}
+        }
+    }
+    if t.Kind == reflect.Kind.Struct && strings.HasPrefix(t.FullName, "database.sql.Null<") && len(t.Fields) > 0 {
+        var inner = t.Fields[0].Type
+        k = scalarKind(inner)
+        if k != "" && k != "enum" {
+            return colType{kind: k, nullable: true, base: inner}
+        }
+    }
+    return colType{kind: "", nullable: false, base: nil}
+}
+
+// A struct that can be the target of a navigation: it has a key (Id,
+// <Type>Id or @key).
+func entityLike(t *reflect.TypeInfo) bool {
+    if t.Kind != reflect.Kind.Struct || columnType(t).kind != "" {
+        return false
+    }
+    for f in t.Fields {
+        if f.Name == "Id" || f.Name == t.Name + "Id" || f.Attribute<key>() != nil {
+            return true
+        }
+    }
+    return false
+}
+
+// English plural of a snake_case name (user -> users, category ->
+// categories, box -> boxes).
+func plural(s string) string {
+    var i = strings.LastIndex(s, "_")
+    var head = ""
+    var last = s
+    if i >= 0 {
+        head = s[0..i + 1]
+        last = s[i + 1..len(s)]
+    }
+    var p = last + "s"
+    if strings.HasSuffix(last, "s") || strings.HasSuffix(last, "x") || strings.HasSuffix(last, "z") || strings.HasSuffix(last, "ch") || strings.HasSuffix(last, "sh") {
+        p = last + "es"
+    } else if strings.HasSuffix(last, "y") && !strings.HasSuffix(last, "ay") && !strings.HasSuffix(last, "ey") && !strings.HasSuffix(last, "oy") && !strings.HasSuffix(last, "uy") {
+        p = last[0..len(last) - 1] + "ies"
+    } else if last == "person" {
+        p = "people"
+    }
+    return head + p
+}
+
+// The model of entity t (without the foreign keys of relations).
+func buildEntity(cm *ctxModel, t *reflect.TypeInfo) *entModel! {
+    var name = t.Name
+    if t.Kind != reflect.Kind.Struct {
+        return error("data: " + name + " is not a struct and cannot be an entity")
+    }
+    var fl = cm.cfg(t)
+    if fl == nil {
+        fl = new entCfg{t: t, table: "", key: "", ignore: [], props: [], indexes: [], navs: []}
+    }
+    var tableName = plural(database.sql.SnakeCase(name))
+    var ta = t.Attribute<table>()
+    if ta != nil {
+        tableName = ta.name
+    }
+    if fl.table != "" {
+        tableName = fl.table
+    }
+    var cols []ColumnMeta = []
+    var bases []*reflect.TypeInfo = []
+    var fieldCol []int = []
+    var fieldNav []*navMeta = []
+    var navs []*navMeta = []
+    var ixFields [][]string = []
+    var ixUnique []bool = []
+    var ixNames []string = []
+    var keyField = fl.key
+    var never = ""
+    for f in t.Fields {
+        fieldCol = append(fieldCol, -1)
+        fieldNav = append(fieldNav, nil)
+        if f.Embedded || fl.ignored(f.Name) || f.Attribute<ignore>() != nil {
+            continue
+        }
+        var ct = columnType(f.Type)
+        if ct.kind != "" {
+            var c = ColumnMeta{
+                Name: database.sql.SnakeCase(f.Name),
+                Field: f.Name,
+                Type: ct.kind,
+                SqlType: "",
+                Nullable: ct.nullable,
+                Key: false,
+                Auto: false,
+                MaxLength: 0,
+                Default: "",
+                Token: false,
+            }
+            var ca = f.Attribute<column>()
+            if ca != nil {
+                if ca.name != "" {
+                    c.Name = ca.name
+                }
+                c.SqlType = ca.type
+            }
+            var ka = f.Attribute<key>()
+            if ka != nil {
+                if keyField != "" && keyField != f.Name {
+                    return error("data: entity " + name + " has more than one @key (composite keys are not supported)")
+                }
+                keyField = f.Name
+                if !ka.generated {
+                    never = f.Name
+                }
+            }
+            if f.Attribute<autoincrement>() != nil {
+                c.Auto = true
+            }
+            var ml = f.Attribute<maxLength>()
+            if ml != nil {
+                c.MaxLength = ml.length
+            }
+            if f.Attribute<required>() != nil {
+                c.Nullable = false
+            }
+            var da = f.Attribute<data.default>()
+            if da != nil {
+                c.Default = da.sql
+            }
+            if f.Attribute<concurrencyToken>() != nil {
+                c.Token = true
+            }
+            var ia = f.Attribute<index>()
+            if ia != nil {
+                ixFields = append(ixFields, [f.Name])
+                ixUnique = append(ixUnique, ia.unique)
+                ixNames = append(ixNames, ia.name)
+            }
+            var pc = fl.prop(f.Name)
+            if pc != nil {
+                if pc.required {
+                    c.Nullable = false
+                }
+                if pc.token {
+                    c.Token = true
+                }
+                if pc.column != "" {
+                    c.Name = pc.column
+                }
+                if pc.maxLen >= 0 {
+                    c.MaxLength = pc.maxLen
+                }
+                if pc.hasDef {
+                    c.Default = pc.def
+                }
+                if pc.sqlType != "" {
+                    c.SqlType = pc.sqlType
+                }
+                if pc.auto == 1 {
+                    c.Auto = true
+                } else if pc.auto == 2 {
+                    c.Auto = false
+                }
+            }
+            fieldCol[len(fieldCol) - 1] = len(cols)
+            cols = append(cols, c)
+            bases = append(bases, ct.base)
+            continue
+        }
+        var n = navigation(t, f, fl)?
+        fieldNav[len(fieldNav) - 1] = n
+        navs = append(navs, n)
+    }
+    for ix in fl.indexes {
+        ixFields = append(ixFields, ix.fields)
+        ixUnique = append(ixUnique, ix.unique)
+        ixNames = append(ixNames, ix.name)
+    }
+    // the key: @key, Configure's HasKey, else Id or <Type>Id
+    if keyField == "" {
+        for c in cols {
+            if c.Field == "Id" {
+                keyField = "Id"
+            }
+        }
+    }
+    if keyField == "" {
+        for c in cols {
+            if c.Field == name + "Id" {
+                keyField = c.Field
+            }
+        }
+    }
+    var key = -1
+    for i, c in cols {
+        if keyField != "" && c.Field == keyField {
+            key = i
+        }
+    }
+    if keyField != "" && key < 0 {
+        return error("data: the key " + keyField + " of entity " + name + " is not a mapped column")
+    }
+    if key >= 0 {
+        cols[key].Key = true
+        if cols[key].Nullable {
+            return error("data: the key " + name + "." + cols[key].Field + " cannot be nullable")
+        }
+        var kp = fl.prop(cols[key].Field)
+        var off = kp != nil && kp.auto == 2
+        if never == cols[key].Field {
+            cols[key].Auto = false
+        } else if strings.HasPrefix(cols[key].Type, "int") && !off {
+            cols[key].Auto = true
+        }
+    }
+    var token = -1
+    var ntok = 0
+    var nauto = 0
+    for i, c in cols {
+        if c.Token {
+            ntok += 1
+            if token < 0 {
+                token = i
+            }
+        }
+        if c.Auto {
+            nauto += 1
+            if !c.Key {
+                nauto += 1
+            }
+        }
+    }
+    if ntok > 1 {
+        return error("data: entity " + name + " has more than one concurrency token")
+    }
+    if nauto > 1 {
+        return error("data: only the key of " + name + " can be generated (@autoincrement)")
+    }
+    var idx []IndexMeta = []
+    for i, fs in ixFields {
+        var cnames []string = []
+        for f in fs {
+            var found = ""
+            for c in cols {
+                if c.Field == f {
+                    found = c.Name
+                }
+            }
+            if found == "" {
+                return error("data: index on " + name + "." + f + ": not a mapped column")
+            }
+            cnames = append(cnames, found)
+        }
+        var iname = ixNames[i]
+        if iname == "" {
+            var prefix = "ix_"
+            if ixUnique[i] {
+                prefix = "ux_"
+            }
+            iname = prefix + tableName + "_" + strings.Join(cnames, "_")
+        }
+        idx = append(idx, IndexMeta{Name: iname, Columns: cnames, Unique: ixUnique[i]})
+    }
+    var meta = new EntityMeta{Entity: name, Table: tableName, Columns: cols, Key: key, Token: token, Indexes: idx, ForeignKeys: []}
+    return new entModel{t: t, meta: meta, navs: navs, fieldCol: fieldCol, fieldNav: fieldNav, bases: bases}
+}
+
+// The navigation of field f of entity t: attributes, Configure, then the
+// conventions.
+func navigation(t *reflect.TypeInfo, f *reflect.FieldInfo, fl *entCfg) *navMeta! {
+    var name = t.Name
+    var ft = f.Type
+    var target = ft
+    var ptr = false
+    var many = false
+    if ft.Kind == reflect.Kind.Slice {
+        many = true
+        target = ft.Elem
+        if target.Kind == reflect.Kind.Pointer {
+            target = target.Elem
+            ptr = true
+        }
+    } else if ft.Kind == reflect.Kind.Pointer {
+        target = ft.Elem
+        ptr = true
+    }
+    if !entityLike(target) {
+        return error("data: field " + name + "." + f.Name + " of type " + ft.Name + " cannot be mapped to a column (use @ignore, or a navigation to an entity)")
+    }
+    var n = new navMeta{field: f.Name, index: f.Index, kind: 2, target: target, ptr: ptr, many: many, fk: "", through: "", ownerCol: "", targetCol: ""}
+    if many {
+        n.kind = 0
+    }
+    var explicit = false
+    var hm = f.Attribute<hasMany>()
+    if hm != nil {
+        explicit = true
+        n.kind = 0
+        n.fk = hm.foreignKey
+    }
+    var ho = f.Attribute<hasOne>()
+    if ho != nil {
+        explicit = true
+        n.kind = 1
+        n.fk = ho.foreignKey
+    }
+    var bt = f.Attribute<belongsTo>()
+    if bt != nil {
+        explicit = true
+        n.kind = 2
+        n.fk = bt.foreignKey
+    }
+    var mm = f.Attribute<manyToMany>()
+    if mm != nil {
+        explicit = true
+        n.kind = 3
+        n.through = mm.through
+    }
+    if (n.kind == 0 || n.kind == 3) != many {
+        return error("data: the navigation " + name + "." + f.Name + " must be a slice for a collection and a pointer for a reference")
+    }
+    var fn = fl.nav(f.Name)
+    if fn != nil {
+        if fn.fk != "" {
+            n.fk = fn.fk
+        }
+        if fn.through != "" {
+            n.through = fn.through
+        }
+        n.kind = fn.kind
+        explicit = true
+    }
+    if !explicit && many {
+        // a collection on both sides without a foreign key: many-to-many
+        var fk = name + "Id"
+        var back = false
+        var hasFk = false
+        for x in target.Fields {
+            if x.Type.Kind == reflect.Kind.Slice && (x.Type.Elem == t || (x.Type.Elem.Kind == reflect.Kind.Pointer && x.Type.Elem.Elem == t)) {
+                back = true
+            }
+            if x.Name == fk {
+                hasFk = true
+            }
+        }
+        if back && !hasFk {
+            n.kind = 3
+        }
+    }
+    if !explicit && !many {
+        // a reference: belongsTo if this entity has <Field>Id, else hasOne
+        n.kind = 1
+        for x in t.Fields {
+            if x.Name == f.Name + "Id" {
+                n.kind = 2
+            }
+        }
+    }
+    if n.fk == "" {
+        if n.kind == 2 {
+            n.fk = f.Name + "Id"
+        } else {
+            n.fk = name + "Id"
+        }
+    }
+    if n.kind == 3 {
+        var tname = target.Name
+        if n.through == "" {
+            // both sides of a two-way many-to-many name the same table
+            if name <= tname {
+                n.through = database.sql.SnakeCase(name) + "_" + plural(database.sql.SnakeCase(tname))
+            } else {
+                n.through = database.sql.SnakeCase(tname) + "_" + plural(database.sql.SnakeCase(name))
+            }
+        }
+        n.ownerCol = database.sql.SnakeCase(name) + "_id"
+        n.targetCol = database.sql.SnakeCase(tname) + "_id"
+        if n.ownerCol == n.targetCol {
+            n.targetCol = database.sql.SnakeCase(f.Name) + "_id"
+        }
+    }
+    return n
+}
+
+func joinColumn(name string, k ColumnMeta) ColumnMeta {
+    return ColumnMeta{Name: name, Field: name, Type: k.Type, SqlType: "", Nullable: false, Key: true, Auto: false, MaxLength: k.MaxLength, Default: "", Token: false}
+}
+
+// Checks the relations of the entities and derives the foreign keys,
+// their indexes and the join tables.
+func relations(cm *ctxModel) void! {
+    for m in cm.ents {
+        for n in m.navs {
+            var target = cm.ent(n.target)
+            if target == nil {
+                continue
+            }
+            var where = "data: navigation " + m.meta.Entity + "." + n.field + ": "
+            if n.kind == 3 {
+                if m.meta.Key < 0 || target.meta.Key < 0 {
+                    return error("data: many-to-many " + m.meta.Entity + "." + n.field + " needs keys on both entities")
+                }
+                var known = false
+                for j in cm.joins {
+                    if j.Table == n.through {
+                        known = true
+                    }
+                }
+                if known {
+                    continue
+                }
+                var ok = m.meta.Columns[m.meta.Key]
+                var tk = target.meta.Columns[target.meta.Key]
+                var jcols = [joinColumn(n.ownerCol, ok), joinColumn(n.targetCol, tk)]
+                var fks = [
+                    ForeignKeyMeta{Name: "fk_" + n.through + "_" + m.meta.Table + "_" + n.ownerCol, Columns: [n.ownerCol], RefTable: m.meta.Table, RefColumns: [ok.Name], OnDelete: "CASCADE"},
+                    ForeignKeyMeta{Name: "fk_" + n.through + "_" + target.meta.Table + "_" + n.targetCol, Columns: [n.targetCol], RefTable: target.meta.Table, RefColumns: [tk.Name], OnDelete: "CASCADE"},
+                ]
+                var ix = [IndexMeta{Name: "ix_" + n.through + "_" + n.targetCol, Columns: [n.targetCol], Unique: false}]
+                cm.joins = append(cm.joins, new EntityMeta{Entity: "", Table: n.through, Columns: jcols, Key: -1, Token: -1, Indexes: ix, ForeignKeys: fks})
+                continue
+            }
+            var dep = target
+            var principal = m
+            if n.kind == 2 {
+                dep = m
+                principal = target
+            }
+            var fki = dep.colOf(n.fk)
+            if fki < 0 {
+                var attr = "@hasMany"
+                if n.kind == 2 {
+                    attr = "@belongsTo"
+                } else if n.kind == 1 {
+                    attr = "@hasOne"
+                }
+                return error(where + dep.meta.Entity + " has no foreign key field " + n.fk + " (add it, or name it with " + attr + "(foreignKey: \"...\"))")
+            }
+            var pk = principal.meta.Key
+            if pk < 0 {
+                return error(where + principal.meta.Entity + " has no key")
+            }
+            if dep.bases[fki] != principal.bases[pk] {
+                return error(where + "foreign key " + dep.meta.Entity + "." + dep.meta.Columns[fki].Field + " has type " + dep.bases[fki].Name + ", the key of " + principal.meta.Entity + " has type " + principal.bases[pk].Name)
+            }
+            var fkc = dep.meta.Columns[fki]
+            var exists = false
+            for x in dep.meta.ForeignKeys {
+                if len(x.Columns) == 1 && x.Columns[0] == fkc.Name {
+                    exists = true
+                }
+            }
+            if !exists {
+                var od = "CASCADE"
+                if fkc.Nullable {
+                    od = "SET NULL"
+                }
+                dep.meta.ForeignKeys = append(dep.meta.ForeignKeys, ForeignKeyMeta{
+                    Name: "fk_" + dep.meta.Table + "_" + principal.meta.Table + "_" + fkc.Name,
+                    Columns: [fkc.Name],
+                    RefTable: principal.meta.Table,
+                    RefColumns: [principal.meta.Columns[pk].Name],
+                    OnDelete: od,
+                })
+            }
+        }
+    }
+    // an index on every foreign key that no index starts with
+    for m in cm.ents {
+        for fk in m.meta.ForeignKeys {
+            var covered = false
+            for ix in m.meta.Indexes {
+                if len(ix.Columns) > 0 && ix.Columns[0] == fk.Columns[0] {
+                    covered = true
+                }
+            }
+            if !covered {
+                m.meta.Indexes = append(m.meta.Indexes, IndexMeta{Name: "ix_" + m.meta.Table + "_" + strings.Join(fk.Columns, "_"), Columns: fk.Columns, Unique: false})
+            }
+        }
+    }
+}
+
+// Orders tables so that every table comes after the tables its foreign
+// keys reference (cycles keep their order).
+func orderTables(all []*EntityMeta) []*EntityMeta {
+    var out []*EntityMeta = []
+    var rest []*EntityMeta = []
+    for m in all {
+        rest = append(rest, m)
+    }
+    for len(rest) > 0 {
+        var pos = -1
+        for i, m in rest {
+            if pos < 0 && refsDone(m, out, rest) {
+                pos = i
+            }
+        }
+        if pos < 0 {
+            pos = 0
+        }
+        out = append(out, rest[pos])
+        var keep []*EntityMeta = []
+        for i, m in rest {
+            if i != pos {
+                keep = append(keep, m)
+            }
+        }
+        rest = keep
+    }
+    return out
+}
+
+func hasTable(xs []*EntityMeta, name string) bool {
+    for x in xs {
+        if x.Table == name {
+            return true
+        }
+    }
+    return false
+}
+
+func refsDone(m *EntityMeta, out []*EntityMeta, rest []*EntityMeta) bool {
+    for f in m.ForeignKeys {
+        if !(f.RefTable == m.Table || hasTable(out, f.RefTable) || !hasTable(rest, f.RefTable)) {
+            return false
+        }
+    }
+    return true
+}
+
+// ---- typed accessors --------------------------------------------------------------
+
+// Compile-time checks of entity T's fields: every mapped field must have
+// a column type or be a navigation (`[]E`, `[]*E`, `*E` of a struct).
+func checkEntity<T>() {
+    for f in reflect.Fields<T>() {
+        if f.Embedded || f.Attribute<ignore>() != nil {
+            continue
+        }
+        if (f.Type.Kind == reflect.Kind.Slice &&
+                (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct)) &&
+                f.Type.Elem != reflect.TypeOf<time.Time>()) ||
+            (f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
+            if f.Type.Kind != reflect.Kind.Slice && (f.Attribute<hasMany>() != nil || f.Attribute<manyToMany>() != nil) {
+                reflect.Error("data: @hasMany/@manyToMany on " + reflect.TypeOf<T>().Name + "." + f.Name + ": the field must be a slice")
+            }
+            if f.Type.Kind == reflect.Kind.Slice && (f.Attribute<hasOne>() != nil || f.Attribute<belongsTo>() != nil) {
+                reflect.Error("data: @hasOne/@belongsTo on " + reflect.TypeOf<T>().Name + "." + f.Name + ": the field must be a pointer")
+            }
+            continue
+        }
+        if f.Type.Kind == reflect.Kind.Struct &&
+            f.Type != reflect.TypeOf<time.Time>() &&
+            f.Type != reflect.TypeOf<math.big.Decimal>() &&
+            f.Type != reflect.TypeOf<encoding.json.Value>() {
+            var probe f.Type
+            switch probe {
+            case database.sql.Valuer _:
+            default:
+                reflect.Error("data: field " + reflect.TypeOf<T>().Name + "." + f.Name + " of type " + f.Type.Name + " cannot be mapped to a column (use @ignore, or a navigation to an entity: *" + f.Type.Name + " or []" + f.Type.Name + ")")
+            }
+        } else if !(f.Type.Kind == reflect.Kind.Int ||
+            f.Type.Kind == reflect.Kind.Int8 ||
+            f.Type.Kind == reflect.Kind.Int16 ||
+            f.Type.Kind == reflect.Kind.Int32 ||
+            f.Type.Kind == reflect.Kind.Uint ||
+            f.Type.Kind == reflect.Kind.Uint8 ||
+            f.Type.Kind == reflect.Kind.Uint16 ||
+            f.Type.Kind == reflect.Kind.Uint32 ||
+            f.Type.Kind == reflect.Kind.Float ||
+            f.Type.Kind == reflect.Kind.Float32 ||
+            f.Type.Kind == reflect.Kind.Bool ||
+            f.Type.Kind == reflect.Kind.String ||
+            f.Type.Kind == reflect.Kind.Enum ||
+            f.Type == reflect.TypeOf<time.Time>() ||
+            f.Type == reflect.TypeOf<math.big.Decimal>() ||
+            f.Type == reflect.TypeOf<encoding.json.Value>() ||
+            (f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind == reflect.Kind.Uint8) ||
+            (f.Type.Kind == reflect.Kind.Pointer &&
+                (f.Type.Elem.Kind == reflect.Kind.Int ||
+                    f.Type.Elem.Kind == reflect.Kind.Int8 ||
+                    f.Type.Elem.Kind == reflect.Kind.Int16 ||
+                    f.Type.Elem.Kind == reflect.Kind.Int32 ||
+                    f.Type.Elem.Kind == reflect.Kind.Uint ||
+                    f.Type.Elem.Kind == reflect.Kind.Uint8 ||
+                    f.Type.Elem.Kind == reflect.Kind.Uint16 ||
+                    f.Type.Elem.Kind == reflect.Kind.Uint32 ||
+                    f.Type.Elem.Kind == reflect.Kind.Float ||
+                    f.Type.Elem.Kind == reflect.Kind.Float32 ||
+                    f.Type.Elem.Kind == reflect.Kind.Bool ||
+                    f.Type.Elem.Kind == reflect.Kind.String ||
+                    f.Type.Elem == reflect.TypeOf<time.Time>() ||
+                    f.Type.Elem == reflect.TypeOf<math.big.Decimal>()))) {
+            reflect.Error("data: field " + reflect.TypeOf<T>().Name + "." + f.Name + " of type " + f.Type.Name + " cannot be mapped to a column (use @ignore, or a navigation to an entity)")
+        }
+        if f.Attribute<maxLength>() != nil && f.Type.Kind != reflect.Kind.String && !(f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.String) {
+            reflect.Error("data: @maxLength on " + reflect.TypeOf<T>().Name + "." + f.Name + ": only strings have a maximum length")
+        }
+        if f.Attribute<autoincrement>() != nil &&
+            !(f.Type.Kind == reflect.Kind.Int ||
+                f.Type.Kind == reflect.Kind.Int16 ||
+                f.Type.Kind == reflect.Kind.Int32 ||
+                f.Type.Kind == reflect.Kind.Int8 ||
+                f.Type.Kind == reflect.Kind.Uint ||
+                f.Type.Kind == reflect.Kind.Uint16 ||
+                f.Type.Kind == reflect.Kind.Uint32) {
+            reflect.Error("data: @autoincrement on " + reflect.TypeOf<T>().Name + "." + f.Name + " needs an integer field")
+        }
+    }
+}
+
+// The model and typed accessors of entity T in context model cm.
+func entityFor<T>(cm *ctxModel) *Entity<T> {
+    var t = reflect.TypeOf<T>()
+    lockInt(&cm.lock)
+    var have = cm.typed[t.FullName]
+    unlockInt(&cm.lock)
+    switch have {
+    case *Entity<T> e:
+        return e
+    }
+    checkEntity<T>()
+    var em = cm.ent(t)
+    if em == nil {
+        panic("data: " + t.Name + " is not an entity of " + cm.name)
+    }
+    var e = new Entity<T>{Meta: em.meta, em: em, incs: []}
+    e.scan = func(vals []any, off int, p *T) void! {
+        scanEntity<T>(em, vals, off, p)?
+    }
+    e.values = func(p *T) []any {
+        return valuesOf<T>(em, p)
+    }
+    e.set = func(p *T, i int, v any) void! {
+        setColumn<T>(em, p, i, v)?
+    }
+    e.unlink = func(p *T) {
+        unlinkNavs<T>(em, p)
+    }
+    // registered before the navigations, which may lead back to T
+    lockInt(&cm.lock)
+    cm.typed[t.FullName] = e
+    unlockInt(&cm.lock)
+    e.incs = navIncludes<T>(cm, em)
+    return e
+}
+
+// Reads the columns at vals[off..] into p.
+func scanEntity<T>(em *entModel, vals []any, off int, p *T) void! {
+    for f in reflect.Fields<T>() {
+        if !f.Embedded &&
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
+            var ci = em.fieldCol[f.Index]
+            if ci >= 0 {
+                database.sql.convertInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
+            }
+        }
+    }
+}
+
+// The column values of p (driver values).
+func valuesOf<T>(em *entModel, p *T) []any {
+    var out []any = []
+    for f in reflect.Fields<T>() {
+        if !f.Embedded &&
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
+            if em.fieldCol[f.Index] >= 0 {
+                if f.Type.Kind == reflect.Kind.Enum {
+                    out = append(out, fmt.Format("{0}", f.Get(p)))
+                } else {
+                    out = append(out, database.sql.argOf(f.Get(p)))
+                }
+            }
+        }
+    }
+    return out
+}
+
+// The value of column i of p (a driver value).
+func columnValue<T>(em *entModel, p *T, i int) any {
+    for f in reflect.Fields<T>() {
+        if !f.Embedded &&
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
+            if em.fieldCol[f.Index] == i {
+                if f.Type.Kind == reflect.Kind.Enum {
+                    return fmt.Format("{0}", f.Get(p))
+                }
+                return database.sql.argOf(f.Get(p))
+            }
+        }
+    }
+    return nil
+}
+
+// Sets column i of p from a driver value (generated keys, defaults, tokens).
+func setColumn<T>(em *entModel, p *T, i int, v any) void! {
+    for f in reflect.Fields<T>() {
+        if !f.Embedded &&
+            !(f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct))) &&
+            !(f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Struct &&
+                f.Type.Elem != reflect.TypeOf<time.Time>() &&
+                f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+                f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
+            if em.fieldCol[f.Index] == i {
+                database.sql.convertInto(f.Addr(p), v, em.meta.Columns[i].Name)?
+            }
+        }
+    }
+}
+
+// Resets the reference and many-to-many navigations of p (see ctxState.Drop).
+func unlinkNavs<T>(em *entModel, p *T) {
+    for f in reflect.Fields<T>() {
+        if f.Type.Kind == reflect.Kind.Slice && (f.Type.Elem.Kind == reflect.Kind.Struct || (f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct)) {
+            var n = em.fieldNav[f.Index]
+            if n != nil && n.kind == 3 {
+                f.Set(p, [])
+            }
+        } else if f.Type.Kind == reflect.Kind.Pointer &&
+            f.Type.Elem.Kind == reflect.Kind.Struct &&
+            f.Type.Elem != reflect.TypeOf<time.Time>() &&
+            f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+            f.Type.Elem != reflect.TypeOf<encoding.json.Value>() {
+            if em.fieldNav[f.Index] != nil {
+                f.Set(p, nil)
+            }
+        }
+    }
+}
+
+// Adds k to navigation `name` of p (appends to a collection, sets a reference).
+func navAttach<T, E>(p *T, name string, k *E) {
+    for f in reflect.Fields<T>() {
+        if f.Type == reflect.TypeOf<[]*E>() {
+            if f.Name == name {
+                f.Set(p, append(f.Get(p), k))
+            }
+        } else if f.Type == reflect.TypeOf<[]E>() {
+            if f.Name == name {
+                f.Set(p, append(f.Get(p), *k))
+            }
+        } else if f.Type == reflect.TypeOf<*E>() {
+            if f.Name == name {
+                f.Set(p, k)
+            }
+        }
+    }
+}
+
+// Empties navigation `name` of p before it is loaded.
+func navReset<T, E>(p *T, name string) {
+    for f in reflect.Fields<T>() {
+        if f.Type == reflect.TypeOf<[]*E>() || f.Type == reflect.TypeOf<[]E>() {
+            if f.Name == name {
+                f.Set(p, [])
+            }
+        } else if f.Type == reflect.TypeOf<*E>() {
+            if f.Name == name {
+                f.Set(p, nil)
+            }
+        }
+    }
+}
+
+// The loaders of every navigation of T (Include, Entry(e).Collection).
+func navIncludes<T>(cm *ctxModel, em *entModel) []Include<T> {
+    var out []Include<T> = []
+    for f in reflect.Fields<T>() {
+        if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind == reflect.Kind.Pointer && f.Type.Elem.Elem.Kind == reflect.Kind.Struct {
+            var n = em.fieldNav[f.Index]
+            if n != nil {
+                out = append(out, includeOf<T, f.Type.Elem.Elem>(cm, em, n))
+            }
+        } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind == reflect.Kind.Struct && f.Type.Elem != reflect.TypeOf<time.Time>() {
+            var n = em.fieldNav[f.Index]
+            if n != nil {
+                out = append(out, includeOf<T, f.Type.Elem>(cm, em, n))
+            }
+        } else if f.Type.Kind == reflect.Kind.Pointer &&
+            f.Type.Elem.Kind == reflect.Kind.Struct &&
+            f.Type.Elem != reflect.TypeOf<time.Time>() &&
+            f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
+            f.Type.Elem != reflect.TypeOf<encoding.json.Value>() {
+            var n = em.fieldNav[f.Index]
+            if n != nil {
+                out = append(out, includeOf<T, f.Type.Elem>(cm, em, n))
+            }
+        }
+    }
+    return out
+}
+
+// The loader of navigation n of T to entity E.
+func includeOf<T, E>(cm *ctxModel, em *entModel, n *navMeta) Include<T> {
+    var te = entityFor<E>(cm)
+    var tm = te.Meta
+    var a = "i_" + database.sql.SnakeCase(n.field)
+    var tq = quoteIdent(tm.Table)
+    var join = ""
+    var err = ""
+    if tm.Key < 0 {
+        err = "data: Include(" + n.field + ") needs a key on " + tm.Entity
+    } else if n.kind == 0 || n.kind == 1 {
+        var fk = te.em.colOf(n.fk)
+        if fk < 0 || em.meta.Key < 0 {
+            err = "data: the navigation " + n.field + " has no foreign key"
+        } else {
+            join = " LEFT JOIN " + tq + " AS " + a + " ON " + a + "." + quoteIdent(tm.Columns[fk].Name) + " = t0." + quoteIdent(em.meta.Columns[em.meta.Key].Name)
+        }
+    } else if n.kind == 2 {
+        var fk = em.colOf(n.fk)
+        if fk < 0 {
+            err = "data: the navigation " + n.field + " has no foreign key"
+        } else {
+            join = " LEFT JOIN " + tq + " AS " + a + " ON " + a + "." + quoteIdent(tm.Columns[tm.Key].Name) + " = t0." + quoteIdent(em.meta.Columns[fk].Name)
+        }
+    } else if em.meta.Key < 0 {
+        err = "data: the navigation " + n.field + " needs keys"
+    } else {
+        var j = "j_" + database.sql.SnakeCase(n.field)
+        join = " LEFT JOIN " +
+            quoteIdent(n.through) +
+            " AS " +
+            j +
+            " ON " +
+            j +
+            "." +
+            quoteIdent(n.ownerCol) +
+            " = t0." +
+            quoteIdent(em.meta.Columns[em.meta.Key].Name) +
+            " LEFT JOIN " +
+            tq +
+            " AS " +
+            a +
+            " ON " +
+            a +
+            "." +
+            quoteIdent(tm.Columns[tm.Key].Name) +
+            " = " +
+            j +
+            "." +
+            quoteIdent(n.targetCol)
+    }
+    var field = n.field
+    // entities refer to each other's loaders: weakly (the model holds them)
+    var wte weak *Entity<E> = te
+    return Include<T>{
+        name: field,
+        many: n.many,
+        err: err,
+        load: async func(st *ctxState, ps []*T, tr bool) void! {
+            var e2 *Entity<E> = wte
+            await loadNav<T, E>(st, em, e2, n, ps, tr)?
+        },
+        join: Frag{pg: join, lite: join, args: []},
+        cols: columnList(tm, a),
+        ncols: len(tm.Columns),
+        childKey: tm.Key,
+        attach: func(st *ctxState, p *T, vals []any, off int, tr bool) void! {
+            var e2 *Entity<E> = wte
+            var k = materialize(st, e2, vals, off, tr)?
+            navAttach<T, E>(p, field, k)
+        },
+        reset: func(p *T) {
+            navReset<T, E>(p, field)
+        },
+    }
+}
+
+// Loads navigation n of the parents ps by one query (split includes,
+// explicit loading).
+async func loadNav<T, E>(st *ctxState, em *entModel, te *Entity<E>, n *navMeta, ps []*T, tr bool) void! {
+    var tm = te.Meta
+    var pcol = em.meta.Key
+    if n.kind == 2 {
+        pcol = em.colOf(n.fk)
+    }
+    if pcol < 0 {
+        return error("data: " + em.meta.Entity + " needs a key to load navigations")
+    }
+    var keys []any = []
+    for p in ps {
+        keys = append(keys, columnValue<T>(em, p, pcol))
+    }
+    if n.kind == 3 {
+        var r = await loadThrough(st, te, n.through, n.ownerCol, n.targetCol, keys, tr)?
+        for p in ps {
+            var pk = keyText(columnValue<T>(em, p, pcol))
+            navReset<T, E>(p, n.field)
+            for i, k in r.items {
+                if r.owners[i] == pk {
+                    navAttach<T, E>(p, n.field, k)
+                }
+            }
+        }
+        return
+    }
+    var kcol = tm.Key
+    if n.kind != 2 {
+        kcol = te.em.colOf(n.fk)
+    }
+    if kcol < 0 {
+        return error("data: " + tm.Entity + " needs a key to load navigations")
+    }
+    var kids = await loadIn(st, te, tm.Columns[kcol].Name, keys, tr)?
+    for p in ps {
+        var pk = keyText(columnValue<T>(em, p, pcol))
+        if n.many || n.ptr {
+            navReset<T, E>(p, n.field)
+        }
+        for k in kids {
+            if keyText(columnValue<E>(te.em, k, kcol)) == pk {
+                navAttach<T, E>(p, n.field, k)
+            }
+        }
+    }
+}
+
+// ---- opening a context --------------------------------------------------------------
+
+// data.Open<ShopContext>(data.Provider.Sqlite, ":memory:"): opens a pool
+// and creates the context with its sets (the model of the context type is
+// built the first time).
+func Open<C>(p Provider, dsn string) *C! {
+    var db = openDB(p, dsn)?
+    return bindContext<C>(p, db)?
+}
+
+// Like Open over an existing pool (a model error panics).
+func OpenDB<C>(p Provider, db *database.sql.DB) *C {
+    var c = try bindContext<C>(p, db) catch err {
+        panic(err.Message())
+    }
+    return c
+}
+
+func bindContext<C>(p Provider, db *database.sql.DB) *C! {
+    var c C
+    switch c {
+    case contextLike _:
+        var cm = contextModel<C>()?
+        var st = newState(p, db)
+        st.model = cm
+        st.tables = cm.tables
+        c.Context = Context{st: st}
+        for f in reflect.Fields<C>() {
+            var probe f.Type
+            switch probe {
+            case setLike _:
+                var s f.Type
+                f.Set(&c, s.bind_(st))
+            }
+        }
+        return &c
+    default:
+        reflect.Error(
+            "data.Open<" +
+                reflect.TypeOf<C>().Name +
+                ">: " +
+                reflect.TypeOf<C>().Name +
+                " is not a context (a struct embedding data.Context with data.Set<T> fields)",
+        )
+    }
+}
+
+// ---- migrations ----------------------------------------------------------------------
+
+
+
+// The migrations of the program: every struct with @migration, in id order.
+func migrationsOf() []MigrationEntry {
+    var out []MigrationEntry = []
+    for t in reflect.TypesWith<migration>() {
+        out = append(out, migrationEntry<t>(t.Attribute<migration>().id))
+    }
+    return sortEntries(out)
+}
+
+func migrationEntry<M: upper>(id string) MigrationEntry {
+    var probe M
+    var down = func(m *Migrator) {}
+    switch probe {
+    case downer d:
+        down = func(m *Migrator) {
+            d.Down(m)
+        }
+    }
+    return MigrationEntry{
+        Id: id,
+        Up: func(m *Migrator) {
+            var x M
+            x.Up(m)
+        },
+        Down: down,
+    }
+}
+
+// ---- the model as JSON ----------------------------------------------------------------
+
+// The model of context type C as one line of JSON (the snapshot format of
+// `zell data migration add`): {"name", "namespace", "sets": [{"field",
+// "entity"}], "tables": [{"name", "entity", "columns", "indexes",
+// "foreignKeys"}]}, or {"error": "..."} if the model is invalid.
+func ModelJson<C>() string {
+    var cm = try contextModel<C>() catch err {
+        return "{\"error\": " + jsonString(err.Message()) + "}"
+    }
+    var b = strings.Builder{}
+    b.Write("{\"name\": " + jsonString(cm.name) + ", \"namespace\": " + jsonString(cm.namespace) + ", \"sets\": [")
+    for i, s in cm.sets {
+        if i > 0 {
+            b.Write(", ")
+        }
+        b.Write("{\"field\": " + jsonString(s) + ", \"entity\": " + jsonString(cm.roots[i].Name) + "}")
+    }
+    b.Write("], \"tables\": [")
+    for i, t in cm.tables {
+        if i > 0 {
+            b.Write(", ")
+        }
+        b.Write(tableJson(t))
+    }
+    b.Write("]}")
+    return b.String()
+}
+
+func tableJson(m *EntityMeta) string {
+    var b = strings.Builder{}
+    b.Write("{\"name\": " + jsonString(m.Table) + ", \"entity\": " + jsonString(m.Entity) + ", \"columns\": [")
+    for i, c in m.Columns {
+        if i > 0 {
+            b.Write(", ")
+        }
+        b.Write(
+            "{\"name\": " +
+                jsonString(c.Name) +
+                ", \"type\": " +
+                jsonString(c.Type) +
+                ", \"sqlType\": " +
+                jsonString(c.SqlType) +
+                ", \"nullable\": " +
+                fmt.Format("{0}", c.Nullable) +
+                ", \"key\": " +
+                fmt.Format("{0}", c.Key) +
+                ", \"auto\": " +
+                fmt.Format("{0}", c.Auto) +
+                ", \"maxLength\": " +
+                strconv.Itoa(c.MaxLength) +
+                ", \"default\": " +
+                jsonString(c.Default) +
+                "}",
+        )
+    }
+    b.Write("], \"indexes\": [")
+    for i, ix in m.Indexes {
+        if i > 0 {
+            b.Write(", ")
+        }
+        b.Write("{\"name\": " + jsonString(ix.Name) + ", \"columns\": " + jsonStrings(ix.Columns) + ", \"unique\": " + fmt.Format("{0}", ix.Unique) + "}")
+    }
+    b.Write("], \"foreignKeys\": [")
+    for i, f in m.ForeignKeys {
+        if i > 0 {
+            b.Write(", ")
+        }
+        b.Write(
+            "{\"name\": " +
+                jsonString(f.Name) +
+                ", \"columns\": " +
+                jsonStrings(f.Columns) +
+                ", \"refTable\": " +
+                jsonString(f.RefTable) +
+                ", \"refColumns\": " +
+                jsonStrings(f.RefColumns) +
+                ", \"onDelete\": " +
+                jsonString(f.OnDelete) +
+                "}",
+        )
+    }
+    b.Write("]}")
+    return b.String()
+}
+
+func jsonString(s string) string {
+    var b = strings.Builder{}
+    b.Write("\"")
+    var n = len(s)
+    for i in 0..n {
+        var c = int(s[i])
+        if c == 34 || c == 92 {
+            b.Write("\\")
+            b.Write(string(char(c)))
+        } else if c == 10 {
+            b.Write("\\n")
+        } else if c < 32 {
+            b.Write(fmt.Format("\\u{0}", strconv.FormatInt(c + 65536, 16)[1..5]))
+        } else {
+            b.Write(s[i..i + 1])
+        }
+    }
+    b.Write("\"")
+    return b.String()
+}
+
+func jsonStrings(xs []string) string {
+    var parts []string = []
+    for x in xs {
+        parts = append(parts, jsonString(x))
+    }
+    return "[" + strings.Join(parts, ", ") + "]"
+}

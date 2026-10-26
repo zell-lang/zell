@@ -36,6 +36,15 @@ struct MigrationEntry {
     Down func(*Migrator)
 }
 
+// A migration struct: Up, and optionally Down.
+interface upper {
+    func Up(m *Migrator)
+}
+
+interface downer {
+    func Down(m *Migrator)
+}
+
 // Collects the statements of a migration for a provider.
 struct Migrator {
     provider Provider
@@ -432,6 +441,14 @@ func sortEntries(list []MigrationEntry) []MigrationEntry {
 async func applyMigrations(st *ctxState, list []MigrationEntry, target string) []string! {
     var done = await appliedIds(st)?
     var sorted = sortEntries(list)
+    for i, e in sorted {
+        if e.Id == "" {
+            return error("data: a migration has an empty id")
+        }
+        if i > 0 && sorted[i - 1].Id == e.Id {
+            return error("data: duplicate migration id \"" + e.Id + "\"")
+        }
+    }
     var out []string = []
     if target != "" && target != "0" {
         var known = false

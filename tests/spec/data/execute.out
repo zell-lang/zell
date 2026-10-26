@@ -1,4 +1,4 @@
-  sql: UPDATE "tasks" AS t0 SET "done" = TRUE, "priority" = (t0."priority" + 10), "owner" = NULL WHERE (t0."priority" <= ?) -- [1]
+  sql: UPDATE "tasks" AS t0 SET "done" = ?, "priority" = (t0."priority" + ?), "owner" = ? WHERE (t0."priority" <= ?) -- [true, 10, NULL, 1]
 updated 4
   sql: DELETE FROM "tasks" AS t0 WHERE t0."id" IN (SELECT t0."id" FROM "tasks" AS t0 WHERE (NOT t0."done") ORDER BY t0."id" ASC LIMIT 1)
 deleted 1

@@ -1,0 +1,39 @@
+// test: a lambda reading a field that is not mapped (@ignore) cannot be translated: the query fails when it runs (the translation of expression trees is library code; compile-time model errors are those of the field types)
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.ignored_field
+
+import io
+
+struct User {
+    Id    int
+    Name  string
+    Age   int
+    @data.ignore Cache string
+    Orders []*Order
+}
+
+struct Order {
+    Id     int
+    UserId int
+    Total  float
+}
+
+struct Shop {
+    data.Context
+    Users  data.Set<User>
+    Orders data.Set<Order>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    await ctx.EnsureCreated()?
+    var q = ctx.Users.OrderBy((u) => u.Cache)
+    println(q.ToSql())
+    try await q.ToList() catch err {
+        println(err)
+    }
+    try await ctx.Users.Where((u) => u.Cache == "x").Count() catch err {
+        println(err)
+    }
+}

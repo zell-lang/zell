@@ -1,11 +1,12 @@
 namespace data
 
-// Queries: the SQL fragments are produced by the compiler from the lambdas
-// (sema/orm.rs) for both dialects; a fragment's text references its
-// arguments as {?i} (one value) and {*i} (a list, expanded to one
-// placeholder per element). This file assembles SELECT/UPDATE/DELETE
-// statements from them, numbers the placeholders for the provider, runs
-// them and maps the rows.
+// Queries: the operators take their lambdas as expression trees, which
+// data_sql.zl translates to SQL fragments for both dialects (cached per
+// lambda site); a fragment's text references its arguments as {?i} (one
+// value) and {*i} (a list, expanded to one placeholder per element). This
+// file assembles SELECT/UPDATE/DELETE statements from them, numbers the
+// placeholders for the provider, runs them and maps the rows. A lambda
+// that cannot be translated makes the query fail when it runs.
 
 // A SQL fragment for both dialects and its arguments.
 struct Frag {
@@ -121,6 +122,8 @@ struct core {
     skip     int
     take     int
     distinct bool
+    // a translation error: running the query fails with it
+    err      string
 
     func writer() sqlw {
         return sqlw{pg: this.st.pg(), b: strings.Builder{}, args: [], groups: this.groups}
@@ -285,7 +288,7 @@ async func core_exists(q core, sel Frag) bool! {
 }
 
 func newCore(st *ctxState, m *EntityMeta) core {
-    return core{st: st, meta: m, joins: [], wheres: [], orders: [], groups: [], havings: [], skip: 0, take: -1, distinct: false}
+    return core{st: st, meta: m, joins: [], wheres: [], orders: [], groups: [], havings: [], skip: 0, take: -1, distinct: false, err: ""}
 }
 
 func entityCols(st *ctxState, m *EntityMeta) Frag {
@@ -294,9 +297,14 @@ func entityCols(st *ctxState, m *EntityMeta) Frag {
 }
 
 // A navigation loaded with the query (Include): joined into the query or
-// loaded by a second query (AsSplitQuery). Built by the compiler.
+// loaded by a second query (AsSplitQuery). Made for every navigation of an
+// entity with its accessors (data_model.zl, includeOf).
+@acyclic
 struct Include<T> {
     name     string
+    many     bool
+    // why the navigation cannot be loaded ("": it can)
+    err      string
     load     func(*ctxState, []*T, bool) Task<void!>
     join     Frag
     cols     string
@@ -368,6 +376,194 @@ struct Query<T> {
         return Enumerable<T>{q: *this, filters: []}
     }
 
+    func fail(msg string) Query<T> {
+        var q = *this
+        if q.c.err == "" {
+            q.c.err = msg
+        }
+        return q
+    }
+
+    // Filters the rows: Where((u) => u.Age >= min && strings.HasPrefix(u.Name, "A")).
+    // The lambda is an expression tree, translated to SQL once per lambda
+    // site; constants and captured values are statement arguments.
+    func Where(p expr<func(*T) bool>) Query<T> {
+        var cm = this.c.st.model
+        var pl = lookupPlan(cm, p.SiteId(), 0)
+        if pl == nil {
+            pl = predPlan(cm, this.ent.em, p)
+        }
+        if pl.err != "" {
+            return this.fail(pl.err)
+        }
+        return this.where_(pl.pg, pl.lite, planArgs(pl, &p))
+    }
+
+    // Orders by a value or a tuple of values: OrderBy((u) => (u.Last, u.First)).
+    func OrderBy(key expr<func(*T) any>) Query<T> {
+        return this.ordered(key, false, false)
+    }
+
+    func OrderByDescending(key expr<func(*T) any>) Query<T> {
+        return this.ordered(key, true, false)
+    }
+
+    // A further ordering key.
+    func ThenBy(key expr<func(*T) any>) Query<T> {
+        return this.ordered(key, false, true)
+    }
+
+    func ThenByDescending(key expr<func(*T) any>) Query<T> {
+        return this.ordered(key, true, true)
+    }
+
+    func ordered(key expr<func(*T) any>, desc bool, then bool) Query<T> {
+        var cm = this.c.st.model
+        var role = 1
+        if desc {
+            role = 2
+        }
+        var pl = lookupPlan(cm, key.SiteId(), role)
+        if pl == nil {
+            pl = orderPlan(cm, this.ent.em, key, desc)
+        }
+        if pl.err != "" {
+            return this.fail(pl.err)
+        }
+        return this.order_(pl.pg, pl.lite, planArgs(pl, &key), then)
+    }
+
+    // Loads a navigation with the query: Include((u) => u.Orders).
+    func Include(nav expr<func(*T) any>) Query<T> {
+        var f = paramField(nav.Root())
+        for inc in this.ent.incs {
+            if inc.name == f {
+                if inc.err != "" {
+                    return this.fail(inc.err)
+                }
+                return this.include_(inc)
+            }
+        }
+        return this.fail("data: Include needs a navigation of " + this.c.meta.Entity + ": Include((u) => u.Orders)")
+    }
+
+    // A projection: Select((u) => (u.Name, len(u.Orders))), Select((u) =>
+    // UserDto{Name: u.Name}) or Select((u) => u.Email).
+    func Select<R>(f expr<func(*T) R>) Projection<R> {
+        selectCheck<R>()
+        var cm = this.c.st.model
+        var pl = lookupPlan(cm, f.SiteId(), 3)
+        if pl == nil {
+            pl = selectPlan(cm, this.ent.em, f)
+        }
+        var c = this.c
+        if pl.err != "" && c.err == "" {
+            c.err = pl.err
+        }
+        return Projection<R>{c: c, sel: Frag{pg: pl.pg, lite: pl.lite, args: planArgs(pl, &f)}, m: rowMapper<R>(pl.shape)}
+    }
+
+    // Groups the rows: GroupBy((o) => o.Product) or GroupBy((o) => (o.A, o.B)),
+    // then Where (HAVING), OrderBy and Select over the groups.
+    func GroupBy<K>(key expr<func(*T) K>) Grouped<T, K> {
+        var cm = this.c.st.model
+        var pl = lookupPlan(cm, key.SiteId(), 8)
+        if pl == nil {
+            pl = groupKeyPlan(cm, this.ent.em, key)
+        }
+        var g = this.group_<K>(pl.pgs, pl.lites, planArgs(pl, &key))
+        if pl.err != "" && g.c.err == "" {
+            g.c.err = pl.err
+        }
+        return g
+    }
+
+    // An inner join with another set: Join(ctx.Orders, (u) => u.Id, (o) =>
+    // o.UserId, (u, o) => (u.Name, o.Total)).
+    func Join<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        selectCheck<R>()
+        var c = this.c
+        var p = newPlan()
+        var j = newPlan()
+        try joinInto(c.st.model, this.ent.em, inner.ent.em, outerKey.Root(), innerKey.Root(), result.Root(), j, p) catch err {
+            if c.err == "" {
+                c.err = err.Message()
+            }
+        }
+        c.joins = addFrag(c.joins, Frag{pg: j.pg, lite: j.lite, args: j.vals})
+        return Projection<R>{c: c, sel: Frag{pg: p.pg, lite: p.lite, args: p.vals}, m: rowMapper<R>(p.shape)}
+    }
+
+    // Updates the matching rows (set-based, without loading or tracking):
+    // ExecuteUpdate((s) => s.Set((u) => u.Done, true).SetWith((u) => u.N,
+    // (u) => u.N + 1)); returns the number of rows updated.
+    func ExecuteUpdate(f func(Setters<T>) Setters<T>) Task<int!> {
+        var s = f(Setters<T>{items: []})
+        var q = *this
+        var u = updateParts(q.c.st.model, q.ent.em, s.items)
+        if u.err != "" && q.c.err == "" {
+            q.c.err = u.err
+        }
+        return query_update(q, u.pg, u.lite, u.args)
+    }
+
+    // The query with each predicate added (First(p), Count(p), ...).
+    func filtered(ps []expr<func(*T) bool>) Query<T> {
+        var q = *this
+        for p in ps {
+            q = q.Where(p)
+        }
+        return q
+    }
+
+    // Whether every row satisfies the predicate.
+    func All(p expr<func(*T) bool>) Task<bool!> {
+        var cm = this.c.st.model
+        var pl = lookupPlan(cm, p.SiteId(), 0)
+        if pl == nil {
+            pl = predPlan(cm, this.ent.em, p)
+        }
+        var q = *this
+        if pl.err != "" && q.c.err == "" {
+            q.c.err = pl.err
+        }
+        return query_all(q, pl.pg, pl.lite, planArgs(pl, &p))
+    }
+
+    // SUM of a value (0 for no rows).
+    func Sum<N>(f expr<func(*T) N>) Task<N!> {
+        numberCheck<N>("Sum")
+        return this.aggregate<N, N>(f, "Sum", 4, 0)
+    }
+
+    // MIN of a value (NoElementsError for no rows).
+    func Min<N>(f expr<func(*T) N>) Task<N!> {
+        return this.aggregate<N, N>(f, "Min", 5, 1)
+    }
+
+    func Max<N>(f expr<func(*T) N>) Task<N!> {
+        return this.aggregate<N, N>(f, "Max", 6, 1)
+    }
+
+    // AVG of a value, as a float (NoElementsError for no rows).
+    func Average<N>(f expr<func(*T) N>) Task<float!> {
+        numberCheck<N>("Average")
+        return this.aggregate<N, float>(f, "Average", 7, 1)
+    }
+
+    func aggregate<N, R>(f expr<func(*T) N>, what string, role int, empty int) Task<R!> {
+        var cm = this.c.st.model
+        var pl = lookupPlan(cm, f.SiteId(), role)
+        if pl == nil {
+            pl = aggPlan(cm, this.ent.em, f, what, role)
+        }
+        var q = *this
+        if pl.err != "" && q.c.err == "" {
+            q.c.err = pl.err
+        }
+        return q.scalar_<R>(pl.pg, pl.lite, planArgs(pl, &f), empty, what + " " + this.c.meta.Entity)
+    }
+
     func where_(pg string, lite string, args []any) Query<T> {
         var q = *this
         q.c.wheres = addFrag(q.c.wheres, Frag{pg: pg, lite: lite, args: args})
@@ -392,16 +588,6 @@ struct Query<T> {
         xs = append(xs, inc)
         q.includes = xs
         return q
-    }
-
-    func select_<R>(pg string, lite string, args []any, m func([]any, *R) void!) Projection<R> {
-        return Projection<R>{c: this.c, sel: Frag{pg: pg, lite: lite, args: args}, m: m}
-    }
-
-    func join_<R>(jpg string, jlite string, jargs []any, pg string, lite string, args []any, m func([]any, *R) void!) Projection<R> {
-        var c = this.c
-        c.joins = addFrag(c.joins, Frag{pg: jpg, lite: jlite, args: jargs})
-        return Projection<R>{c: c, sel: Frag{pg: pg, lite: lite, args: args}, m: m}
     }
 
     func group_<K>(pgs []string, lites []string, args []any) Grouped<T, K> {
@@ -456,6 +642,9 @@ struct Query<T> {
 
     // The SELECT statement of the query (with $n or ? placeholders).
     func ToSql() string {
+        if this.c.err != "" {
+            return "-- " + this.c.err
+        }
         var w = this.c.writer()
         this.writeSelect(&w)
         return w.text()
@@ -514,37 +703,76 @@ struct Query<T> {
     }
 
     // The first entity (NoElementsError if there is none).
-    func First() Task<*T!> {
-        return query_First(*this)
+    func First(p ...expr<func(*T) bool>) Task<*T!> {
+        if len(p) == 0 {
+            return query_First(*this)
+        }
+        if len(p) == 1 {
+            return query_First(this.Where(p[0]))
+        }
+        return query_First(this.filtered(p))
     }
 
     // The first entity, or nil.
-    func FirstOrDefault() Task<*T!> {
-        return query_FirstOrDefault(*this)
+    func FirstOrDefault(p ...expr<func(*T) bool>) Task<*T!> {
+        if len(p) == 0 {
+            return query_FirstOrDefault(*this)
+        }
+        if len(p) == 1 {
+            return query_FirstOrDefault(this.Where(p[0]))
+        }
+        return query_FirstOrDefault(this.filtered(p))
     }
 
     // The only entity (an error if there is none or more than one).
-    func Single() Task<*T!> {
-        return query_Single(*this)
+    func Single(p ...expr<func(*T) bool>) Task<*T!> {
+        if len(p) == 0 {
+            return query_Single(*this)
+        }
+        if len(p) == 1 {
+            return query_Single(this.Where(p[0]))
+        }
+        return query_Single(this.filtered(p))
     }
 
     // The only entity or nil (an error if there is more than one).
-    func SingleOrDefault() Task<*T!> {
-        return query_SingleOrDefault(*this)
+    func SingleOrDefault(p ...expr<func(*T) bool>) Task<*T!> {
+        if len(p) == 0 {
+            return query_SingleOrDefault(*this)
+        }
+        if len(p) == 1 {
+            return query_SingleOrDefault(this.Where(p[0]))
+        }
+        return query_SingleOrDefault(this.filtered(p))
     }
 
     // Number of matching rows (SELECT COUNT(*)).
-    func Count() Task<int!> {
-        return query_Count(*this)
+    func Count(p ...expr<func(*T) bool>) Task<int!> {
+        if len(p) == 0 {
+            return query_Count(*this)
+        }
+        if len(p) == 1 {
+            return query_Count(this.Where(p[0]))
+        }
+        return query_Count(this.filtered(p))
     }
 
     // Whether any row matches (SELECT EXISTS).
-    func Any() Task<bool!> {
-        return query_Any(*this)
+    func Any(p ...expr<func(*T) bool>) Task<bool!> {
+        if len(p) == 0 {
+            return query_Any(*this)
+        }
+        if len(p) == 1 {
+            return query_Any(this.Where(p[0]))
+        }
+        return query_Any(this.filtered(p))
     }
 }
 
 async func query_scalar<T, R>(q Query<T>, pg string, lite string, args []any, empty int, what string) R! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     var w = q.c.writer()
     w.raw("SELECT ")
     w.frag(Frag{pg: pg, lite: lite, args: args})
@@ -562,11 +790,17 @@ async func query_scalar<T, R>(q Query<T>, pg string, lite string, args []any, em
 }
 
 async func query_all<T>(q Query<T>, pg string, lite string, args []any) bool! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     var q2 = q.where_("NOT (" + pg + ")", "NOT (" + lite + ")", args)
     return !await q2.c.exists(entityCols(q2.c.st, q2.c.meta))?
 }
 
 async func query_update<T>(q Query<T>, pg string, lite string, args []any) int! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     var w = q.c.writer()
     w.raw("UPDATE " + quoteIdent(q.c.meta.Table) + " AS t0 SET ")
     w.frag(Frag{pg: pg, lite: lite, args: args})
@@ -576,6 +810,9 @@ async func query_update<T>(q Query<T>, pg string, lite string, args []any) int! 
 }
 
 async func query_ExecuteDelete<T>(q Query<T>) int! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     var w = q.c.writer()
     w.raw("DELETE FROM " + quoteIdent(q.c.meta.Table) + " AS t0")
     q.setScope(&w)
@@ -584,6 +821,9 @@ async func query_ExecuteDelete<T>(q Query<T>) int! {
 }
 
 async func query_ToList<T>(q Query<T>) []*T! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     var w = q.c.writer()
     q.writeSelect(&w)
     var rs = await q.c.st.rows(w.text(), w.args)?
@@ -637,6 +877,9 @@ async func query_ToList<T>(q Query<T>) []*T! {
 // The first entity of q with LIMIT 1, or nil: a query with Include goes
 // through ToList (joined rows), a plain one maps the single row directly.
 async func query_firstRow<T>(q Query<T>) *T! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     if len(q.includes) > 0 {
         var xs = await q.Take(1).ToList()?
         if len(xs) == 0 {
@@ -694,10 +937,16 @@ async func query_SingleOrDefault<T>(q Query<T>) *T! {
 }
 
 async func query_Count<T>(q Query<T>) int! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     return await q.c.count(entityCols(q.c.st, q.c.meta))?
 }
 
 async func query_Any<T>(q Query<T>) bool! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     return await q.c.exists(entityCols(q.c.st, q.c.meta))?
 }
 
@@ -726,6 +975,9 @@ struct Projection<R> {
     }
 
     func ToSql() string {
+        if this.c.err != "" {
+            return "-- " + this.c.err
+        }
         var w = this.c.writer()
         this.c.selectSql(&w, this.sel)
         return w.text()
@@ -761,9 +1013,26 @@ struct Projection<R> {
     func Any() Task<bool!> {
         return projection_Any(*this)
     }
+
+    // Filtering and ordering apply to entities: after Select they are an
+    // error at compile time (raised when used).
+    func Where(p expr<func(R) bool>) Projection<R> {
+        reflect.Error("data: Where after Select: the projection's columns are not entities; apply Where before Select")
+    }
+
+    func OrderBy(key expr<func(R) any>) Projection<R> {
+        reflect.Error("data: OrderBy after Select: the projection's columns are not entities; apply OrderBy before Select")
+    }
+
+    func OrderByDescending(key expr<func(R) any>) Projection<R> {
+        reflect.Error("data: OrderByDescending after Select: the projection's columns are not entities; apply OrderByDescending before Select")
+    }
 }
 
 async func projection_ToList<R>(q Projection<R>) []R! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     var w = q.c.writer()
     q.c.selectSql(&w, q.sel)
     var rows = await q.c.st.all(w.text(), w.args)?
@@ -805,10 +1074,16 @@ async func projection_Single<R>(q Projection<R>) R! {
 }
 
 async func projection_Count<R>(q Projection<R>) int! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     return await q.c.count(q.sel)?
 }
 
 async func projection_Any<R>(q Projection<R>) bool! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
     return await q.c.exists(q.sel)?
 }
 
@@ -833,8 +1108,149 @@ struct Grouped<T, K> {
         return q
     }
 
-    func select_<R>(pg string, lite string, args []any, m func([]any, *R) void!) Projection<R> {
-        return Projection<R>{c: this.c, sel: Frag{pg: pg, lite: lite, args: args}, m: m}
+    func fail(msg string) Grouped<T, K> {
+        var q = *this
+        if q.c.err == "" {
+            q.c.err = msg
+        }
+        return q
+    }
+
+    // g.Key in the lambdas: the GROUP BY fragments ({#i}).
+    func keys() []sv {
+        var out []sv = []
+        var kt = reflect.TypeOf<K>()
+        if kt.Kind == reflect.Kind.Tuple {
+            for i, f in kt.Fields {
+                var m = "{#" + strconv.Itoa(i) + "}"
+                out = append(out, sv{pg: m, lite: m, t: f.Type})
+            }
+        } else {
+            out = append(out, sv{pg: "{#0}", lite: "{#0}", t: kt})
+        }
+        return out
+    }
+
+    // HAVING: Where((g) => g.Sum((o) => o.Qty) > 3).
+    func Where(p expr<func(Group<K, T>) bool>) Grouped<T, K> {
+        var pl = groupPlan(this.c.st.model, this.ent.em, this.keys(), p, 0)
+        if pl.err != "" {
+            return this.fail(pl.err)
+        }
+        return this.having_(pl.pg, pl.lite, planArgs(pl, &p))
+    }
+
+    func OrderBy(key expr<func(Group<K, T>) any>) Grouped<T, K> {
+        return this.ordered(key, 1, false)
+    }
+
+    func OrderByDescending(key expr<func(Group<K, T>) any>) Grouped<T, K> {
+        return this.ordered(key, 2, false)
+    }
+
+    func ThenBy(key expr<func(Group<K, T>) any>) Grouped<T, K> {
+        return this.ordered(key, 1, true)
+    }
+
+    func ThenByDescending(key expr<func(Group<K, T>) any>) Grouped<T, K> {
+        return this.ordered(key, 2, true)
+    }
+
+    func ordered(key expr<func(Group<K, T>) any>, what int, then bool) Grouped<T, K> {
+        var pl = groupPlan(this.c.st.model, this.ent.em, this.keys(), key, what)
+        if pl.err != "" {
+            return this.fail(pl.err)
+        }
+        return this.order_(pl.pg, pl.lite, planArgs(pl, &key), then)
+    }
+
+    // The values of every group: Select((g) => (g.Key, g.Count())).
+    func Select<R>(f expr<func(Group<K, T>) R>) Projection<R> {
+        selectCheck<R>()
+        var pl = groupPlan(this.c.st.model, this.ent.em, this.keys(), f, 3)
+        var c = this.c
+        if pl.err != "" && c.err == "" {
+            c.err = pl.err
+        }
+        return Projection<R>{c: c, sel: Frag{pg: pl.pg, lite: pl.lite, args: planArgs(pl, &f)}, m: rowMapper<R>(pl.shape)}
+    }
+
+    // Groups are only read through Select (an error at compile time, raised
+    // when used).
+    func ToList() Task<[]T!> {
+        reflect.Error("data: ToList on a GroupBy: select the group values first, e.g. .Select((g) => (g.Key, g.Count()))")
+    }
+
+    func First() Task<T!> {
+        reflect.Error("data: First on a GroupBy: select the group values first, e.g. .Select((g) => (g.Key, g.Count()))")
+    }
+
+    func Count() Task<int!> {
+        reflect.Error("data: Count on a GroupBy: select the group values first, e.g. .Select((g) => (g.Key, g.Count()))")
+    }
+
+    func ToSql() string {
+        reflect.Error("data: ToSql on a GroupBy: select the group values first, e.g. .Select((g) => (g.Key, g.Count()))")
+    }
+}
+
+// A group in the lambdas of GroupBy(...).Where/OrderBy/Select: its key and
+// aggregates over its rows (translated to SQL; also usable in memory).
+struct Group<K, T> {
+    Key   K
+    items []*T
+
+    // COUNT(*).
+    @expr.call
+    func Count() int {
+        return len(this.items)
+    }
+
+    // SUM of a value of the rows.
+    @expr.call
+    func Sum<N: Add>(f func(*T) N) N {
+        var s N
+        for x in this.items {
+            s = s + f(x)
+        }
+        return s
+    }
+
+    @expr.call
+    func Min<N: Ordered>(f func(*T) N) N {
+        var m N
+        for i, x in this.items {
+            var v = f(x)
+            if i == 0 || v < m {
+                m = v
+            }
+        }
+        return m
+    }
+
+    @expr.call
+    func Max<N: Ordered>(f func(*T) N) N {
+        var m N
+        for i, x in this.items {
+            var v = f(x)
+            if i == 0 || v > m {
+                m = v
+            }
+        }
+        return m
+    }
+
+    // AVG of a value of the rows.
+    @expr.call
+    func Average<N>(f func(*T) N) float {
+        var s = 0.0
+        for x in this.items {
+            s += toFloat(f(x))
+        }
+        if len(this.items) == 0 {
+            return 0.0
+        }
+        return s / float(len(this.items))
     }
 }
 
@@ -961,4 +1377,297 @@ async func loadThrough<T>(st *ctxState, ent *Entity<T>, through string, ownerCol
         out.owners = append(out.owners, keyText(vals[n]))
     }
     return out
+}
+
+// ---- query lambdas: helpers -----------------------------------------------------
+
+// Select's result type must be a value (compile-time check).
+func selectCheck<R>() {
+    if reflect.TypeOf<R>().Kind == reflect.Kind.Slice && reflect.TypeOf<R>().Elem.Kind != reflect.Kind.Uint8 {
+        reflect.Error("data: Select: a collection (" + reflect.TypeOf<R>().Name + ") is not a value: select len(...), data.Count(...) or data.Any(...)")
+    }
+    if reflect.TypeOf<R>().Kind == reflect.Kind.Pointer &&
+        reflect.TypeOf<R>().Elem.Kind == reflect.Kind.Struct &&
+        reflect.TypeOf<R>().Elem != reflect.TypeOf<time.Time>() &&
+        reflect.TypeOf<R>().Elem != reflect.TypeOf<math.big.Decimal>() {
+        reflect.Error("data: Select: an entity (" + reflect.TypeOf<R>().Name + ") is not a value: select its columns")
+    }
+}
+
+// Sum and Average need numbers (compile-time check).
+func numberCheck<N>(what string) {
+    if !(reflect.TypeOf<N>().Kind == reflect.Kind.Int ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Int8 ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Int16 ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Int32 ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Uint ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Uint8 ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Uint16 ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Uint32 ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Float ||
+        reflect.TypeOf<N>().Kind == reflect.Kind.Float32 ||
+        reflect.TypeOf<N>() == reflect.TypeOf<math.big.Decimal>() ||
+        (reflect.TypeOf<N>().Kind == reflect.Kind.Pointer &&
+            (reflect.TypeOf<N>().Elem.Kind == reflect.Kind.Int ||
+                reflect.TypeOf<N>().Elem.Kind == reflect.Kind.Int32 ||
+                reflect.TypeOf<N>().Elem.Kind == reflect.Kind.Float))) {
+        reflect.Error("data: Sum and Average need a number, found " + reflect.TypeOf<N>().Name)
+    }
+}
+
+// The row mapper of a projection of shape sh.
+func rowMapper<R>(sh *rowShape) func([]any, *R) void! {
+    return func(vals []any, r *R) void! {
+        if sh == nil {
+            return error("data: the projection could not be translated")
+        }
+        mapRow<R>(sh, vals, r)?
+    }
+}
+
+func toFloat(v any) float {
+    switch v {
+    case int n:
+        return float(n)
+    case float f:
+        return f
+    case int32 n:
+        return float(n)
+    case float32 f:
+        return float(f)
+    }
+    return 0.0
+}
+
+// The join fragment and the result selection of Join.
+func joinInto(cm *ctxModel, outer *entModel, inner *entModel, ok *expr.Node, ik *expr.Node, res *expr.Node, j *plan, p *plan) void! {
+    var cx1 = newTcx(cm, ok, 0)
+    cx1.bindEntity(0, outer, "t0")
+    var oks = keyValues(cx1, ok)?
+    var cx2 = newTcx(cm, ik, len(cx1.args))
+    cx2.bindEntity(0, inner, "t1")
+    var iks = keyValues(cx2, ik)?
+    if len(oks) != len(iks) {
+        return untranslatable("the outer and inner keys of Join must have the same number of values")
+    }
+    j.pg = " JOIN " + quoteIdent(inner.meta.Table) + " AS t1 ON "
+    j.lite = j.pg
+    for i, a in oks {
+        if i > 0 {
+            j.pg = j.pg + " AND "
+            j.lite = j.lite + " AND "
+        }
+        j.pg = j.pg + a.pg + " = " + iks[i].pg
+        j.lite = j.lite + a.lite + " = " + iks[i].lite
+    }
+    j.vals = treeArgs(cx1, expr.Values(ok))
+    for a in treeArgs(cx2, expr.Values(ik)) {
+        j.vals = append(j.vals, a)
+    }
+    var cx3 = newTcx(cm, res, 0)
+    cx3.bindEntity(0, outer, "t0")
+    cx3.bindEntity(1, inner, "t1")
+    projection(cx3, res, p)?
+    p.vals = treeArgs(cx3, expr.Values(res))
+}
+
+// The arguments of the markers of cx over the tree's values.
+func treeArgs(cx *tcx, vals []any) []any {
+    var out []any = []
+    for i, o in cx.args {
+        if cx.lists[i] {
+            out = append(out, listValue(vals[o]))
+        } else {
+            out = append(out, argValue(vals[o]))
+        }
+    }
+    return out
+}
+
+// One assignment of ExecuteUpdate: a constant (its driver value) or a
+// tree over the row.
+struct setter {
+    col    string
+    value  any
+    isTree bool
+    tree   *expr.Node
+    vals   []any
+}
+
+// The assignments of ExecuteUpdate: s.Set((u) => u.Done, true) or
+// s.SetWith((u) => u.N, (u) => u.N + 1).
+struct Setters<T> {
+    items []setter
+
+    // Sets a column to a value.
+    func Set<V>(col expr<func(*T) V>, value V) Setters<T> {
+        var s = *this
+        var v any = nil
+        if reflect.TypeOf<V>().Kind == reflect.Kind.Enum {
+            v = fmt.Format("{0}", value)
+        } else {
+            v = database.sql.argOf(value)
+        }
+        s.items = appendSetter(s.items, setter{col: paramField(col.Root()), value: v, isTree: false, tree: nil, vals: []})
+        return s
+    }
+
+    // Sets a column to an expression over the row.
+    func SetWith<V>(col expr<func(*T) V>, value expr<func(*T) V>) Setters<T> {
+        var s = *this
+        var root = value.Root()
+        s.items = appendSetter(s.items, setter{col: paramField(col.Root()), value: nil, isTree: true, tree: root, vals: expr.Values(root)})
+        return s
+    }
+}
+
+func appendSetter(xs []setter, x setter) []setter {
+    var out []setter = []
+    for y in xs {
+        out = append(out, y)
+    }
+    out = append(out, x)
+    return out
+}
+
+// The SET list of ExecuteUpdate.
+struct updParts {
+    pg   string
+    lite string
+    args []any
+    err  string
+}
+
+func updateParts(cm *ctxModel, em *entModel, items []setter) updParts {
+    var u = updParts{pg: "", lite: "", args: [], err: ""}
+    try updateInto(cm, em, items, &u) catch err {
+        u.err = err.Message()
+    }
+    return u
+}
+
+func updateInto(cm *ctxModel, em *entModel, items []setter, u *updParts) void! {
+    if len(items) == 0 {
+        return error("data: ExecuteUpdate needs at least one s.Set(...)")
+    }
+    for i, it in items {
+        if i > 0 {
+            u.pg = u.pg + ", "
+            u.lite = u.lite + ", "
+        }
+        var ci = em.colOf(it.col)
+        if ci < 0 {
+            return error("data: the first argument of Set selects one column of " + em.meta.Entity + ": (u) => u.Name")
+        }
+        var c = em.meta.Columns[ci]
+        if c.Key {
+            return error("data: the key " + c.Field + " cannot be updated")
+        }
+        var lhs = quoteIdent(c.Name) + " = "
+        if it.isTree {
+            var cx = newTcx(cm, it.tree, len(u.args))
+            cx.bindEntity(0, em, "t0")
+            var v = trValue(cx, it.tree)?
+            u.pg = u.pg + lhs + v.pg
+            u.lite = u.lite + lhs + v.lite
+            for a in treeArgs(cx, it.vals) {
+                u.args = append(u.args, a)
+            }
+        } else {
+            if it.value == nil && !c.Nullable {
+                return error("data: " + c.Field + " is not nullable")
+            }
+            var m = "{?" + strconv.Itoa(len(u.args)) + "}"
+            u.pg = u.pg + lhs + m
+            u.lite = u.lite + lhs + m
+            u.args = append(u.args, it.value)
+        }
+    }
+}
+
+// ---- navigations in query lambdas ---------------------------------------------------
+//
+// Translated to correlated subqueries (data.Any(u.Orders, (o) => o.Total >
+// 100) is EXISTS (SELECT 1 FROM "orders" ...)); the functions also work in
+// memory. len(u.Orders) is the COUNT(*) subquery.
+
+// Whether p holds for some element of xs.
+@expr.call
+func Any<E>(xs []E, p func(E) bool) bool {
+    for x in xs {
+        if p(x) {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether p holds for every element of xs.
+@expr.call
+func All<E>(xs []E, p func(E) bool) bool {
+    for x in xs {
+        if !p(x) {
+            return false
+        }
+    }
+    return true
+}
+
+// The number of elements of xs for which p holds.
+@expr.call
+func Count<E>(xs []E, p func(E) bool) int {
+    var n = 0
+    for x in xs {
+        if p(x) {
+            n += 1
+        }
+    }
+    return n
+}
+
+// The sum of f over xs.
+@expr.call
+func Sum<E, N: Add>(xs []E, f func(E) N) N {
+    var s N
+    for x in xs {
+        s = s + f(x)
+    }
+    return s
+}
+
+@expr.call
+func Min<E, N: Ordered>(xs []E, f func(E) N) N {
+    var m N
+    for i, x in xs {
+        var v = f(x)
+        if i == 0 || v < m {
+            m = v
+        }
+    }
+    return m
+}
+
+@expr.call
+func Max<E, N: Ordered>(xs []E, f func(E) N) N {
+    var m N
+    for i, x in xs {
+        var v = f(x)
+        if i == 0 || v > m {
+            m = v
+        }
+    }
+    return m
+}
+
+// The average of f over xs.
+@expr.call
+func Average<E, N>(xs []E, f func(E) N) float {
+    var s = 0.0
+    for x in xs {
+        s += toFloat(f(x))
+    }
+    if len(xs) == 0 {
+        return 0.0
+    }
+    return s / float(len(xs))
 }

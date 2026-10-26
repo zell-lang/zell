@@ -1,0 +1,3 @@
+-- data: expression cannot be translated to SQL: User.Cache is not mapped to a column (@ignore) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)
+data: expression cannot be translated to SQL: User.Cache is not mapped to a column (@ignore) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)
+data: expression cannot be translated to SQL: User.Cache is not mapped to a column (@ignore) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)

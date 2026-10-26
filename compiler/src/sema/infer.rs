@@ -237,12 +237,6 @@ impl<'a> Sema<'a> {
             return e;
         }
         self.types_with_check(t, targs, span);
-        // data: models, contexts and migrations generated at compile time (orm.rs).
-        if recv.is_none() {
-            if let Some(e) = self.orm_generic_call(t, targs, args, span) {
-                return e;
-            }
-        }
         self.force_template(t);
         let tm = &self.gen.templates[t as usize];
         let (decl, name) = match tm.decl {

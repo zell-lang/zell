@@ -1,4 +1,4 @@
-// error: User has no field Email
+// error: User has no field or method Email
 // status: passing
 namespace spec.data.err_unknown_field
 

@@ -1,4 +1,4 @@
-// error: string method Split is not supported
+// error: cannot call method Split on value of type string
 // status: passing
 namespace spec.data.err_unsupported_method
 

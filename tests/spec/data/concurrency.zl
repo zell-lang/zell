@@ -74,7 +74,7 @@ async func main() void! {
         a.Accounts.Add(new Account{Owner: "dan", Balance: 10})
         _ = await a.SaveChanges()?
         await a.Transaction(async () => {
-            _ = await a.Accounts.Where((x) => x.Owner == "ann").ExecuteUpdate((s) => s.Set((x) => x.Balance, (x) => x.Balance - 10))?
+            _ = await a.Accounts.Where((x) => x.Owner == "ann").ExecuteUpdate((s) => s.SetWith((x) => x.Balance, (x) => x.Balance - 10))?
         })?
         println("inside:", await a.Accounts.Count()?, await total(a)?)
         return error("abort")

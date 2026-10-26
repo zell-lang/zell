@@ -1,4 +1,4 @@
-// error: expression cannot be translated to SQL: function isAdult cannot be translated
+// error: call of spec.data.err_untranslatable_call.isAdult is not allowed in an expression tree
 // status: passing
 namespace spec.data.err_untranslatable_call
 

@@ -45,7 +45,7 @@ async func main() void! {
     ctx.ClearTracker()
     ctx.LogTo((s) => println("  sql:", s))
     var limit = 1
-    var n = await ctx.Tasks.Where((t) => t.Priority <= limit).ExecuteUpdate((s) => s.Set((t) => t.Done, true).Set((t) => t.Priority, (t) => t.Priority + 10).Set((t) => t.Owner, nil))?
+    var n = await ctx.Tasks.Where((t) => t.Priority <= limit).ExecuteUpdate((s) => s.Set((t) => t.Done, true).SetWith((t) => t.Priority, (t) => t.Priority + 10).Set((t) => t.Owner, nil))?
     println("updated", n)
     var d = await ctx.Tasks.Where((t) => !t.Done).OrderBy((t) => t.Id).Take(1).ExecuteDelete()?
     println("deleted", d)

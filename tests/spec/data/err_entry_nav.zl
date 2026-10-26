@@ -1,4 +1,4 @@
-// error: User has no navigation Invoices
+// error: User has no field or method Invoices
 // status: passing
 namespace spec.data.err_entry_nav
 
@@ -25,5 +25,5 @@ struct Shop {
 async func main() void! {
     var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
     var u = await ctx.Users.First()?
-    await ctx.Entry(u).Collection("Invoices").Load()?
+    await ctx.Entry(u).Collection((u) => u.Invoices).Load()?
 }

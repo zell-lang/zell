@@ -95,14 +95,14 @@ async func run(ctx *Library, label string) void! {
     ctx.ClearTracker()
 
     var since = t.AddDate(10, 0, 0)
-    var young = await ctx.Authors.Where((a) => a.Born > since && a.Name.Contains("an")).Select((a) => a.Name).ToList()?
+    var young = await ctx.Authors.Where((a) => a.Born > since && strings.Contains(a.Name, "an")).Select((a) => a.Name).ToList()?
     println("young", young)
-    var paper = await ctx.Books.Where((b) => b.Kind == Kind.Paper && (b.Author == nil || b.Author.Name.StartsWith("Le"))).OrderBy((b) => b.Title).Select((b) => (b.Title, b.Price, b.InPrint)).ToList()?
+    var paper = await ctx.Books.Where((b) => b.Kind == Kind.Paper && (b.Author == nil || strings.HasPrefix(b.Author.Name, "Le"))).OrderBy((b) => b.Title).Select((b) => (b.Title, b.Price, b.InPrint)).ToList()?
     for x in paper {
         var (ti, pr, ip) = x
         println(" ", ti, pr.String(), ip)
     }
-    println("count", await ctx.Books.Count()?, await ctx.Books.Count((b) => b.InPrint)?, await ctx.Books.Any((b) => b.Title.EndsWith("119"))?)
+    println("count", await ctx.Books.Count()?, await ctx.Books.Count((b) => b.InPrint)?, await ctx.Books.Any((b) => strings.HasSuffix(b.Title, "119"))?)
     println("sum", await ctx.Books.Sum((b) => len(b.Title))?, (await ctx.Books.Min((b) => b.Price)?).String(), await ctx.Books.Max((b) => b.Title)?, (await ctx.Authors.Min((a) => a.Born)?).Year())
     var groups = await ctx.Books.GroupBy((b) => b.Kind).OrderBy((g) => g.Count()).Select((g) => (g.Key, g.Count(), g.Max((b) => b.Version))).ToList()?
     for g in groups {
@@ -130,7 +130,7 @@ async func run(ctx *Library, label string) void! {
     println("changed", ctx.Entry(es).ChangedColumns())
     _ = await ctx.SaveChanges()?
     println("version", es.Version)
-    var n = await ctx.Books.Where((b) => b.Kind == Kind.Ebook && !b.InPrint).ExecuteUpdate((s) => s.Set((b) => b.InPrint, true).Set((b) => b.Version, (b) => b.Version + 1))?
+    var n = await ctx.Books.Where((b) => b.Kind == Kind.Ebook && !b.InPrint).ExecuteUpdate((s) => s.Set((b) => b.InPrint, true).SetWith((b) => b.Version, (b) => b.Version + 1))?
     println("bulk", n)
     // a second context changes the book: the first one gets a conflict
     var other = OpenDB<Library>(ctx.Provider(), ctx.DB())

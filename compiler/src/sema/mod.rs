@@ -60,9 +60,6 @@ mod suggest;
 pub mod stdlib;
 pub mod units;
 // >>> data (docs/FRAMEWORK.md section 3)
-mod orm;
-mod orm_model;
-mod orm_sql;
 // <<< data
 pub mod stdlib_docs;
 
@@ -81,19 +78,6 @@ pub use resolve::{ImportPolicy, PackageScope};
 /// ([`Diagnostic::file`]). Returns `None` if any error was reported.
 pub fn analyze(files: &[ast::File], diags: &mut Diagnostics) -> Option<hir::Program> {
     analyze_with_policy(files, diags, None)
-}
-
-/// Analyses `files` like [`analyze`] and returns the `data` model of
-/// every context as JSON (the migrations snapshot, see `crate::datacli`),
-/// or `None` if any error was reported.
-pub fn analyze_data_model(files: &[ast::File], diags: &mut Diagnostics) -> Option<String> {
-    let files: Vec<&ast::File> = files.iter().collect();
-    let mut s = Sema::new(&files, diags);
-    s.run();
-    if s.diags.has_errors() {
-        return None;
-    }
-    Some(s.orm_model_json())
 }
 
 /// [`analyze`] with an optional [`ImportPolicy`] restricting which root
@@ -414,7 +398,6 @@ pub(crate) struct Sema<'a> {
     /// Reflection state (lazily loaded library sources, compile-time fields).
     pub(crate) refl: reflect::ReflState,
     /// data compile-time expansion (models, query translation).
-    pub(crate) orm: orm_model::OrmState,
     /// Unit mode for incremental IDE analysis (see [`units`]); `None` =
     /// an ordinary analysis.
     pub(crate) unit: Option<Box<units::UnitState>>,
@@ -469,7 +452,6 @@ impl<'a> Sema<'a> {
             cancel: None,
             gen: generics::GenState::default(),
             refl: reflect::ReflState::default(),
-            orm: orm_model::OrmState::default(),
             unit: None,
         }
     }

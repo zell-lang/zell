@@ -1,8 +1,8 @@
 //! `zell data ...`: migrations of `data` (docs/FRAMEWORK.md section 3).
 //!
-//! * `zell data migration add <Name>` type-checks the project, takes the
-//!   model of its contexts from the compiler (attributes, conventions and
-//!   `Configure`, see `sema/orm_model.rs`), compares it with
+//! * `zell data migration add <Name>` builds the project with a generated
+//!   `main` that prints the model of its contexts (`data.ModelJson<C>()`:
+//!   attributes, conventions and `Configure`, built by the library), compares it with
 //!   `migrations/snapshot.json` and writes `migrations/<timestamp>_<Name>.zl`:
 //!   a struct with `@migration("<timestamp>_<Name>")` whose `Up`/`Down`
 //!   methods call the `data.Migrator` API (`CreateTable`, `AddColumn`,
@@ -111,7 +111,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
 // -- model --------------------------------------------------------------------------
 
-/// The model of the project's contexts (type-checking it).
+/// The model of the project's contexts: the project is built with a
+/// generated `main` (its own `main` renamed, as `zell test` does) that
+/// prints `data.ModelJson<C>()` of every context (a struct embedding
+/// `data.Context`), and run. The model is built by the `data` library from
+/// reflection and the contexts' `Configure`, exactly as at run time.
 pub fn project_model(project: &Path) -> Result<Value, String> {
     let paths = crate::driver::collect_files(project).map_err(|e| format!("cannot read {}: {e}", project.display()))?;
     if paths.is_empty() {
@@ -119,19 +123,75 @@ pub fn project_model(project: &Path) -> Result<Value, String> {
     }
     let files = crate::driver::load(&paths).map_err(|e| format!("cannot read source: {e}"))?;
     let mut diags = Diagnostics::new();
-    let model = (|| {
-        let mut asts = crate::driver::parse_all(&files, &mut diags)?;
-        if !crate::driver::apply_cfg(&mut asts, &files, &crate::cfg::CfgEnv::current(), &mut diags) {
-            return None;
-        }
-        let paths = files.iter().map(|f| f.path.clone()).collect();
-        crate::sema::stdlib::with_source_paths(paths, || crate::sema::analyze_data_model(&asts, &mut diags))
-    })();
-    if !diags.is_empty() {
+    let Some(asts) = crate::driver::parse_all(&files, &mut diags) else {
         eprint!("{}", diags.render_all_files(&files));
+        return Err("compilation failed".into());
+    };
+    let mut contexts = Vec::new();
+    let mut sources = Vec::new();
+    for (f, ast) in files.iter().zip(&asts) {
+        let ns = ast.namespace.to_string();
+        let imports_data = ast.imports.iter().any(|i| i.path.to_string() == "data");
+        let mut mains = Vec::new();
+        for d in &ast.decls {
+            match d {
+                crate::ast::Decl::Struct(st) => {
+                    let ctx = st.embeds.iter().any(|t| match &t.kind {
+                        crate::ast::TypeKind::Named { path, .. } => {
+                            let p = path.to_string();
+                            p == "data.Context" || (p == "Context" && imports_data)
+                        }
+                        _ => false,
+                    });
+                    if ctx && st.generics.is_empty() {
+                        contexts.push(if ns.is_empty() { st.name.name.clone() } else { format!("{ns}.{}", st.name.name) });
+                    }
+                }
+                crate::ast::Decl::Func(func) if func.name.name == "main" => mains.push((func.name.span.start as usize, func.name.span.end as usize)),
+                _ => {}
+            }
+        }
+        let mut text = f.text.clone();
+        for (s, e) in mains.into_iter().rev() {
+            text.replace_range(s..e, "zellUserMain__");
+        }
+        sources.push(crate::span::SourceFile::new(f.path.clone(), text));
     }
-    let model = model.ok_or("compilation failed")?;
-    serde_json::from_str(&model).map_err(|e| format!("internal error: model JSON: {e}"))
+    if contexts.is_empty() {
+        return Err("the project has no context (a struct embedding data.Context with data.Set<T> fields)".into());
+    }
+    let mut main = String::from("namespace zelldatamodel__\n\nimport data\nimport io\n\nfunc main() {\n");
+    for c in &contexts {
+        main.push_str(&format!("    println(data.ModelJson<{c}>())\n"));
+    }
+    main.push_str("}\n");
+    sources.push(crate::span::SourceFile::new(project.join("<zell data model>.zl").display().to_string(), main));
+    let tmp = std::env::temp_dir().join(format!("zell_data_model_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    let exe = tmp.join("model");
+    let opts = crate::build::BuildOptions::new(project);
+    let out = crate::build::build_sources(sources, &exe, &opts).and_then(|exe| std::process::Command::new(&exe).output().map_err(|e| format!("cannot run {}: {e}", exe.display())));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let out = out?;
+    if !out.status.success() {
+        return Err(format!("building the model failed:\n{}", String::from_utf8_lossy(&out.stderr)));
+    }
+    // one JSON object per context: {"name", "namespace", "sets", "tables"} or {"error"}
+    let mut ctxs = Vec::new();
+    let mut all: Vec<Value> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.trim().is_empty()) {
+        let v: Value = serde_json::from_str(line).map_err(|e| format!("internal error: model JSON: {e}"))?;
+        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+            return Err(e.to_string());
+        }
+        for t in arr(&v, "tables") {
+            if !all.iter().any(|x| s(x, "name") == s(&t, "name")) {
+                all.push(t);
+            }
+        }
+        ctxs.push(json!({"name": v["name"].clone(), "namespace": v["namespace"].clone(), "sets": v["sets"].clone()}));
+    }
+    Ok(json!({"version": 1, "contexts": ctxs, "tables": all}))
 }
 
 fn tables(v: &Value) -> Vec<Value> {

@@ -353,11 +353,6 @@ impl<'a> Sema<'a> {
             Ok(e) => return e,
             Err(b) => b,
         };
-        // data: query lambdas translated to SQL at compile time (orm.rs).
-        let base = match self.orm_method_call(base, name, targs, args, span) {
-            Ok(e) => return e,
-            Err(b) => b,
-        };
         // `t.Cancel()` on a `Task<T>`: cancels that task and its descendants
         // (DESIGN.md «Отмена»); idempotent, a no-op on a completed task.
         if matches!(self.tt.get(base.ty), Type::Task(_)) && name.name == "Cancel" {

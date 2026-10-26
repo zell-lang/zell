@@ -1,4 +1,4 @@
-// error: expected a condition (bool), found int
+// error: cannot use lambda of type func(*User) int as expression tree expr<func(*User) bool>
 // status: passing
 namespace spec.data.err_not_bool
 

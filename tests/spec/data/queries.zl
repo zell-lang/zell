@@ -1,4 +1,4 @@
-// test: data queries translated at compile time: Where with comparisons, &&/||/!, arithmetic, string Contains/StartsWith/EndsWith/ToUpper/ToLower/len, nil checks and nullable fields, time comparisons, captured variables and calls as parameters, slices.Contains as IN, navigation Any/Count subqueries, OrderBy/ThenByDescending, Skip/Take, Distinct; ToSql for SQLite and PostgreSQL and the results
+// test: data queries on expression trees translated by the library: Where with comparisons, &&/||/!, arithmetic, strings.HasPrefix/HasSuffix/Contains/ToUpper/ToLower, len, nil checks and nullable fields, time comparisons, captured variables, calls and constants as parameters, slices.Contains as IN, navigation data.Any/len subqueries, OrderBy/ThenByDescending, Skip/Take, Distinct; ToSql for SQLite and PostgreSQL and the results
 // status: passing
 // run-flags: --leak-check
 namespace spec.data.queries
@@ -51,22 +51,22 @@ async func main() void! {
     _ = await ctx.SaveChanges()?
 
     var minAge = 18
-    var q = ctx.Users.Where((u) => u.Age != nil && *u.Age >= minAge && !u.Admin || u.Name.StartsWith("A"))
+    var q = ctx.Users.Where((u) => u.Age != nil && *u.Age >= minAge && !u.Admin || strings.HasPrefix(u.Name, "A"))
     println(q.ToSql())
-    println(pg.Users.Where((u) => u.Age != nil && *u.Age >= minAge && !u.Admin || u.Name.StartsWith("A")).ToSql())
+    println(pg.Users.Where((u) => u.Age != nil && *u.Age >= minAge && !u.Admin || strings.HasPrefix(u.Name, "A")).ToSql())
     for u in await q.OrderBy((u) => u.Name).ToList()? {
         println(" ", u.Name)
     }
 
     var domain = "@a.io"
-    var q2 = ctx.Users.Where((u) => u.Email.EndsWith(domain) && u.Joined < cutoff() && len(u.Name) == 3)
+    var q2 = ctx.Users.Where((u) => strings.HasSuffix(u.Email, domain) && u.Joined < cutoff() && len(u.Name) == 3)
     println(q2.ToSql(), q2.Args())
-    println(pg.Users.Where((u) => u.Email.EndsWith(domain) && u.Joined < cutoff() && len(u.Name) == 3).ToSql())
+    println(pg.Users.Where((u) => strings.HasSuffix(u.Email, domain) && u.Joined < cutoff() && len(u.Name) == 3).ToSql())
     println((await q2.Single()?).Name)
 
-    var q3 = ctx.Users.Where((u) => u.Name.ToLower().Contains("e") || u.Email.ToUpper() == "BOB@B.IO")
+    var q3 = ctx.Users.Where((u) => strings.Contains(strings.ToLower(u.Name), "e") || strings.ToUpper(u.Email) == "BOB@B.IO")
     println(q3.ToSql())
-    println(pg.Users.Where((u) => u.Name.ToLower().Contains("e") || u.Email.ToUpper() == "BOB@B.IO").ToSql())
+    println(pg.Users.Where((u) => strings.Contains(strings.ToLower(u.Name), "e") || strings.ToUpper(u.Email) == "BOB@B.IO").ToSql())
     println(await q3.Count()?)
 
     var ids = [bob.Id, cid.Id, 99]
@@ -75,7 +75,7 @@ async func main() void! {
     println(pg.Users.Where((u) => slices.Contains(ids, u.Id) && u.Age == nil).ToSql())
     println((await q4.First()?).Name)
 
-    var q5 = ctx.Users.Where((u) => u.Orders.Any((o) => o.Total * 2 > 200) || u.Orders.Count() >= 1 && !u.Admin)
+    var q5 = ctx.Users.Where((u) => data.Any(u.Orders, (o) => o.Total * 2 > 200) || len(u.Orders) >= 1 && !u.Admin)
     println(q5.ToSql())
     for u in await q5.OrderBy((u) => u.Id).ToList()? {
         println(" ", u.Name)
@@ -88,7 +88,7 @@ async func main() void! {
         println(" ", u.Name)
     }
     println(ctx.Users.Skip(3).ToSql())
-    var domains = await ctx.Users.Select((u) => u.Email.EndsWith("@a.io")).Distinct().ToList()?
+    var domains = await ctx.Users.Select((u) => strings.HasSuffix(u.Email, "@a.io")).Distinct().ToList()?
     println(len(domains))
     println(await ctx.Users.Where((u) => u.Id % 2 == 0 && u.Id - 1 >= 1).Select((u) => u.Name).ToList()?)
 }

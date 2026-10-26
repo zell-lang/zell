@@ -1,4 +1,4 @@
-// error: the collection Orders is not a value
+// error: data: Select: a collection ([]*Order) is not a value
 // status: passing
 namespace spec.data.err_collection_value
 

@@ -3033,7 +3033,7 @@ HMAC — собственная реализация на C по FIPS 180-4 / RF
 | `regex` | синтаксис RE2 (классы, `\p{L}`, именованные группы, флаги `(?i)(?m)(?s)`), гарантированно линейное время (Pike VM + ленивый DFA + литеральный префильтр), без backreferences и lookbehind. Литеральные паттерны проверяются при компиляции, `const` паттерны компилируются заранее. API: `Compile(p) Regex!`, `Pattern(lit)`, `Match`, `Find`, `FindAll`, `Groups` (по имени и индексу), `Replace` с `${name}`, `ReplaceFunc`, `Split`, `Iter`, `Escape`. Движок на Zell |
 | `unicode` | классификация символов, нормализация (✓ классы и регистр по таблицам Unicode 15, `utf8`, `utf16`; нет нормализации) |
 | `database.sql` | единый асинхронный интерфейс к SQL с пулом и `Query<T>`; драйверы `database.postgres` (на Zell) и `database.sqlite` (системная libsqlite3) — ✓ (см. `docs/FRAMEWORK.md` §3); MySQL позже |
-| `data` | ORM уровня EF Core (`zell.data`) — ✓: модель из атрибутов и соглашений, `data.Context` с `data.Set<T>`, запросы с лямбдами, переведёнными в SQL при компиляции, change tracking, миграции (`zell data ...`); PostgreSQL и SQLite (см. `docs/FRAMEWORK.md` §3) |
+| `data` | ORM уровня EF Core (`zell.data`) — ✓, обычный библиотечный код: модель из рефлексии, атрибутов и соглашений, `data.Context` с `data.Set<T>`, запросы с лямбдами-деревьями выражений (`expr<F>`), переведёнными в SQL библиотекой, change tracking, миграции (`zell data ...`); PostgreSQL и SQLite (см. `docs/FRAMEWORK.md` §3) |
 | `data.redis` | клиент Redis на Zell (уровень 3б `docs/STDLIB.md`) — ✓: RESP2/RESP3 (`HELLO 3` с откатом на RESP2), `redis.Connect(url)` (`redis://`, `rediss://`, `unix://`, AUTH, SELECT, параметры пула в URL), типизированные команды методами (`Get/Set/SetEx/SetNX/Del/Exists/Incr/Expire/TTL/MGet/MSet/H*/L*/S*/Z*/PF*/XAdd/XRange/Keys/Scan/Publish/Eval/EvalSha/Script*`; несколько значений — срезом, вариадиков нет) и `Do(args []any) Reply!`; отсутствующее значение — `redis.Nil`, ошибка сервера — `redis.Error{Code, Text}`; пул с проверкой простаивающих (PING), сроком жизни, ожиданием с таймаутом (`ErrPoolTimeout`), повторами с backoff; `Pipeline()` — задачи команд завершаются после `Exec` (одна запись в сокет); `TxPipeline` (MULTI/EXEC), `Watch(keys, fn)` (`ErrTxFailed`); `NewScript` + `Run` (EVALSHA → EVAL при NOSCRIPT); `Subscribe/PSubscribe` с `for msg in sub` и переподключением; таймауты через контекст задачи; **Sentinel** (`ConnectSentinel`: поиск мастера, подписка на `+switch-master`, повторный опрос при READONLY/сетевой ошибке, чтение с реплик); **Cluster** (`ConnectCluster`: карта слотов из `CLUSTER SLOTS`, CRC16 и hash tags, MOVED/ASK, многоключевые команды в одном слоте — иначе `ErrCrossSlot`, широковещательные FLUSHALL/KEYS/DBSIZE); `GetJSON<T>/SetJSON<T>` и `redis.Get<T>/Set<T>`. Проверено на redis-server 7.0 (TLS, Sentinel с отказом мастера, Cluster из 3 узлов с миграцией слота) |
 | `data.kafka` | клиент Kafka на Zell без C — ✓: протокол (ApiVersions 0, Metadata 1, Produce 7/3, Fetch 10/4, ListOffsets 1, FindCoordinator 1, JoinGroup 2, SyncGroup 1, Heartbeat 1, LeaveGroup 1, OffsetCommit 2, OffsetFetch 1, SaslHandshake 1, SaslAuthenticate 0, CreateTopics 2, DeleteTopics 1, InitProducerId 0), record batch v2 (CRC-32C, gzip, zstd; snappy/lz4 нет), `NewProducer(brokers, opts)` с батчами по размеру и `LingerMs`, acks, идемпотентностью (producer id + последовательности), разбиением по murmur2 как в Java-клиенте и round-robin, `Send(topic, key, value) Task<RecordMetadata!>`; `NewConsumer(brokers, group, topics)` — группы (range/round-robin, ребаланс, heartbeat в фоновой задаче, авто- и ручной commit), `for rec in consumer`, `Poll`, `Seek`; `NewAdmin` (create/delete/list/describe); TLS, SASL PLAIN/SCRAM-SHA-256/512, обновление метаданных при смене лидера, повторы с backoff. Проверено на Kafka 3.7 (KRaft) |
 | `cloud.s3`, `cloud.blob` | клиент S3 на Zell — ✓: AWS Signature V4 (заголовки и presigned URL; векторы AWS и botocore), `s3.NewClient(Config{Endpoint, Region, AccessKey, SecretKey, SessionToken, PathStyle})` для AWS, MinIO, R2, GCS; `PutObject` (тип, метаданные, ACL, `If-None-Match`), `GetObject` потоком и диапазоном, `GetObjectBytes`, `HeadObject`, `DeleteObject(s)`, `ListObjectsV2` и итератор `List` с префиксами и разделителем, `CopyObject`, бакеты (`Create/Delete/List/Exists`), multipart `Upload(bucket, key, reader, partSize, concurrency)` с параллельными частями и отменой при ошибке, `Presign`, типизированные ошибки (`s3.Error`, `ErrNoSuchKey`…), повторы при 5xx/SlowDown, учётные данные из env, `~/.aws/credentials` и IMDSv2; `cloud.blob.Bucket` поверх S3 (`OpenS3`) и каталога (`OpenDir`). Проверено на MinIO |
@@ -3047,7 +3047,7 @@ HMAC — собственная реализация на C по FIPS 180-4 / RF
 ### Фреймворк
 
 Поверх стандартной библиотеки строится фреймворк уровня ASP.NET Core:
-`zell.data` (ORM уровня EF Core с переводом лямбд в SQL при компиляции и
+`zell.data` (ORM уровня EF Core с переводом лямбд-деревьев выражений в SQL и
 миграциями; реализован как `data`, см. ниже), `zell.log` (структурированный логгер уровня Serilog с sinks и
 enrichers), `zell.diag` (профилировщик CPU/памяти/задач в формате pprof,
 метрики, OpenTelemetry, `zell tool pprof`). Подробно: `docs/FRAMEWORK.md`.
@@ -3059,27 +3059,31 @@ OpenAPI) жил в stdlib как `web` и раскрывался компиля�
 пакетом `zell-lang/web` (docs/FRAMEWORK.md, «План»). Корень `web` не
 зарезервирован за stdlib.
 
-**Перевод лямбд в SQL при компиляции (`data`).** `zell.data` тоже
-живёт в stdlib как `data` (docs/FRAMEWORK.md §3). Лямбда, переданная
-литералом в `Where`, `OrderBy`, `Select`, `GroupBy`, `Join`, `Sum`,
-`ExecuteUpdate`, ... у получателя `data.Set<T>`/`data.Query<T>`, не
-становится замыканием: компилятор (`sema/orm_sql.rs`) обходит её тело, где
-параметр означает строку таблицы (`t0`), и строит фрагмент SQL сразу для
-обоих диалектов (PostgreSQL и SQLite): поля — столбцы по модели
-(атрибуты `@table/@key/@column/...`, соглашения, `Configure`), операторы,
-`&&`/`||`/`!`, `nil`-проверки, строковые `Contains/StartsWith/EndsWith/
-ToUpper/ToLower`, `len`, `slices.Contains` (`IN`), навигации (`EXISTS`,
-скалярные подзапросы). Каждое подвыражение, не упоминающее параметр
-(захваченные переменные, вызовы вроде `time.Now()`), вычисляется один раз
-в объемлющей области и уходит в запрос параметром. В HIR вызов становится
-вызовом метода библиотеки с SQL в виде строковых констант (`{?i}` —
-место параметра) и срезом аргументов; `Select` ещё порождает типизированный
-маппер строки в кортеж, структуру или скаляр, а `data.Open<C>()` и
-`modelOf<T>()` — модель и доступ к полям без рефлексии во время
-выполнения. Всё, что нельзя перевести (вызов своей функции, метод без
-SQL-аналога, `await`, сравнение несовместимых типов), — ошибка компиляции
-`expression cannot be translated to SQL: ...` с подсказкой про
-`AsEnumerable()`, а не тихая загрузка таблицы в память.
+**Перевод лямбд в SQL (`data`).** `zell.data` живёт в stdlib как `data` и
+написан как обычная библиотека — без хуков в компиляторе, поэтому его можно
+вынести пакетом (`docs/EXTRACTION.md`). Операторы запросов принимают
+деревья выражений: `Where(p expr<func(*T) bool>)`, `OrderBy(k
+expr<func(*T) any>)`, `Select<R>(f expr<func(*T) R>)`, `GroupBy<K>`,
+`Join`, `Sum<N>`, ... у `data.Set<T>`/`data.Query<T>` (раздел «Деревья
+выражений»). Библиотека (`data_sql.zl`) обходит дерево, где параметр
+означает строку таблицы (`t0`), и строит фрагмент SQL сразу для обоих
+диалектов (PostgreSQL и SQLite): поля — столбцы по модели (атрибуты
+`@table/@key/@column/...`, соглашения, `Configure`), операторы,
+`&&`/`||`/`!`, `nil`-проверки, `strings.HasPrefix/HasSuffix/Contains/
+ToUpper/ToLower/Trim`, `len`, `slices.Contains` (`IN`), навигации
+(`data.Any(u.Orders, o => ...)`, `len(u.Orders)` — `EXISTS` и скалярные
+подзапросы; функции помечены `@expr.call`). Константы и захваченные
+значения — всегда параметры запроса. Перевод кэшируется по месту лямбды
+(`expr.Expr.SiteId()`) в модели контекста: повторный запрос берёт SQL из
+кэша и читает только значения слотов. Модель сущности строится при первом
+`data.Open<C>()` из таблиц рефлексии и `Configure`, а доступ к полям
+(чтение строки, значения столбцов) развёрнут по `reflect.Fields<T>()` без
+рефлексии во время выполнения. При компиляции проверяются типы: лямбда
+проверяется как обычная (неизвестное поле, несовпадение типов, вызов вне
+списка — ошибки компиляции), а неотображаемый тип поля, `Select` коллекции,
+`Where` после `Select` — ошибки `reflect.Error` в библиотеке. То, что
+зависит от модели (поле `@ignore` в лямбде, отношение без внешнего
+ключа), — ошибка запроса или `data.Open` во время выполнения.
 
 ### GUI
 

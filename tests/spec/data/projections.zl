@@ -58,7 +58,7 @@ async func main() void! {
     }
     var names = await ctx.Customers.OrderBy((x) => x.Name).Select((x) => x.Name + " (" + x.City + ")").ToList()?
     println(names)
-    var stats = await ctx.Customers.OrderBy((x) => x.Id).Select((x) => Stats{City: x.City, Orders: x.Orders.Count()}).ToList()?
+    var stats = await ctx.Customers.OrderBy((x) => x.Id).Select((x) => Stats{City: x.City, Orders: len(x.Orders)}).ToList()?
     for s in stats {
         println(s.City, s.Orders)
     }

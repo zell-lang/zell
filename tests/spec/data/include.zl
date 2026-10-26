@@ -106,10 +106,10 @@ async func main() void! {
     println(byName)
 
     var nobody = await ctx.Authors.FirstOrDefault((a) => a.Name == "Nobody")?
-    await ctx.Entry(nobody).Collection("Books").Load()?
+    await ctx.Entry(nobody).Collection((a) => a.Books).Load()?
     println(nobody.Name, len(nobody.Books))
     var exc = await ctx.Books.FirstOrDefault((b) => b.Title == "Excession")?
     exc.Author = nil
-    await ctx.Entry(exc).Reference("Author").Load()?
+    await ctx.Entry(exc).Reference((b) => b.Author).Load()?
     println(exc.Author.Name, exc.Author.Id == ba.Id, ctx.Entry(exc).State())
 }

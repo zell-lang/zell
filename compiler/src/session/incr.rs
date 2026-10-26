@@ -190,13 +190,6 @@ fn units_of(files: &[(&str, &FileState)]) -> (Vec<Unit>, Vec<usize>) {
             out.push(*u);
         }
     };
-    // The `data` model is built over the whole program (one model of
-    // every context): the units using it see each other.
-    let uses_orm = |u: &Unit| u.files.iter().any(|&fi| {
-        let f = &files[fi].1.facts;
-        f.has_ident("data") || f.imports.iter().any(|i| i == "data" || i.starts_with("data."))
-    });
-    let orm_units: Vec<usize> = (0..units.len()).filter(|&u| uses_orm(&units[u])).collect();
     let mut direct: Vec<Vec<usize>> = vec![Vec::new(); units.len()];
     for (ui, unit) in units.iter().enumerate() {
         let mut out = Vec::new();
@@ -221,9 +214,6 @@ fn units_of(files: &[(&str, &FileState)]) -> (Vec<Unit>, Vec<usize>) {
                     under(r, &mut out);
                 }
             }
-        }
-        if orm_units.binary_search(&ui).is_ok() {
-            out.extend(&orm_units);
         }
         out.sort();
         out.dedup();

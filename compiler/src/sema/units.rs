@@ -42,8 +42,6 @@ pub(crate) enum Req {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MemoKey {
     Inst(InstKey),
-    OrmUniverse,
-    OrmModel(TypeId),
 }
 
 /// [`Inst`] as a hashable key.
@@ -102,7 +100,6 @@ impl UnitState {
             MemoKey::Inst(InstKey::Func(f)) => (*f as usize) < funcs,
             MemoKey::Inst(InstKey::Struct(s)) => (*s as usize) < structs,
             MemoKey::Inst(InstKey::Enum(e)) => (*e as usize) < enums,
-            _ => true,
         });
         self.func_nodes.retain(|f, _| (*f as usize) < funcs);
     }
@@ -221,7 +218,7 @@ impl<'a> Sema<'a> {
     pub(crate) fn unit_skips_instance(&self, fid: FuncId) -> bool {
         let Some(info) = self.gen.insts.get(&fid.0) else { return false };
         let tm = &self.gen.templates[info.root as usize];
-        tm.is_std && !tm.generated && info.env.iter().all(|(_, t)| self.std_only_type(*t, 0))
+        tm.is_std && info.env.iter().all(|(_, t)| self.std_only_type(*t, 0))
     }
 
     /// `t` names no user declaration (and no type parameter).

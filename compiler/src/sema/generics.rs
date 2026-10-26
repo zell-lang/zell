@@ -88,9 +88,6 @@ pub(crate) struct Template<'a> {
     /// Created by the instantiation of a generic struct (checked as part of
     /// the struct's abstract check).
     pub nested: bool,
-    /// Generated from user code (`data` expansions), not a
-    /// library source.
-    pub generated: bool,
     /// A stdlib template whose module is not parsed yet: (module, index of
     /// the declaration); `decl` is a placeholder of the right kind until
     /// [`Sema::force_template`].
@@ -258,7 +255,6 @@ impl<'a> Sema<'a> {
             root: t,
             failed: false,
             nested,
-            generated: false,
             lazy: None,
         });
         t

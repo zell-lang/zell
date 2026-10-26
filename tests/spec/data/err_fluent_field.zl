@@ -1,4 +1,4 @@
-// error: HasIndex: User has no field Mail
+// error: User has no field or method Mail
 // status: passing
 namespace spec.data.err_fluent_field
 

@@ -1,0 +1,27 @@
+// test: relation errors of the model are reported when the model of the context is built (the first data.Open of the context type): a navigation without its foreign key field
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.missing_fk
+
+import io
+
+struct Blog {
+    Id    int
+    Posts []Post
+}
+
+struct Post {
+    Id    int
+    Title string
+}
+
+struct Blogs {
+    data.Context
+    Blogs data.Set<Blog>
+}
+
+func main() {
+    try data.Open<Blogs>(data.Provider.Sqlite, ":memory:") catch err {
+        println(err)
+    }
+}

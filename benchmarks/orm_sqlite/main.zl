@@ -149,7 +149,7 @@ async func main() void! {
     }
     phase("update")
     var stock = await ctx.Products.AsNoTracking().Sum((x) => x.Stock)?
-    var starred = await ctx.Products.AsNoTracking().Where((x) => x.Name.EndsWith("*")).Count()?
+    var starred = await ctx.Products.AsNoTracking().Where((x) => strings.HasSuffix(x.Name, "*")).Count()?
     println("update", changed, stock, starred)
     println("rows", await ctx.Products.Count()?)
 }

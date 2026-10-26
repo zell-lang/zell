@@ -1,4 +1,4 @@
-// error: expression cannot be translated to SQL: mismatched types int and string
+// error: mismatched types int and string for operator ==
 // status: passing
 namespace spec.data.err_type_mismatch
 

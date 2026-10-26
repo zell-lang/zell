@@ -3,17 +3,17 @@ namespace data
 // data: an ORM on database.sql (docs/FRAMEWORK.md section 3).
 //
 // A context is a user struct that embeds Context and has one Set<T> field
-// per entity type; data.Open<C>(provider, dsn) creates it. The model of
-// every entity (table, columns, keys, relations, indexes) is computed by
-// the compiler from attributes, conventions and the context's Configure
-// method (sema/orm.rs) and reaches this code through modelOf<T>(), whose
-// calls the compiler replaces with the constant model and typed accessors
-// of T. Query lambdas (Where, OrderBy, Select, ...) are translated to SQL
-// at compile time; this file and data_query.zl only assemble the
-// fragments, run them and map rows. Change tracking keeps a snapshot of
-// the column values of every tracked entity; SaveChanges writes the
-// differences in one transaction (data_save.zl). Migrations and DDL are
-// in data_migrate.zl.
+// per entity type; data.Open<C>(provider, dsn) creates it. The package is
+// plain library code: the model of every entity (table, columns, keys,
+// relations, indexes) is built from reflection, attributes, conventions
+// and the context's Configure method (data_model.zl), and its typed
+// accessors (row scanning, column values) are unrolled over
+// reflect.Fields<T>(). Query lambdas (Where, OrderBy, Select, ...) are
+// expression trees translated to SQL by data_sql.zl, once per lambda
+// site; data_query.zl assembles the fragments, runs them and maps rows.
+// Change tracking keeps a snapshot of the column values of every tracked
+// entity; SaveChanges writes the differences in one transaction
+// (data_save.zl). Migrations and DDL are in data_migrate.zl.
 
 // ---- attributes -------------------------------------------------------------
 
@@ -170,9 +170,14 @@ struct EntityMeta {
     }
 }
 
-// The model and typed accessors of entity type T (from modelOf<T>()).
+// The model and typed accessors of entity type T in a context model
+// (entityFor<T>, data_model.zl).
+@acyclic
 struct Entity<T> {
     Meta   *EntityMeta
+    em     *entModel
+    // the loaders of the navigations
+    incs   []Include<T>
     // reads the columns at vals[off..] into the entity
     scan   func([]any, int, *T) void!
     // the column values (driver values: int, float, bool, string, []byte, time, nil)
@@ -181,12 +186,6 @@ struct Entity<T> {
     set    func(*T, int, any) void!
     // resets the reference and many-to-many navigations (see ctxState.Drop)
     unlink func(*T)
-}
-
-// The model and accessors of T. Calls are replaced by the compiler with
-// the constant model of T (sema/orm.rs); this body is never used.
-func modelOf<T>() *Entity<T> {
-    return nil
 }
 
 // ---- errors -----------------------------------------------------------------
@@ -256,6 +255,7 @@ struct entry {
 }
 
 struct ctxState {
+    model    *ctxModel
     db       *database.sql.DB
     provider Provider
     inTx     bool
@@ -589,9 +589,24 @@ func quoteIdent(s string) string {
 
 // ---- context ------------------------------------------------------------------
 
+// A struct embedding Context.
+interface contextLike {
+    func contextState_() *ctxState
+}
+
+// A Set<T> field.
+interface setLike {
+    func entityType_() *reflect.TypeInfo
+}
+
+
 // Embedded in a user context struct (see data.Open).
 struct Context {
     st *ctxState
+
+    func contextState_() *ctxState {
+        return this.st
+    }
 
     // The provider of the context.
     func Provider() Provider {
@@ -639,7 +654,7 @@ struct Context {
 
     // The tracking entry of e (Collection/Reference loading, state).
     func Entry<T>(e *T) Entry<T> {
-        return Entry<T>{st: this.st, p: e, ent: modelOf<T>()}
+        return Entry<T>{st: this.st, p: e, ent: entityFor<T>(this.st.model)}
     }
 
     // Stops tracking every entity.
@@ -678,7 +693,7 @@ struct Context {
     }
 
     // Applies the pending migrations of the program (every struct with
-    // @migration, in id order); the compiler supplies the list.
+    // @migration, in id order: reflect.TypesWith<migration>()).
     func Migrate() Task<void!> {
         return migrate(this.st, migrationsOf())
     }
@@ -737,15 +752,9 @@ async func ensureCreated(st *ctxState) void! {
     }
 }
 
-// The migrations of the program, in id order. Calls are replaced by the
-// compiler (sema/orm.rs); this body is never used.
-func migrationsOf() []MigrationEntry {
-    return []
-}
-
 // Creates the context state over db.
 func newState(p Provider, db *database.sql.DB) *ctxState {
-    return new ctxState{db: db, provider: p, ids: map[string]*entry{}, byPtr: map[int]*entry{}, colsOf: map[string]string{}, entries: []}
+    return new ctxState{model: nil, db: db, provider: p, ids: map[string]*entry{}, byPtr: map[int]*entry{}, colsOf: map[string]string{}, entries: []}
 }
 
 // Opens the pool of provider p (SQLite ":memory:" databases get one
@@ -774,31 +783,146 @@ func ParseProvider(name string) Provider! {
     return error("data: unknown provider \"" + name + "\" (postgres or sqlite)")
 }
 
-// data.Open<ShopContext>(data.Provider.Sqlite, ":memory:"): opens a pool
-// and creates the context with its sets. Calls are expanded by the
-// compiler (sema/orm.rs: the sets of C are bound to their models); this
-// body is never used.
-func Open<C>(p Provider, dsn string) *C! {
-    return error("data.Open: not expanded")
-}
-
-// Like Open over an existing pool.
-func OpenDB<C>(p Provider, db *database.sql.DB) *C {
-    var c C
-    return &c
-}
-
 // ---- sets ---------------------------------------------------------------------
 
-// The entities of type T of a context (a table). Methods not listed here
-// are those of Query<T> (ctx.Users.Where(...) is ctx.Users.AsQuery().Where(...)).
+// The entities of type T of a context (a table). The query operators are
+// those of Query<T> (ctx.Users.Where(...) is ctx.Users.AsQuery().Where(...)).
 struct Set<T> {
     st  *ctxState
     ent *Entity<T>
 
+    func entityType_() *reflect.TypeInfo {
+        return reflect.TypeOf<T>()
+    }
+
+    // The set of a new context state (data.Open).
+    func bind_(st *ctxState) Set<T> {
+        return Set<T>{st: st, ent: entityFor<T>(st.model)}
+    }
+
     // A query over the whole table.
     func AsQuery() Query<T> {
         return Query<T>{c: newCore(this.st, this.ent.Meta), ent: this.ent, tracking: true}
+    }
+
+    func AsNoTracking() Query<T> {
+        return Query<T>{c: newCore(this.st, this.ent.Meta), ent: this.ent, tracking: false}
+    }
+
+    func AsTracking() Query<T> {
+        return this.AsQuery()
+    }
+
+    func AsSplitQuery() Query<T> {
+        return this.AsQuery().AsSplitQuery()
+    }
+
+    func AsEnumerable() Enumerable<T> {
+        return this.AsQuery().AsEnumerable()
+    }
+
+    func Where(p expr<func(*T) bool>) Query<T> {
+        return this.AsQuery().Where(p)
+    }
+
+    func OrderBy(key expr<func(*T) any>) Query<T> {
+        return this.AsQuery().OrderBy(key)
+    }
+
+    func OrderByDescending(key expr<func(*T) any>) Query<T> {
+        return this.AsQuery().OrderByDescending(key)
+    }
+
+    func Include(nav expr<func(*T) any>) Query<T> {
+        return this.AsQuery().Include(nav)
+    }
+
+    func Select<R>(f expr<func(*T) R>) Projection<R> {
+        return this.AsQuery().Select<R>(f)
+    }
+
+    func GroupBy<K>(key expr<func(*T) K>) Grouped<T, K> {
+        return this.AsQuery().GroupBy<K>(key)
+    }
+
+    func Join<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.AsQuery().Join<I, K, R>(inner, outerKey, innerKey, result)
+    }
+
+    func Skip(n int) Query<T> {
+        return this.AsQuery().Skip(n)
+    }
+
+    func Take(n int) Query<T> {
+        return this.AsQuery().Take(n)
+    }
+
+    func Distinct() Query<T> {
+        return this.AsQuery().Distinct()
+    }
+
+    func ToList() Task<[]*T!> {
+        return this.AsQuery().ToList()
+    }
+
+    func First(p ...expr<func(*T) bool>) Task<*T!> {
+        return this.AsQuery().First(p...)
+    }
+
+    func FirstOrDefault(p ...expr<func(*T) bool>) Task<*T!> {
+        return this.AsQuery().FirstOrDefault(p...)
+    }
+
+    func Single(p ...expr<func(*T) bool>) Task<*T!> {
+        return this.AsQuery().Single(p...)
+    }
+
+    func SingleOrDefault(p ...expr<func(*T) bool>) Task<*T!> {
+        return this.AsQuery().SingleOrDefault(p...)
+    }
+
+    func Count(p ...expr<func(*T) bool>) Task<int!> {
+        return this.AsQuery().Count(p...)
+    }
+
+    func Any(p ...expr<func(*T) bool>) Task<bool!> {
+        return this.AsQuery().Any(p...)
+    }
+
+    func All(p expr<func(*T) bool>) Task<bool!> {
+        return this.AsQuery().All(p)
+    }
+
+    func Sum<N>(f expr<func(*T) N>) Task<N!> {
+        return this.AsQuery().Sum<N>(f)
+    }
+
+    func Min<N>(f expr<func(*T) N>) Task<N!> {
+        return this.AsQuery().Min<N>(f)
+    }
+
+    func Max<N>(f expr<func(*T) N>) Task<N!> {
+        return this.AsQuery().Max<N>(f)
+    }
+
+    func Average<N>(f expr<func(*T) N>) Task<float!> {
+        return this.AsQuery().Average<N>(f)
+    }
+
+    func ExecuteUpdate(f func(Setters<T>) Setters<T>) Task<int!> {
+        return this.AsQuery().ExecuteUpdate(f)
+    }
+
+    func ExecuteDelete() Task<int!> {
+        return this.AsQuery().ExecuteDelete()
+    }
+
+    func ToSql() string {
+        return this.AsQuery().ToSql()
+    }
+
+    func Args() []any {
+        return this.AsQuery().Args()
     }
 
     // Starts tracking e as new: SaveChanges inserts it (and sets its
@@ -840,8 +964,24 @@ struct Set<T> {
         this.upsertBy_(e, cols)
     }
 
-    // UpsertBy(e, (u) => u.Email): the conflict target is a unique column
-    // (or columns) instead of the key; the compiler passes the column names.
+    // UpsertBy(e, (u) => u.Email) or UpsertBy(e, (u) => (u.A, u.B)): like
+    // Upsert, with a unique column (or columns) as the conflict target
+    // instead of the key.
+    func UpsertBy(e *T, cols expr<func(*T) any>) {
+        var names []string = []
+        for f in selectedFields(cols.Root()) {
+            var ci = this.ent.em.colOf(f)
+            if ci < 0 {
+                panic("data: UpsertBy: " + this.ent.Meta.Entity + " has no column " + f)
+            }
+            names = append(names, this.ent.Meta.Columns[ci].Name)
+        }
+        if len(names) == 0 {
+            panic("data: UpsertBy takes the entity and a lambda selecting the conflict columns: UpsertBy(u, (x) => x.Email) or (x) => (x.A, x.B)")
+        }
+        this.upsertBy_(e, names)
+    }
+
     func upsertBy_(e *T, cols []string) {
         var x = entryOf(this.st, e)
         if x != nil && x.state != 4 {
@@ -960,6 +1100,43 @@ struct Entry<T> {
         return reload(*this)
     }
 
+    // A collection navigation to load explicitly: Collection((u) => u.Orders).Load().
+    func Collection(nav expr<func(*T) any>) NavLoader {
+        return this.navLoader(paramField(nav.Root()), true)
+    }
+
+    // A reference navigation to load explicitly: Reference((o) => o.User).Load().
+    func Reference(nav expr<func(*T) any>) NavLoader {
+        return this.navLoader(paramField(nav.Root()), false)
+    }
+
+    func navLoader(f string, many bool) NavLoader {
+        var m = this.ent.Meta
+        for inc in this.ent.incs {
+            if inc.name == f {
+                if inc.err != "" {
+                    return NavLoader{load: nil, err: inc.err}
+                }
+                if inc.many != many {
+                    var other = "Reference"
+                    var what = "a reference"
+                    if inc.many {
+                        other = "Collection"
+                        what = "a collection"
+                    }
+                    return NavLoader{load: nil, err: "data: " + m.Entity + "." + f + " is " + what + ": use " + other + "((x) => x." + f + ")"}
+                }
+                var st = this.st
+                var p = this.p
+                var load = inc.load
+                return NavLoader{load: async func() void! {
+                    await load(st, [p], true)?
+                }, err: ""}
+            }
+        }
+        return NavLoader{load: nil, err: "data: " + m.Entity + " has no navigation " + f}
+    }
+
     func entity() *T {
         return this.p
     }
@@ -969,15 +1146,23 @@ struct Entry<T> {
     }
 }
 
-// A navigation of an entry (Entry.Collection("Orders") / Reference("User")),
-// built by the compiler.
+// A navigation of an entry (Entry.Collection((u) => u.Orders) /
+// Reference((o) => o.User)).
 struct NavLoader {
     load func() Task<void!>
+    err  string
 
     // Loads the navigation from the database into the entity.
     func Load() Task<void!> {
+        if this.err != "" {
+            return failed(this.err)
+        }
         return this.load()
     }
+}
+
+async func failed(msg string) void! {
+    return error(msg)
 }
 
 async func setFind<T>(s Set<T>, k any) *T! {
@@ -1030,100 +1215,4 @@ func listArg<E>(xs []E) any {
         out = append(out, database.sql.argOf(x))
     }
     return out
-}
-
-// ---- model builder ------------------------------------------------------------
-
-// The argument of a context's Configure method. Its calls are read by the
-// compiler from the source of Configure (they must be literal chains on
-// the parameter: m.Entity<User>().HasIndex((u) => u.Email).IsUnique());
-// Configure itself is never run.
-struct ModelBuilder {
-    func Entity<T>() EntityBuilder<T> {
-        return EntityBuilder<T>{}
-    }
-}
-
-struct EntityBuilder<T> {
-    func ToTable(name string) EntityBuilder<T> {
-        return *this
-    }
-
-    func key_(fields []string) EntityBuilder<T> {
-        return *this
-    }
-
-    func ignore_(fields []string) EntityBuilder<T> {
-        return *this
-    }
-
-    func property_(fields []string) PropertyBuilder {
-        return PropertyBuilder{}
-    }
-
-    func index_(fields []string) IndexBuilder {
-        return IndexBuilder{}
-    }
-
-    func nav_(fields []string) NavBuilder {
-        return NavBuilder{}
-    }
-}
-
-struct PropertyBuilder {
-    func HasColumnName(name string) PropertyBuilder {
-        return *this
-    }
-
-    func HasMaxLength(n int) PropertyBuilder {
-        return *this
-    }
-
-    func IsRequired() PropertyBuilder {
-        return *this
-    }
-
-    func HasDefaultSql(sql string) PropertyBuilder {
-        return *this
-    }
-
-    func IsConcurrencyToken() PropertyBuilder {
-        return *this
-    }
-
-    func HasColumnType(t string) PropertyBuilder {
-        return *this
-    }
-
-    func ValueGeneratedOnAdd() PropertyBuilder {
-        return *this
-    }
-
-    func ValueGeneratedNever() PropertyBuilder {
-        return *this
-    }
-}
-
-struct IndexBuilder {
-    func IsUnique() IndexBuilder {
-        return *this
-    }
-
-    func HasName(name string) IndexBuilder {
-        return *this
-    }
-
-    func HasDatabaseName(name string) IndexBuilder {
-        return *this
-    }
-}
-
-struct NavBuilder {
-    func WithForeignKey(field string) NavBuilder {
-        return *this
-    }
-
-    func UsingTable(name string) NavBuilder {
-        return *this
-    }
 }
