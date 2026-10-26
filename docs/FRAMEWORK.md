@@ -299,7 +299,7 @@ struct ShopContext {
 }
 
 var users = await ctx.Users
-    .Where((u) => u.CreatedAt > since && u.Name.Contains("a"))
+    .Where((u) => u.CreatedAt > since && strings.Contains(u.Name, "a"))
     .Include((u) => u.Orders)
     .OrderBy((u) => u.Email)
     .Skip(20).Take(10)
@@ -310,11 +310,14 @@ u.Name = "new"
 await ctx.SaveChanges()?        // change tracking: UPDATE только изменённых полей
 ```
 
-- **LINQ-подобные запросы с переводом в SQL при компиляции.** Лямбда в
-  `Where` — не замыкание, а выражение, которое компилятор превращает в
-  дерево выражений (`data.Expr`) на этапе компиляции, когда параметр имеет
-  тип `data.Set<T>`. Что нельзя перевести в SQL — ошибка компиляции, а не
-  молчаливая загрузка всей таблицы в память.
+- **LINQ-подобные запросы на деревьях выражений.** Лямбда в `Where` — не
+  замыкание, а дерево выражений (`Where(p expr<func(*T) bool>)`, DESIGN.md
+  «Деревья выражений»), которое библиотека переводит в SQL; перевод
+  кэшируется по месту лямбды. Предикат можно хранить в переменной,
+  вернуть из функции, собрать в цикле (`expr.OrAll(ps)`) и использовать
+  повторно. Что нельзя перевести в SQL — ошибка (компиляции, если её видно
+  по типам; иначе запроса), а не молчаливая загрузка всей таблицы в
+  память.
 - Change tracking, unit of work, транзакции, оптимистичная блокировка
   (`@concurrencyToken`), ленивые и явные загрузки, split queries,
   пакетные вставки, raw SQL с маппингом, compiled queries по умолчанию.
@@ -330,14 +333,18 @@ await ctx.SaveChanges()?        // change tracking: UPDATE только изме
 
 Реализовано как `data` (пока нет реестра пакетов; `import data` —
 короткие имена `@table`, `Context`, `Set<T>`, или полный путь
-`data.X`). Исходники — `compiler/src/sema/stdlib_src/data*.zl`
-(контекст, запросы, сохранение, миграции), раскрытие при компиляции —
-`compiler/src/sema/orm.rs` (вызовы), `orm_model.rs` (модель),
-`orm_sql.rs` (перевод лямбд), CLI — `compiler/src/datacli.rs`; тесты —
-`tests/spec/data/` и `compiler/tests/data.rs` (настоящий PostgreSQL 16 и
-CLI миграций).
+`data.X`) — обычный библиотечный код без поддержки в компиляторе
+(2026-10-26; до этого модель и перевод лямбд жили в `sema/orm*.rs`).
+Исходники — `compiler/src/sema/stdlib_src/data*.zl`: `data.zl`
+(контекст, наборы, трекинг), `data_model.zl` (модель из рефлексии и
+`Configure`, типизированный доступ к полям), `data_sql.zl` (перевод
+деревьев выражений в SQL, кэш планов), `data_query.zl` (запросы),
+`data_save.zl`, `data_migrate.zl`; CLI — `compiler/src/datacli.rs`
+(собирает проект со сгенерированным `main`, печатающим
+`data.ModelJson<C>()`); тесты — `tests/spec/data/` и
+`compiler/tests/data.rs` (настоящий PostgreSQL 16 и CLI миграций).
 
-- ✓ **Модель при компиляции.** Атрибуты `@table("users")`, `@key`
+- ✓ **Модель из рефлексии.** Атрибуты `@table("users")`, `@key`
   (`@key(generated: false)`), `@autoincrement`, `@column("email", type:
   "varchar(20)")`, `@index` / `@index(unique: true, name:)`,
   `@maxLength(n)`, `@required`, `@default("now()")`, `@concurrencyToken`,
@@ -351,15 +358,23 @@ CLI миграций).
   ключах, `ON DELETE CASCADE` (`SET NULL` для nullable). Типы столбцов:
   целые, `float`, `bool`, `string`, `[]byte`, `time.Time`, `big.Decimal`,
   `json.Value`, простые enum (по имени), nullable — `*T` и `sql.Null<T>`.
-  Метод `Configure(m *data.ModelBuilder)` контекста читается компилятором
-  из исходника (литеральные цепочки: `m.Entity<User>().HasIndex((u) =>
-  u.Email).IsUnique()`, `ToTable`, `HasKey`, `Ignore`, `Property(...)`
-  с `HasColumnName/HasMaxLength/IsRequired/HasDefaultSql/IsConcurrencyToken/
-  HasColumnType/ValueGeneratedOnAdd/Never`, `HasIndex(...)` с
-  `IsUnique/HasName`, `HasMany/HasOne/BelongsTo/HasManyToMany(...)` с
-  `WithForeignKey/UsingTable`) и во время выполнения не вызывается.
-  Ошибки модели (неотображаемый тип поля, нет внешнего ключа, несовместимые
-  типы ключей, неизвестное поле в лямбде) — ошибки компиляции.
+  Метод `Configure(m *data.ModelBuilder)` контекста выполняется один раз,
+  когда строится модель типа контекста (первый `data.Open<C>()`):
+  `m.Entity<User>().HasIndex((u) => u.Email).IsUnique()`, `ToTable`,
+  `HasKey`, `Ignore`, `Property(...)` с `HasColumnName/HasMaxLength/
+  IsRequired/HasDefaultSql/IsConcurrencyToken/HasColumnType/
+  ValueGeneratedOnAdd/Never`, `HasIndex(...)` с `IsUnique/HasName`,
+  `HasMany/HasOne/BelongsTo/HasManyToMany(...)` с `WithForeignKey/
+  UsingTable` (селекторы — деревья выражений, неизвестное поле — ошибка
+  компиляции). Модель строится из таблиц рефлексии (`reflect.TypeOf<T>()`,
+  атрибуты полей) для каждой сущности, достижимой из наборов контекста, и
+  кэшируется на тип контекста; чтение строк и значения столбцов
+  развёрнуты по `reflect.Fields<T>()` (без рефлексии во время
+  выполнения). Ошибки типов полей (неотображаемый тип, `@maxLength` не у
+  строки, `@autoincrement` не у целого) — ошибки компиляции из библиотеки
+  (`reflect.Error`); поле-структура по значению — не навигация (нужен
+  `*E` или `[]E`). Ошибки отношений (нет внешнего ключа, несовместимые
+  типы ключей) — ошибка `data.Open` (`OpenDB` паникует).
 - ✓ **Контекст и наборы.** `data.Open<C>(provider, dsn) *C!` и
   `data.OpenDB<C>(provider, *sql.DB) *C` (у SQLite `:memory:` — одно
   соединение); `ctx.Users.Add/AddRange/Attach/Update/Remove`,
@@ -375,11 +390,11 @@ CLI миграций).
   ничего не сохраняется). `ctx.Transaction(async () => { ... })` (вложенные
   присоединяются), `AsNoTracking()`, `ctx.Entry(e)` (`State()`,
   `ChangedColumns()`, `Reload()`, `Detach()`,
-  `Collection("Orders").Load()`, `Reference("User").Load()`),
+  `Collection((u) => u.Orders).Load()`, `Reference((o) => o.User).Load()`),
   `ClearTracker()`, `LogTo(func(string))` — журнал SQL с аргументами,
   `ctx.Raw<T>(sql, args)` (Dapper-стиль через `sql.Query<T>`, без
   трекинга), `ExecuteSql`, `EnsureCreated()`, `CreateScript()`.
-- ✓ **Запросы, переведённые при компиляции** (DESIGN.md, «Перевод лямбд в
+- ✓ **Запросы на деревьях выражений** (DESIGN.md, «Перевод лямбд в
   SQL»): `Where`, `OrderBy/OrderByDescending/ThenBy/ThenByDescending`
   (значение или кортеж), `Skip/Take` (`LIMIT/OFFSET`), `Distinct`,
   `Select` в кортеж, структуру или скаляр, `Include` (по умолчанию
@@ -389,16 +404,22 @@ CLI миграций).
   предикатом и без), `All`, `Sum/Min/Max/Average`, `GroupBy(...)` с
   `Select((g) => (g.Key, g.Count(), g.Sum(...)))` и `Where` как `HAVING`,
   `Join(ctx.Orders, outerKey, innerKey, result)`,
-  `ExecuteUpdate((s) => s.Set((u) => u.Name, v).Set((u) => u.N, (u) => u.N +
-  1))`, `ExecuteDelete()`, `ToSql()`/`Args()`, `AsEnumerable()` — дальше
-  обычные функции в памяти. В лямбдах: сравнения, `&&`/`||`/`!`,
+  `ExecuteUpdate((s) => s.Set((u) => u.Name, v).SetWith((u) => u.N, (u) =>
+  u.N + 1))`, `ExecuteDelete()`, `ToSql()`/`Args()`, `AsEnumerable()` —
+  дальше обычные функции в памяти. В лямбдах: сравнения, `&&`/`||`/`!`,
   арифметика, `+` строк (`||`), `nil`-проверки и `*u.Age` у nullable,
-  `time.Time` (`<`, `Before/After`), строковые `Contains/StartsWith/
-  EndsWith/ToUpper/ToLower/Trim` (и `strings.*`), `len`, `float()/int()`,
-  `slices.Contains(ids, u.Id)` / `ids.Contains(u.Id)` (`IN`), навигации
-  (`u.Orders.Any(pred)`, `.All`, `.Count()`, `.Sum(...)`, `o.User.Name`,
-  `o.User == nil`), захваченные значения — параметры. Неподдерживаемое —
-  ошибка `expression cannot be translated to SQL: <почему>`.
+  `time.Time` (`<`, `==`), `strings.HasPrefix/HasSuffix/Contains/ToUpper/
+  ToLower/Trim`, `len`, `float()/int()`, `slices.Contains(ids, u.Id)`
+  (`IN`), навигации (`data.Any(u.Orders, (o) => ...)`, `data.All`,
+  `data.Count`, `data.Sum/Min/Max/Average`, `len(u.Orders)`,
+  `o.User.Name`, `o.User == nil`), в `GroupBy` — `g.Key`, `g.Count()`,
+  `g.Sum((o) => ...)`; константы и захваченные значения — всегда
+  параметры (`?`/`$n`). Перевод лямбды кэшируется по её месту в модели
+  контекста. Предикаты комбинируются (`expr.And/Or/AndAll/OrAll/Not`).
+  Непереводимое, но видимое по типам (вызов своей функции, метод) —
+  ошибка компиляции дерева выражений; зависящее от модели (поле
+  `@ignore`) — ошибка запроса `expression cannot be translated to SQL:
+  <почему>`.
 - ✓ **Провайдеры** PostgreSQL и SQLite: кавычки идентификаторов,
   `$n`/`?`, `LIMIT/OFFSET` (`LIMIT -1` в SQLite), `RETURNING`, `ON
   CONFLICT`, `strpos`/`instr`, `starts_with`/`substr`, приведения сумм и
@@ -422,8 +443,8 @@ CLI миграций).
   строк join-таблиц вместе с владельцем), исправления обратных навигаций,
   `Where`/`OrderBy` после `Select` (до проекции — можно), анонимных записей
   в `Select` (кортежи и структуры есть), составного `g.Key` вне `Select`,
-  compiled queries в виде кэша планов (фрагменты — константы, склейка при
-  каждом вызове), интеграции журнала с `log`, `AlterColumn` в SQLite
+  кэша готовых statement-ов (кэшируется перевод лямбд, склейка запроса —
+  при каждом вызове), интеграции журнала с `log`, `AlterColumn` в SQLite
   (комментарий в скрипте). Суммы `big.Decimal` в SQLite считаются в
   `REAL`. Отслеживаемые сущности, загруженные в обе стороны
   (`u.Orders[i].User == u`), держат друг друга (сборщика мусора нет):
@@ -728,7 +749,7 @@ TLS, WebSocket, роутер по пути и методу без атрибут
 | Пакет | Что | Что мешает вынести сейчас |
 |---|---|---|
 | `zell-lang/web` | атрибутная маршрутизация, DI, middleware, binding, OpenAPI, auth/JWT | нужен `reflect.TypesWith<A>()`; до него вынесен из дерева (2026-10-24, тег `web-in-tree`; было: таблица маршрутов и DI в компиляторе, `sema/web.rs`) |
-| `zell-lang/data` | ORM: модель, change tracking, миграции, лямбда → SQL | трансляция лямбд в SQL в компиляторе (`sema/orm.rs`, `orm_model.rs`) |
+| `zell-lang/data` | ORM: модель, change tracking, миграции, лямбда → SQL | ничего в компиляторе (с 2026-10-26 обычный код на деревьях выражений и статической рефлексии); нативный слой SQLite и `diag.rt*` — см. `docs/EXTRACTION.md` |
 | `zell-lang/log`, `zell-lang/diag` | Serilog-подобный логгер; Prometheus, OpenTelemetry, pprof | ничего: обычный код |
 | `zell-lang/redis`, `kafka`, `s3` | клиенты | ничего: обычный код |
 
@@ -751,7 +772,7 @@ TLS, WebSocket, роутер по пути и методу без атрибут
    лямбду как синтаксическое дерево-значение (аналог `Expression<Func<>>` в
    C#); на нём ORM транслирует `Where(u => u.Age > 18)` в SQL уже в пакете.
    Сделано 2026-10-26: тип `expr<F>` и пакет `expr` (DESIGN.md «Деревья
-   выражений»); перевод запросов `data` на деревья — следующий шаг.
+   выражений»), запросы `data` на деревьях (`sema/orm*.rs` удалены).
 
 **Порядок:**
 
@@ -761,8 +782,8 @@ TLS, WebSocket, роутер по пути и методу без атрибут
    `web` снят со `STD_ROOTS`); пишется заново на `TypesWith` сразу в
    `zell-lang/web` (манифест, тег `v0.1.0`, CI), пример
    `example-web-service` переходит на `import github.com/zell-lang/web`.
-   `data` переписывается на деревья выражений внутри основного
-   репозитория; `sema/orm*.rs` удаляются.
+   `data` переписан на деревья выражений внутри основного репозитория,
+   `sema/orm*.rs` удалены (2026-10-26).
 3. Перенос `data` в `zell-lang/data`; корень `data` снимается с
    зарезервированных корней stdlib (`compiler/src/sema/stdlib.rs`,
    `STD_ROOTS`).

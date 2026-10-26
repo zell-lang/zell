@@ -215,14 +215,31 @@ unchanged: a type form). Implemented:
   descriptors through attributes and `reflect.Fields<T>()`, one error
   program per forbidden form), `examples/expr_trees.zl`.
 
-Run 2: `data` queries on trees (`Where`, `OrderBy`, `Select`, ...) as
-library code, then delete `sema/orm*.rs`. What it still needs from the
-compiler: inference of `T` from a lambda alone (`Where(u => ...)` on a
-generic free function needs `T` from another argument or the receiver;
-methods of `Set<T>`/`Query<T>` already know it), parameter-free
-indexing (`ids[0]`) and conversions in trees (now errors), and the ORM's
-richer calls (`Trim`, aggregates over navigations, subqueries) as new
-whitelist entries or nodes.
+### Done 2026-10-26: `data` on trees (run 2)
+
+The ORM is library code (`stdlib_src/data_model.zl`, `data_sql.zl`);
+`sema/orm*.rs` are gone. What the compiler gained for it, all general:
+
+- trees: any parameter-free subexpression is a slot; `Convert`, `Index`
+  and `Lambda` nodes (a lambda argument of a call inside the tree, with
+  its own value environment); calls of functions and methods marked
+  `@expr.call`; operators on types with `Compare`/`Equals` are `Binary`;
+  `expr.Expr.SiteId()`/`Slots()`/`Value(k)` for translation caches;
+  result type parameters inferred from the lambda (`Select<R>`), a result
+  converted to an interface (`expr<func(*T) any>` keys);
+- reflection: `reflect.Fields<T>()` over tuples, `f.Type.Elem`/`.Key` as
+  descriptor types, `f.Addr(p)`, `reflect.Error` in a method of a generic
+  struct raised only if the method is used, short names in folded
+  `TypeOf<T>().Name`/`f.Type.Name`;
+- fixes found on the way: `nil` for an already bound type parameter,
+  variadic flags and deferred errors rolled back with their functions,
+  stdlib interfaces not re-resolved in a user file's scope, lambda hints
+  resolved in the template's scope.
+
+Still open: inference of `T` from a lambda alone (`Where(u => ...)` on a
+generic free function), compile-time checks that depend on the model
+(a lambda reading an `@ignore` field fails when the query runs), and
+static relation checks (`data.Open` reports a missing foreign key).
 
 ## 5. Order and sizing
 

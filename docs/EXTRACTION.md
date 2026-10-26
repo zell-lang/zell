@@ -1,13 +1,14 @@
 # Extracting stdlib packages
 
-Status 2026-10-25: the repositories below exist in the `zell-lang` org as
-scaffolds (manifest, CI, README, an empty namespace). No code has moved yet.
+Status 2026-10-26: the repositories below exist in the `zell-lang` org as
+scaffolds (manifest, CI, README, an empty namespace). No code has moved
+yet; `data` is plain library code (no compiler support), ready to move.
 
 ## Target layout
 
 | Repo | What | Source today |
 |---|---|---|
-| `db` | base database interfaces (connections, transactions, rows, driver interface) and the ORM (models, queries, change tracking) | `std/database/sql`, `std/data/*.zl` |
+| `db` | base database interfaces (connections, transactions, rows, driver interface) and the ORM (models, queries on expression trees, change tracking) | `std/database/sql`, `std/data/*.zl` |
 | `sqlite` | SQLite driver for `db` | `runtime/src/std_sqlite.c`, `std/database/sqlite` |
 | `postgres` | PostgreSQL driver | `std/database/postgres` |
 | `mysql`, `mssql`, `oracle` | drivers for MySQL/MariaDB, SQL Server, Oracle | new |
@@ -25,15 +26,44 @@ Stays in stdlib: `log`, `diag`, and every other root in `STD_ROOTS`
 ## Order
 
 1. Expression trees in the compiler (done 2026-10-26: `expr<F>`, package
-   `expr`, DESIGN.md "Деревья выражений"), and `db` queries built on them
-   (next).
-2. The ORM model on static reflection (`Fields<T>()`, `Attribute<A>()`,
-   `TypesWith<A>()`).
-3. Remove `sema/orm*.rs`.
+   `expr`, DESIGN.md "Деревья выражений").
+2. The ORM model on static reflection (done 2026-10-26: `data_model.zl`
+   builds it from `reflect.TypeOf<T>()` and `Configure`, the accessors are
+   unrolled over `reflect.Fields<T>()`, `data.Open<C>()` binds the sets
+   through a static type switch, migrations come from
+   `reflect.TypesWith<migration>()`), and `data` queries on expression
+   trees (done 2026-10-26: `data_sql.zl`, plans cached per lambda site).
+3. Remove `sema/orm*.rs` (done 2026-10-26: the compiler has no `data`
+   code left; `zell data migration add` builds the project with a
+   generated `main` printing `data.ModelJson<C>()`).
 4. Move the packages one at a time. Each move removes its root from
    `STD_ROOTS` (`data`, `database`, `cloud`, parts of `text`) once nothing
    left in the root, updates imports in examples/tests/guides, and keeps
    outputs identical.
+
+### What the move of `data` to `zell-lang/db` still needs
+
+- **Process-wide state.** The context models are cached in the runtime's
+  slot map (`diag.rtSlots`/`rtLock`, internal to the stdlib), because
+  stdlib sources cannot declare global variables. A package can: the
+  cache becomes a package-level `var` with a lock.
+- **`unsafe`.** The identity map keys entities by address
+  (`unsafe.ReadInt(unsafe.AddrOf(a), 8)` in `ptrKey`): the package needs
+  `unsafe = true` in `[capabilities]`, or the identity map keyed otherwise.
+- **Its own namespace in the translator.** `data_sql.zl` recognises its
+  tree functions by full name (`data.Any`, `data.Group.Count`); the
+  prefix must become the package's namespace.
+- **Abstract checks.** Stdlib generic code is not checked abstractly; a
+  package's is. `migrationEntry<M>` calls `Up` on an unconstrained `M`,
+  and the static-switch bodies of `bindContext`/`buildContextModel` rely
+  on instance-only checking; they need bounds (`M: upper`) or the shape
+  checks moved behind static `if`s.
+- **The `zell data` CLI** (`compiler/src/datacli.rs`) stays in the
+  compiler until `migrate` exists as a tool (below); it only uses the
+  library API (`data.ModelJson`, `data.RunMigrations`, `Migrations()`).
+- **SQLite's native layer** (below), and the imports of every spec,
+  example and benchmark that uses `data` (`tests/spec/data`,
+  `benchmarks/orm_sqlite`, `compiler/tests/fixtures/data`).
 
 ## Open blocker: native code in packages
 
