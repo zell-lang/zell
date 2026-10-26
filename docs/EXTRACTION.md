@@ -65,6 +65,36 @@ Stays in stdlib: `log`, `diag`, and every other root in `STD_ROOTS`
   example and benchmark that uses `data` (`tests/spec/data`,
   `benchmarks/orm_sqlite`, `compiler/tests/fixtures/data`).
 
+### Dialects: the driver plug-in of `db`
+
+The ORM core never branches on the provider; it asks `interface Dialect`
+(`std/data/data_dialect.zl`, see docs/FRAMEWORK.md "Диалекты") for
+placeholders, paging, casts, dialect calls (`TranslateCall`/
+`TranslateMember`), write and locking clauses and the DDL. The split is
+by file:
+
+| File | Goes to | Contents |
+|---|---|---|
+| `data.zl`, `data_model.zl`, `data_query.zl`, `data_sql.zl`, `data_sub.zl`, `data_set.zl`, `data_window.zl`, `data_save.zl`, `data_migrate.zl`, `data_dialect.zl` | `db` | context, model (incl. `@jsonb` documents and array columns), query builder, tree translator (common SQL: subqueries, set operations, CTEs, window functions, raw fragments, `LIKE`), unit of work, migrator (`DdlDialect`), the `Dialect`/`Opener` interfaces, registry, `SqlBuilder` and the `ansi*` defaults |
+| `data_sqlite.zl` | `sqlite` | `SqliteDialect` (with `database.sqlite`) |
+| `data_postgres.zl` | `postgres` | `PostgresDialect`, the PostgreSQL-only query functions (`@expr.call`: jsonb, arrays, `ILike`, regex, full-text search; they become namespace `postgres`), `Subscription` and `ctx.Notify/Listen` (the `Context` methods become functions of the package), with `database.postgres.Listener` |
+
+At the move, `dialectOf` loses its built-in fallback: each driver package
+calls `db.RegisterDialect(SqliteDialect{})` (or its own) from its `Open`,
+and `Provider` gives way to the dialect name (`db.Open<C>("postgres",
+dsn)`), keeping `Provider.Postgres/.Sqlite` as aliases.
+
+A new driver (`mysql`, `mssql`, `oracle`) implements `Dialect` (every method; `ansiPaging(d, ...)` and the other `ansi*` functions are the ANSI versions to delegate to: interface default methods would be checked in every program) and `Opener`: `Name`,
+`Open`; `Placeholder` (`?`, `@pN`, `:N`); `Paging` (`LIMIT`, `OFFSET …
+ROWS FETCH NEXT … ROWS ONLY`); `CastType`; `TranslateCall` for the string
+functions whose SQL differs (`len`, `strings.Contains/HasPrefix/HasSuffix`:
+the core's fallback is SQL:2016 `position`/`substring`) and for its own
+functions; `Returning` (MSSQL `OUTPUT`, MySQL none: the core then reads
+generated keys another way, still to do), `Lock`, the DDL methods
+(`ColumnType`, `ColumnDef` identity syntax, `AlterColumn`, foreign keys,
+`CreateIndex`). Identifiers are ANSI-quoted by the core: MySQL turns on
+`sql_mode=ANSI_QUOTES` for its connections.
+
 ## Open blocker: native code in packages
 
 Packages cannot carry native C code today: `docs/PACKAGES.md` has no native

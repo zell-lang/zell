@@ -1,0 +1,112 @@
+namespace data
+
+// Set operations and common table expressions (docs/FRAMEWORK.md
+// section 3, "Advanced SQL"). The result of each is a query over a
+// derived table aliased t0 whose columns are those of the operands, so
+// every operator (Where, OrderBy, Select, paging, Count, subqueries)
+// applies to it as to a table:
+//
+//   ctx.Users.Where(a).Union(ctx.Users.Where(b)).OrderBy((u) => u.Name)
+//   ctx.Categories.Where((c) => c.Id == root).Recursive((child, parent) => child.ParentId == parent.Id)
+//
+// A CTE is written inside the derived table, FROM (WITH ... SELECT ...)
+// AS t0, so that it composes with every other operator unchanged.
+
+// The SQL of one operand of a compound SELECT: SQLite allows no ORDER BY
+// or LIMIT in a member, so an ordered or paged operand is a subquery.
+func setOperand(w *sqlw, c core, sel Frag) {
+    w.groups = c.groups
+    if len(c.orders) > 0 || c.paged() {
+        w.raw("SELECT * FROM (")
+        c.selectSql(w, sel)
+        w.raw(") AS u")
+    } else {
+        c.selectSql(w, sel)
+    }
+}
+
+func markWriter(st *ctxState) sqlw {
+    return sqlw{d: st.d, b: strings.Builder{}, args: [], groups: [], mark: true, mbase: 0}
+}
+
+// (a kw b) as the source of a new core over a's entity.
+func compound(a core, asel Frag, kw string, b core, bsel Frag) core {
+    var w = markWriter(a.st)
+    w.raw("(")
+    setOperand(&w, a, asel)
+    w.raw(" " + kw + " ")
+    setOperand(&w, b, bsel)
+    w.raw(")")
+    var c = newCore(a.st, a.meta)
+    var e = c.ext()
+    e.src = Frag{s: w.text(), args: w.args}
+    e.hasSrc = true
+    e.needs = a.needs()
+    if e.needs == "" {
+        e.needs = b.needs()
+    }
+    c.x = e
+    c.err = a.err
+    if c.err == "" {
+        c.err = b.err
+    }
+    return c
+}
+
+func setQuery<T>(a Query<T>, kw string, b Query<T>) Query<T> {
+    var q = a
+    q.c = compound(a.c, entityCols(a.c.st, a.c.meta), kw, b.c, entityCols(b.c.st, b.c.meta))
+    q.includes = []
+    return q
+}
+
+func setProjection<R>(a Projection<R>, kw string, b Projection<R>) Projection<R> {
+    var q = a
+    q.c = compound(a.c, a.sel, kw, b.c, b.sel)
+    q.sel = Frag{s: "*", args: []}
+    return q
+}
+
+// `(WITH [RECURSIVE] "name" AS (body) SELECT * FROM "name")` as a source.
+func cteCore(c core, name string, body Frag, recursive bool) core {
+    var w = markWriter(c.st)
+    w.raw("(WITH ")
+    if recursive {
+        w.raw("RECURSIVE ")
+    }
+    w.raw(quoteIdent(name) + " AS (")
+    w.frag(body)
+    w.raw(") SELECT * FROM " + quoteIdent(name) + ")")
+    var out = newCore(c.st, c.meta)
+    var e = out.ext()
+    e.src = Frag{s: w.text(), args: w.args}
+    e.hasSrc = true
+    e.needs = c.needs()
+    out.x = e
+    out.err = c.err
+    return out
+}
+
+// The recursive member of Recursive: the rows of the table (r1) joined
+// to the rows found so far (r0) by step.
+func recursiveStep(st *ctxState, em *entModel, step *expr.Node, base int, cte string) Frag! {
+    var cx = newTcx(st, step, base)
+    cx.bindEntity(0, em, "r1")
+    cx.bindEntity(1, em, "r0")
+    var on = trPred(cx, step)?
+    var s = "SELECT " + columnList(em.meta, "r1") + " FROM " + quoteIdent(em.meta.Table) + " AS r1 JOIN " + quoteIdent(cte) + " AS r0 ON " + on.s
+    return Frag{s: s, args: treeArgs(cx, cxValues(cx, step))}
+}
+
+// The body of a recursive CTE: seed UNION step.
+func recursiveBody(seed core, em *entModel, step *expr.Node, cte string) Frag! {
+    var w = markWriter(seed.st)
+    setOperand(&w, seed, entityCols(seed.st, seed.meta))
+    var rec = recursiveStep(seed.st, em, step, len(w.args), cte)?
+    var s = w.text() + " UNION " + rec.s
+    var args = w.args
+    for a in rec.args {
+        args = append(args, a)
+    }
+    return Frag{s: s, args: args}
+}

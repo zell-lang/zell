@@ -1,0 +1,56 @@
+// test: window functions in Select projections: RowNumber, Rank, DenseRank over data.Over().PartitionBy(...).OrderBy(...)/OrderByDescending(...), Lag/Lead as pointers (nil at the edges), SumOver as a running total, CountOver/AverageOver/MinOver/MaxOver; casts on PostgreSQL
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.window
+
+import io
+
+struct Employee {
+    Id     int
+    Name   string
+    Dept   string
+    Salary int
+}
+
+struct Firm {
+    data.Context
+    Employees data.Set<Employee>
+}
+
+func opt(p *int) string {
+    if p == nil {
+        return "nil"
+    }
+    return fmt.Format("{0}", *p)
+}
+
+async func main() void! {
+    var ctx = data.Open<Firm>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Firm>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    ctx.Employees.AddRange([
+        new Employee{Name: "Ann", Dept: "dev", Salary: 300},
+        new Employee{Name: "Bob", Dept: "dev", Salary: 200},
+        new Employee{Name: "Cid", Dept: "dev", Salary: 200},
+        new Employee{Name: "Dan", Dept: "ops", Salary: 150},
+        new Employee{Name: "Eve", Dept: "ops", Salary: 250},
+    ])
+    _ = await ctx.SaveChanges()?
+
+    var ranks = ctx.Employees.OrderBy((e) => e.Id).Select((e) => (e.Name, data.RowNumber(data.Over().PartitionBy(e.Dept).OrderByDescending((e.Salary, e.Name))), data.Rank(data.Over().PartitionBy(e.Dept).OrderByDescending(e.Salary)), data.DenseRank(data.Over().OrderByDescending(e.Salary))))
+    println(ranks.ToSql())
+    for r in await ranks.ToList()? {
+        println(" ", r)
+    }
+    var w = ctx.Employees.OrderBy((e) => e.Id).Select((e) => (e.Name, data.Lag(e.Salary, data.Over().OrderBy(e.Id)), data.Lead(e.Salary, data.Over().OrderBy(e.Id)), data.SumOver(e.Salary, data.Over().OrderBy(e.Id))))
+    for r in await w.ToList()? {
+        var (n, prev, next, total) = r
+        println(" ", n, opt(prev), opt(next), total)
+    }
+    var agg = pg.Employees.Select((e) => (e.Name, data.SumOver(e.Salary, data.Over().PartitionBy(e.Dept)), data.AverageOver(e.Salary, data.Over().PartitionBy(e.Dept)), data.CountOver(data.Over())))
+    println(agg.ToSql())
+    var lite = ctx.Employees.OrderBy((e) => e.Id).Select((e) => (e.Name, data.CountOver(data.Over().PartitionBy(e.Dept)), data.AverageOver(e.Salary, data.Over().PartitionBy(e.Dept)), data.MinOver(e.Salary, data.Over()), data.MaxOver(e.Salary, data.Over())))
+    for r in await lite.ToList()? {
+        println(" ", r)
+    }
+}

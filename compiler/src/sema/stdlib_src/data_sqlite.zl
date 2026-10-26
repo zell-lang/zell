@@ -1,0 +1,242 @@
+namespace data
+
+// The SQLite dialect (database.sqlite): moves to zell-lang/sqlite with the
+// driver (docs/EXTRACTION.md). Placeholders are ?, an OFFSET without a
+// limit needs LIMIT -1, strings use instr/substr, migrations use SQLite
+// types (INTEGER PRIMARY KEY AUTOINCREMENT keys) and comment out the
+// ALTER TABLE forms SQLite lacks. PostgreSQL-only calls (data_postgres.zl)
+// are not translated here: they fail with "... is not supported by sqlite".
+struct SqliteDialect {
+    func Name() string {
+        return "sqlite"
+    }
+
+    // SQLite ":memory:" databases get one connection, so that every
+    // statement sees the same database.
+    func Open(dsn string) *database.sql.DB! {
+        var db = database.sqlite.Open(dsn)
+        if strings.Contains(dsn, ":memory:") || strings.Contains(dsn, "mode=memory") {
+            db.SetMaxOpenConns(1)
+            db.SetMaxIdleConns(1)
+        }
+        return db
+    }
+
+    func Paging(take int, skip int) string {
+        if take == 1 && skip == 0 {
+            return " LIMIT 1"
+        }
+        var s = ""
+        if take >= 0 {
+            s = " LIMIT " + strconv.Itoa(take)
+        } else if skip > 0 {
+            s = " LIMIT -1"
+        }
+        if skip > 0 {
+            s = s + " OFFSET " + strconv.Itoa(skip)
+        }
+        return s
+    }
+
+    // SQLITE_MAX_VARIABLE_NUMBER (32766 since 3.32).
+    func MaxParams() int {
+        return 32766
+    }
+
+    // SQLite has no multi-row DEFAULT VALUES.
+    func MultiRowDefaultValues() bool {
+        return false
+    }
+
+    func CastType(kind string) string {
+        if kind == "float" {
+            return "REAL"
+        }
+        if kind == "string" {
+            return "TEXT"
+        }
+        return "INTEGER"
+    }
+
+    func TranslateCall(b *SqlBuilder, name string, args []*expr.Node, t *reflect.TypeInfo) bool! {
+        if name == "len" && isSliceTy(expr.TypeOf(args[0])) {
+            var x = b.Value(args[0])?
+            b.Emit("json_array_length(" + x.Text + ")", reflect.TypeOf<int>())
+            return true
+        }
+        if name == "len" && isStrTy(expr.TypeOf(args[0])) {
+            var x = b.Value(args[0])?
+            b.Emit("length(" + x.Text + ")", reflect.TypeOf<int>())
+            return true
+        }
+        if name == "strings.Contains" || name == "strings.HasPrefix" || name == "strings.HasSuffix" {
+            var x = b.Value(args[0])?
+            var a = b.Value(args[1])?
+            if name == "strings.Contains" {
+                b.Emit("(instr(" + x.Text + ", " + a.Text + ") > 0)", reflect.TypeOf<bool>())
+            } else if name == "strings.HasPrefix" {
+                b.Emit("(substr(" + x.Text + ", 1, length(" + a.Text + ")) = " + a.Text + ")", reflect.TypeOf<bool>())
+            } else {
+                b.Emit("(length(" + a.Text + ") = 0 OR substr(" + x.Text + ", -length(" + a.Text + ")) = " + a.Text + ")", reflect.TypeOf<bool>())
+            }
+            return true
+        }
+        if isPostgresCall(name) {
+            return b.Fail(name[5..len(name)] + " is not supported by sqlite (a PostgreSQL function)")
+        }
+        return false
+    }
+
+    // A path into a @data.jsonb column: json_extract(col, '$.a.b').
+    func TranslateMember(b *SqlBuilder, base SqlExpr, f *reflect.FieldInfo, t *reflect.TypeInfo) bool! {
+        var (col, keys, ok) = jsonMember(base, f, t)
+        if !ok {
+            return false
+        }
+        if jsonInner(t) {
+            b.Emit("(" + col + " #>> '{" + strings.Join(keys, ",") + "}')", t)
+        } else {
+            b.Emit("json_extract(" + col + ", '$." + strings.Join(keys, ".") + "')", t)
+        }
+        return true
+    }
+
+    // Arrays are stored as JSON arrays.
+    func BindArray(xs []any) any {
+        return encoding.json.Format(xs)
+    }
+
+    // RETURNING needs SQLite 3.35.
+    func Returning() bool {
+        return sqliteVersion() >= 3035000
+    }
+
+    // RIGHT and FULL joins need SQLite 3.39.
+    func Require(feature string) void! {
+        if feature == "right-join" {
+            if sqliteVersion() < 3039000 {
+                return error("data: RIGHT and FULL joins need SQLite 3.39 or later (this is " + database.sqlite.Version() + ")")
+            }
+        }
+        if feature == "returning" && sqliteVersion() < 3035000 {
+            return error("data: RETURNING needs SQLite 3.35 or later (this is " + database.sqlite.Version() + ")")
+        }
+    }
+
+    // An index method (gin) has no SQLite counterpart: a plain index.
+    func CreateIndex(table string, name string, cols []string, unique bool, using string) string! {
+        var u = ""
+        if unique {
+            u = "UNIQUE "
+        }
+        return "CREATE " + u + "INDEX " + quoteIdent(name) + " ON " + quoteIdent(table) + " (" + strings.Join(cols, ", ") + ")"
+    }
+
+    // ---- DDL ----
+
+    func ColumnType(c Column) string {
+        var t = c.Type
+        if t == "int64" || t == "int32" || t == "int16" {
+            return "INTEGER"
+        }
+        if t == "float" || t == "float32" {
+            return "REAL"
+        }
+        if t == "bool" {
+            return "BOOLEAN"
+        }
+        if t == "bytes" {
+            return "BLOB"
+        }
+        if t == "time" {
+            return "TIMESTAMP"
+        }
+        if t == "string" && c.MaxLength > 0 {
+            return "VARCHAR(" + strconv.Itoa(c.MaxLength) + ")"
+        }
+        return "TEXT"
+    }
+
+    func DefaultSql(d string) string {
+        var l = strings.ToLower(d)
+        if l == "now()" || l == "current_timestamp" || l == "localtimestamp" || l == "now() at time zone 'utc'" {
+            return "(CURRENT_TIMESTAMP)"
+        }
+        if l == "true" {
+            return "1"
+        }
+        if l == "false" {
+            return "0"
+        }
+        return "(" + d + ")"
+    }
+
+    func ColumnDef(c Column, inlinePk bool) string {
+        if c.Auto && inlinePk {
+            return quoteIdent(c.Name) + " INTEGER PRIMARY KEY AUTOINCREMENT"
+        }
+        return standardColumnDef(this, c, inlinePk, "")
+    }
+
+    func ZeroLiteral(t string) string {
+        if t == "bool" {
+            return "0"
+        }
+        if t == "bytes" {
+            return "X''"
+        }
+        if t == "int64" || t == "int32" || t == "int16" || t == "float" || t == "float32" || t == "decimal" {
+            return "0"
+        }
+        if t == "time" {
+            return "'0001-01-01 00:00:00+00'"
+        }
+        if t == "json" {
+            return "'null'"
+        }
+        return "''"
+    }
+
+    func AlterColumn(table string, c Column) []string {
+        return ["-- SQLite cannot alter column " + table + "." + c.Name + " (rebuild the table)"]
+    }
+
+    func AddForeignKey(table string, name string, def string) string {
+        return "-- SQLite cannot add foreign key " + name + " to an existing table"
+    }
+
+    func DropForeignKey(table string, name string) string {
+        return "-- SQLite cannot drop foreign key " + name
+    }
+
+    // ---- ANSI defaults ----
+
+    func Quote(ident string) string {
+        return ansiQuote(this, ident)
+    }
+
+    func Placeholder(n int) string {
+        return ansiPlaceholder(this, n)
+    }
+
+    func AggregateCast(f string, isInt bool) string {
+        return ansiAggregateCast(this, f, isInt)
+    }
+
+    func Lock(mode string, wait string) string! {
+        return ansiLock(this, mode, wait)?
+    }
+
+    func DistinctOn() bool {
+        return ansiDistinctOn(this)
+    }
+}
+
+// The SQLite library version as 3039000 for 3.39.0.
+func sqliteVersion() int {
+    var n = 0
+    for part in strings.Split(database.sqlite.Version(), ".") {
+        n = n * 1000 + (try strconv.Atoi(part) else 0)
+    }
+    return n
+}

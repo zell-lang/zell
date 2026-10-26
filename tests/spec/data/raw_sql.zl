@@ -1,0 +1,40 @@
+// test: data.Sql<T>/Sql1/Sql2/Sql3 embed a raw SQL expression of a declared type in a lambda: each ? takes the next argument's SQL (columns stay columns, values are bound parameters, never text), ?? is a literal ?; the text must be a literal (a captured string fails the query); usable in Where, OrderBy and Select
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.raw_sql
+
+import io
+
+struct User {
+    Id   int
+    Name string
+    Age  int
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    ctx.Users.AddRange([new User{Name: "Ann", Age: 30}, new User{Name: "bob", Age: 17}])
+    _ = await ctx.SaveChanges()?
+
+    var name = "BOB"
+    var q = ctx.Users.Where((u) => data.Sql1<string>("lower(?)", u.Name) == data.Sql1<string>("lower(?)", name))
+    println(q.ToSql(), q.Args())
+    println((await q.Single()?).Name)
+    var p = ctx.Users.OrderBy((u) => data.Sql<int>("random() * 0")).ThenBy((u) => u.Id).Select((u) => (u.Name, data.Sql2<int>("? + ?", u.Age, 1), data.Sql<bool>("'a??' <> 'b'")))
+    println(p.ToSql())
+    println(await p.ToList()?)
+    println(pg.Users.Where((u) => data.Sql2<bool>("? ~* ?", u.Name, "^a")).ToSql())
+    var text = "lower(?)"
+    try {
+        _ = await ctx.Users.Where((u) => data.Sql1<string>(text, u.Name) == "a").ToList()?
+    } catch err {
+        println(err.Message())
+    }
+}

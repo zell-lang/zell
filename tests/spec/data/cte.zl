@@ -1,0 +1,47 @@
+// test: AsCte names a query as a common table expression and Recursive builds WITH RECURSIVE over a self-referencing table (the subtree of a category, the path to the root); the results compose with Where, OrderBy, Count and Select, and parameters of the seed and the step stay bound
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.cte
+
+import io
+
+struct Category {
+    Id       int
+    Name     string
+    ParentId int
+}
+
+struct Shop {
+    data.Context
+    Categories data.Set<Category>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    var root = new Category{Name: "all"}
+    ctx.Categories.Add(root)
+    _ = await ctx.SaveChanges()?
+    var books = new Category{Name: "books", ParentId: root.Id}
+    var music = new Category{Name: "music", ParentId: root.Id}
+    ctx.Categories.AddRange([books, music])
+    _ = await ctx.SaveChanges()?
+    ctx.Categories.AddRange([new Category{Name: "novels", ParentId: books.Id}, new Category{Name: "poetry", ParentId: books.Id}, new Category{Name: "jazz", ParentId: music.Id}])
+    _ = await ctx.SaveChanges()?
+
+    var id = books.Id
+    var sub = ctx.Categories.Where((c) => c.Id == id).Recursive((child, parent) => child.ParentId == parent.Id)
+    println(sub.ToSql(), sub.Args())
+    for c in await sub.OrderBy((c) => c.Name).ToList()? {
+        println(" ", c.Name)
+    }
+    println(await ctx.Categories.Where((c) => c.Id == root.Id).Recursive((child, parent) => child.ParentId == parent.Id).Count()?)
+    var leaf = "jazz"
+    var path = ctx.Categories.Where((c) => c.Name == leaf).Recursive((up, down) => down.ParentId == up.Id).Where((c) => c.Name != leaf).OrderBy((c) => c.Id).Select((c) => c.Name)
+    println(pg.Categories.Where((c) => c.Name == leaf).Recursive((up, down) => down.ParentId == up.Id).ToSql())
+    println(await path.ToList()?)
+    var named = ctx.Categories.Where((c) => c.ParentId == 0).AsCte("roots")
+    println(named.ToSql())
+    println((await named.Single()?).Name)
+}

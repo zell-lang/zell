@@ -1,0 +1,288 @@
+namespace data
+
+// Window functions and raw SQL fragments in query lambdas (docs/
+// FRAMEWORK.md section 3, "Advanced SQL"). Both are translated only; in
+// memory (Compile()) the window functions return zero values.
+//
+//   ctx.Employees.Select((e) => (e.Name, data.RowNumber(data.Over().PartitionBy(e.Dept).OrderByDescending(e.Salary))))
+//   ctx.Users.Where((u) => data.Sql<string>("lower(?)", u.Name) == "ann")
+
+// A window (OVER (PARTITION BY ... ORDER BY ...)), built in the lambda:
+// data.Over().PartitionBy(e.Dept).OrderBy(e.Salary).
+struct Window {
+    // PARTITION BY a value or a tuple of values.
+    @expr.call
+    func PartitionBy(k any) Window {
+        return *this
+    }
+
+    // ORDER BY a value or a tuple of values, ascending.
+    @expr.call
+    func OrderBy(k any) Window {
+        return *this
+    }
+
+    @expr.call
+    func OrderByDescending(k any) Window {
+        return *this
+    }
+}
+
+// An empty window: OVER ().
+@expr.call
+func Over() Window {
+    return Window{}
+}
+
+// ROW_NUMBER() OVER w.
+@expr.call
+func RowNumber(w Window) int {
+    return 0
+}
+
+// RANK() OVER w.
+@expr.call
+func Rank(w Window) int {
+    return 0
+}
+
+// DENSE_RANK() OVER w.
+@expr.call
+func DenseRank(w Window) int {
+    return 0
+}
+
+// LAG(x) OVER w: the value of the previous row (nil for the first).
+@expr.call
+func Lag<V>(x V, w Window) *V {
+    return nil
+}
+
+// LEAD(x) OVER w: the value of the next row (nil for the last).
+@expr.call
+func Lead<V>(x V, w Window) *V {
+    return nil
+}
+
+// SUM(x) OVER w (a running total when w is ordered).
+@expr.call
+func SumOver<N>(x N, w Window) N {
+    numberCheck<N>("Sum")
+    return x
+}
+
+// AVG(x) OVER w.
+@expr.call
+func AverageOver<N>(x N, w Window) float {
+    numberCheck<N>("Average")
+    return 0.0
+}
+
+@expr.call
+func MinOver<N>(x N, w Window) N {
+    return x
+}
+
+@expr.call
+func MaxOver<N>(x N, w Window) N {
+    return x
+}
+
+// COUNT(*) OVER w.
+@expr.call
+func CountOver(w Window) int {
+    return 0
+}
+
+// A raw SQL expression of type T: each ? of text is replaced by the next
+// argument's SQL (a column, an expression, or a bound parameter for a
+// value; never interpolated), ?? is a literal ?. text must be a string
+// literal.
+@expr.call
+func Sql<T>(text string) T {
+    panic("data.Sql is translated to SQL: use it inside a query lambda")
+}
+
+@expr.call
+func Sql1<T>(text string, a any) T {
+    panic("data.Sql1 is translated to SQL: use it inside a query lambda")
+}
+
+@expr.call
+func Sql2<T>(text string, a any, b any) T {
+    panic("data.Sql2 is translated to SQL: use it inside a query lambda")
+}
+
+@expr.call
+func Sql3<T>(text string, a any, b any, c any) T {
+    panic("data.Sql3 is translated to SQL: use it inside a query lambda")
+}
+
+func isWindowCall(f string) bool {
+    return f == "data.RowNumber" ||
+        f == "data.Rank" ||
+        f == "data.DenseRank" ||
+        f == "data.Lag" ||
+        f == "data.Lead" ||
+        f == "data.SumOver" ||
+        f == "data.AverageOver" ||
+        f == "data.MinOver" ||
+        f == "data.MaxOver" ||
+        f == "data.CountOver"
+}
+
+// The OVER (...) clause of a window expression.
+func windowSpec(cx *tcx, n *expr.Node) string! {
+    var parts []string = []
+    var orders []string = []
+    var cur = n
+    var done = false
+    for !done {
+        switch *cur {
+        case expr.Node.Call(f, args, _):
+            if f == "data.Over" {
+                done = true
+            } else if f == "data.Window.PartitionBy" || f == "data.Window.OrderBy" || f == "data.Window.OrderByDescending" {
+                var keys = keyValues(cx, args[1])?
+                var ks []string = []
+                for k in keys {
+                    if f == "data.Window.OrderBy" {
+                        ks = append(ks, k.s + " ASC")
+                    } else if f == "data.Window.OrderByDescending" {
+                        ks = append(ks, k.s + " DESC")
+                    } else {
+                        ks = append(ks, k.s)
+                    }
+                }
+                // the chain is walked from its end: earlier calls first
+                if f == "data.Window.PartitionBy" {
+                    parts = prepend(parts, ks)
+                } else {
+                    orders = prepend(orders, ks)
+                }
+                cur = args[0]
+            } else {
+                return untranslatable("a window is built with data.Over().PartitionBy(...).OrderBy(...)")
+            }
+        default:
+            return untranslatable("a window is built in the lambda: data.Over().PartitionBy(...).OrderBy(...)")
+        }
+    }
+    var s = "OVER ("
+    if len(parts) > 0 {
+        s = s + "PARTITION BY " + strings.Join(parts, ", ")
+    }
+    if len(orders) > 0 {
+        if len(parts) > 0 {
+            s = s + " "
+        }
+        s = s + "ORDER BY " + strings.Join(orders, ", ")
+    }
+    return s + ")"
+}
+
+func prepend(xs []string, ys []string) []string {
+    var out []string = []
+    for y in ys {
+        out = append(out, y)
+    }
+    for x in xs {
+        out = append(out, x)
+    }
+    return out
+}
+
+func windowCall(cx *tcx, f string, args []*expr.Node, t *reflect.TypeInfo) sv! {
+    var m = f[5..len(f)]
+    var w = windowSpec(cx, args[len(args) - 1])?
+    if m == "RowNumber" || m == "Rank" || m == "DenseRank" || m == "CountOver" {
+        var fn = "ROW_NUMBER()"
+        if m == "Rank" {
+            fn = "RANK()"
+        } else if m == "DenseRank" {
+            fn = "DENSE_RANK()"
+        } else if m == "CountOver" {
+            fn = "COUNT(*)"
+        }
+        return scalarSv(fn + " " + w, reflect.TypeOf<int>())
+    }
+    var x = trValue(cx, args[0])?
+    if m == "Lag" || m == "Lead" {
+        return scalarSv(strings.ToUpper(m) + "(" + x.s + ") " + w, t)
+    }
+    var agg = "MAX"
+    var k = ""
+    if m == "SumOver" {
+        agg = "SUM"
+        k = cx.d.AggregateCast("Sum", isIntTy(x.t))
+    } else if m == "AverageOver" {
+        agg = "AVG"
+        k = cx.d.AggregateCast("Average", false)
+    } else if m == "MinOver" {
+        agg = "MIN"
+    }
+    var s = agg + "(" + x.s + ") " + w
+    if k != "" {
+        s = "CAST(" + s + " AS " + cx.d.CastType(k) + ")"
+    }
+    return scalarSv(s, t)
+}
+
+// data.Sql<T>(text, args...): the text with each ? replaced by an
+// argument's SQL.
+func rawSql(cx *tcx, args []*expr.Node, t *reflect.TypeInfo) sv! {
+    var text = ""
+    switch *args[0] {
+    case expr.Node.Const(v, _):
+        switch v {
+        case string s:
+            text = s
+        }
+    default:
+        return untranslatable("the SQL text of data.Sql must be a string literal (values go in as arguments, bound as parameters)")
+    }
+    var b = strings.Builder{}
+    var next = 1
+    var i = 0
+    var n = len(text)
+    var start = 0
+    for i < n {
+        if int(text[i]) == 63 {
+            b.Write(text[start..i])
+            if i + 1 < n && int(text[i + 1]) == 63 {
+                b.Write("?")
+                i += 2
+            } else {
+                if next >= len(args) {
+                    return untranslatable("data.Sql: more ? than arguments in \"" + text + "\"")
+                }
+                var a = trValue(cx, args[next])?
+                b.Write(a.s)
+                next += 1
+                i += 1
+            }
+            start = i
+            continue
+        }
+        i += 1
+    }
+    b.Write(text[start..n])
+    if next != len(args) {
+        return untranslatable("data.Sql: more arguments than ? in \"" + text + "\"")
+    }
+    return scalarSv("(" + b.String() + ")", t)
+}
+
+// s LIKE pattern ESCAPE '\' (% any run, _ one character, \ escapes the
+// next character); build a pattern from user text with EscapeLike:
+// data.Like(u.Name, data.EscapeLike(q) + "%").
+@expr.call
+func Like(s string, pattern string) bool {
+    return likeMatch(s, pattern)
+}
+
+// s with the LIKE wildcards % and _ and the escape \ escaped (an
+// ordinary function: call it outside the lambda or on captured values).
+func EscapeLike(s string) string {
+    return strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(s, "\\", "\\\\"), "%", "\\%"), "_", "\\_")
+}

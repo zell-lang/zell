@@ -723,6 +723,16 @@ impl<'a> Sema<'a> {
         fid
     }
 
+    /// `e` contains a call of an `@expr.call` function (not inside a
+    /// closure): such a subexpression is never a slot.
+    fn has_marked_call(&self, e: &hir::Expr) -> bool {
+        match &e.kind {
+            ExprKind::Call { callee: Callee::Func(fid), .. } if self.tree_marked(*fid) => true,
+            ExprKind::Closure { .. } => false,
+            _ => children(e).into_iter().any(|c| self.has_marked_call(c)),
+        }
+    }
+
     /// Whether function `fid` is marked `@expr.call` (allowed in trees).
     fn tree_marked(&self, fid: FuncId) -> bool {
         let d = match self.func_src.get(fid.0 as usize) {
@@ -889,8 +899,7 @@ impl<'a> Sema<'a> {
         // A call of an `@expr.call` function stays a node even without
         // parameters (`data.Exists(q)`: the library translates it, the
         // value would only be computed in memory); its arguments are slots.
-        let marked = matches!(&e.kind, ExprKind::Call { callee: Callee::Func(fid), .. } if self.tree_marked(*fid));
-        if !marked && !tb.mentions_param(f, e) {
+        if !self.has_marked_call(e) && !tb.mentions_param(f, e) {
             self.tree_slot(tb, f, e);
             return;
         }

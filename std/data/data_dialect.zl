@@ -1,0 +1,433 @@
+namespace data
+
+// SQL dialects: the provider plug-in of the ORM (docs/FRAMEWORK.md
+// "Dialects", docs/EXTRACTION.md). The core (data.zl, data_query.zl,
+// data_sql.zl, data_sub.zl, data_save.zl, data_migrate.zl) walks the
+// expression trees and writes the SQL every database shares: SELECT,
+// JOIN, GROUP BY/HAVING, subqueries, CTEs, set operations, standard
+// window functions, INSERT/UPDATE/DELETE. A Dialect supplies the rest:
+// placeholders, paging, casts, the functions that differ, the calls only
+// one database has (TranslateCall/TranslateMember), write and locking
+// clauses, and the DDL of migrations. A dialect implements every
+// method; ansi<Method>(d, ...) below are the ANSI versions to delegate to
+// (interface default methods would be checked in every program). A Provider resolves to a Dialect by name through a registry;
+// a driver package registers its dialect (RegisterDialect) and the core
+// needs no change for it. data_sqlite.zl and data_postgres.zl are the two
+// built-in dialects (the future zell-lang/sqlite and zell-lang/postgres).
+//
+// Identifiers are written ANSI-quoted ("name") by the core; Quote is used
+// by the DDL generator. A database with other quoting (MySQL) turns ANSI
+// quotes on for its connections (sql_mode=ANSI_QUOTES).
+
+interface Dialect {
+    // the DDL methods and Name, Quote
+    data.DdlDialect
+
+    // The placeholder of argument n (1-based).
+    func Placeholder(n int) string
+
+    // LIMIT/OFFSET of a query (take < 0: no limit, skip 0: no offset).
+    func Paging(take int, skip int) string
+
+    // Bound parameters per statement.
+    func MaxParams() int
+
+    // INSERT INTO t DEFAULT VALUES for several rows in one statement.
+    func MultiRowDefaultValues() bool
+
+    // The SQL type of CAST(x AS ...) to a scalar kind: int64, int32,
+    // float, string.
+    func CastType(kind string) string
+
+    // The kind an aggregate's result is cast to ("": none): f is Sum,
+    // Average, Min or Max, isInt whether its argument is an integer.
+    func AggregateCast(f string, isInt bool) string
+
+    // Translates a call the core does not know, or one whose SQL differs
+    // (the core asks first): emits through b and returns true, or returns
+    // false to fall through to the common translation.
+    func TranslateCall(b *SqlBuilder, name string, args []*expr.Node, t *reflect.TypeInfo) bool!
+
+    // Translates field f (of static type t) of a scalar value base (a path
+    // into a @data.jsonb column): emits through b and returns true, or false.
+    func TranslateMember(b *SqlBuilder, base SqlExpr, f *reflect.FieldInfo, t *reflect.TypeInfo) bool!
+
+    // The driver value of an array column's value (xs: driver values).
+    func BindArray(xs []any) any
+
+    // INSERT/UPDATE/DELETE ... RETURNING.
+    func Returning() bool
+
+    // The row locking clause of a query: mode is "update" or "share",
+    // wait "" (wait), "nowait" or "skip locked".
+    func Lock(mode string, wait string) string!
+
+    // Fails if the database cannot run a query needing feature
+    // ("right-join": RIGHT and FULL joins).
+    func Require(feature string) void!
+
+    // SELECT DISTINCT ON (keys).
+    func DistinctOn() bool
+}
+
+// A dialect that opens its own connections (data.Open; data.OpenDB takes
+// a pool).
+interface Opener {
+    // The pool for a connection string.
+    func Open(dsn string) *database.sql.DB!
+}
+
+// The ANSI default of Dialect.Quote.
+func ansiQuote(d DdlDialect, ident string) string {
+    return quoteIdent(ident)
+}
+
+// The ANSI default of Dialect.Placeholder.
+func ansiPlaceholder(d Dialect, n int) string {
+    return "?"
+}
+
+// The ANSI default of Dialect.Paging.
+func ansiPaging(d Dialect, take int, skip int) string {
+    var s = ""
+    if take >= 0 {
+        s = " LIMIT " + strconv.Itoa(take)
+    }
+    if skip > 0 {
+        s = s + " OFFSET " + strconv.Itoa(skip)
+    }
+    return s
+}
+
+// The ANSI default of Dialect.MaxParams.
+func ansiMaxParams(d Dialect) int {
+    return 32766
+}
+
+// The ANSI default of Dialect.MultiRowDefaultValues.
+func ansiMultiRowDefaultValues(d Dialect) bool {
+    return true
+}
+
+// The ANSI default of Dialect.CastType.
+func ansiCastType(d Dialect, kind string) string {
+    if kind == "float" {
+        return "double precision"
+    }
+    if kind == "int32" {
+        return "integer"
+    }
+    if kind == "string" {
+        return "text"
+    }
+    return "bigint"
+}
+
+// The ANSI default of Dialect.AggregateCast.
+func ansiAggregateCast(d Dialect, f string, isInt bool) string {
+    return ""
+}
+
+// The ANSI default of Dialect.BindArray.
+func ansiBindArray(d Dialect, xs []any) any {
+    return xs
+}
+
+// The ANSI default of Dialect.Returning.
+func ansiReturning(d Dialect) bool {
+    return true
+}
+
+// The ANSI default of Dialect.Lock.
+func ansiLock(d Dialect, mode string, wait string) string! {
+    return error("data: row locking (FOR UPDATE/FOR SHARE) is not supported by " + d.Name())
+}
+
+// The ANSI default of Dialect.Require.
+func ansiRequire(d Dialect, feature string) void! {
+
+}
+
+// The ANSI default of Dialect.DistinctOn.
+func ansiDistinctOn(d Dialect) bool {
+    return false
+}
+
+// The ANSI default of Dialect.ColumnType.
+func ansiColumnType(d DdlDialect, c Column) string {
+    return "text"
+}
+
+// The ANSI default of Dialect.DefaultSql.
+func ansiDefaultSql(d DdlDialect, sql string) string {
+    return sql
+}
+
+// The ANSI default of Dialect.ColumnDef.
+func ansiColumnDef(d DdlDialect, c Column, inlinePk bool) string {
+    return standardColumnDef(d, c, inlinePk, "")
+}
+
+// The ANSI default of Dialect.ZeroLiteral.
+func ansiZeroLiteral(d DdlDialect, t string) string {
+    if t == "bool" {
+        return "false"
+    }
+    if t == "int64" || t == "int32" || t == "int16" || t == "float" || t == "float32" || t == "decimal" {
+        return "0"
+    }
+    if t == "time" {
+        return "'0001-01-01 00:00:00+00'"
+    }
+    if t == "json" {
+        return "'null'"
+    }
+    return "''"
+}
+
+// The ANSI default of Dialect.AlterColumn.
+func ansiAlterColumn(d DdlDialect, table string, c Column) []string {
+    var t = "ALTER TABLE " + d.Quote(table) + " ALTER COLUMN " + d.Quote(c.Name)
+    var out = [t + " TYPE " + columnTypeOf(d, c)]
+    if c.Nullable {
+        out = append(out, t + " DROP NOT NULL")
+    } else {
+        out = append(out, t + " SET NOT NULL")
+    }
+    if c.Default == "" {
+        out = append(out, t + " DROP DEFAULT")
+    } else {
+        out = append(out, t + " SET DEFAULT " + c.Default)
+    }
+    return out
+}
+
+// The ANSI default of Dialect.AddForeignKey.
+func ansiAddForeignKey(d DdlDialect, table string, name string, def string) string {
+    return "ALTER TABLE " + d.Quote(table) + " ADD " + def
+}
+
+// The ANSI default of Dialect.DropForeignKey.
+func ansiDropForeignKey(d DdlDialect, table string, name string) string {
+    return "ALTER TABLE " + d.Quote(table) + " DROP CONSTRAINT " + d.Quote(name)
+}
+
+// The ANSI default of Dialect.CreateIndex.
+func ansiCreateIndex(d DdlDialect, table string, name string, cols []string, unique bool, using string) string! {
+    if using != "" {
+        return error("data: index method " + using + " is not supported by " + d.Name())
+    }
+    var u = ""
+    if unique {
+        u = "UNIQUE "
+    }
+    return "CREATE " + u + "INDEX " + d.Quote(name) + " ON " + d.Quote(table) + " (" + strings.Join(cols, ", ") + ")"
+}
+
+// `name type<after> PRIMARY KEY|NOT NULL DEFAULT ...` (after: an identity
+// clause).
+func standardColumnDef(d DdlDialect, c Column, inlinePk bool, after string) string {
+    var b = d.Quote(c.Name) + " " + columnTypeOf(d, c) + after
+    if inlinePk {
+        b = b + " PRIMARY KEY"
+    } else if !c.Nullable {
+        b = b + " NOT NULL"
+    }
+    if c.Default != "" && !c.Auto {
+        b = b + " DEFAULT " + d.DefaultSql(c.Default)
+    }
+    return b
+}
+
+// c.SqlType or the dialect's type of c.
+func columnTypeOf(d DdlDialect, c Column) string {
+    if c.SqlType != "" {
+        return c.SqlType
+    }
+    return d.ColumnType(c)
+}
+
+// The JSON key of field f (encoding.json: @json(name:) or the name).
+func jsonKey(f *reflect.FieldInfo) string {
+    var a = f.Attribute<reflect.json>()
+    if a != nil && a.name != "" {
+        return a.name
+    }
+    return f.Name
+}
+
+// A JSON path in SQL text built by TranslateMember: the column and the
+// keys so far, kept in the text as `(col #>> '{a,b}')`.
+func jsonPathParts(text string) (string, []string) {
+    var keys []string = []
+    if strings.HasPrefix(text, "(") && strings.HasSuffix(text, "}')") {
+        var i = strings.Index(text, " #>> '{")
+        if i > 0 {
+            for k in strings.Split(text[i + 7..len(text) - 3], ",") {
+                keys = append(keys, k)
+            }
+            return (text[1..i], keys)
+        }
+    }
+    return (text, keys)
+}
+
+// Whether a value of type t is a JSON document node (a struct or a map
+// inside a @data.jsonb column) rather than a leaf.
+func jsonInner(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    return b != nil && (b.Kind == reflect.Kind.Map || (b.Kind == reflect.Kind.Struct && b.FullName != "time.Time" && b.FullName != "math.big.Decimal"))
+}
+
+// The keys of a JSON path member access: (column, keys, leaf), or ok
+// false when base is not a @data.jsonb column or a path into one.
+func jsonMember(base SqlExpr, f *reflect.FieldInfo, t *reflect.TypeInfo) (string, []string, bool) {
+    if f == nil || !jsonInner(base.Type) {
+        return ("", [], false)
+    }
+    var (col, keys) = jsonPathParts(base.Text)
+    keys = append(keys, jsonKey(f))
+    return (col, keys, true)
+}
+
+// ---- registry -----------------------------------------------------------------
+
+struct dialectsHolder {
+    names []string
+    ds    []Dialect
+}
+
+func dialectRegistry() *dialectsHolder {
+    var slots = diag.rtSlots()
+    if slots == nil {
+        slots = map[string]any{}
+        diag.rtSetSlots(slots)
+    }
+    switch slots["data.dialects"] {
+        case *dialectsHolder h:
+            return h
+    }
+    var h = new dialectsHolder{names: [], ds: []}
+    slots["data.dialects"] = h
+    return h
+}
+
+// Registers dialect d under d.Name() (a driver package calls it before
+// opening contexts); a later registration of the same name replaces it.
+func RegisterDialect(d Dialect) {
+    var h = dialectRegistry()
+    for i, n in h.names {
+        if n == d.Name() {
+            h.ds[i] = d
+            return
+        }
+    }
+    h.names = append(h.names, d.Name())
+    h.ds = append(h.ds, d)
+}
+
+// The dialect registered as name (nil: none).
+func DialectByName(name string) Dialect {
+    var h = dialectRegistry()
+    for i, n in h.names {
+        if n == name {
+            return h.ds[i]
+        }
+    }
+    var none Dialect = nil
+    return none
+}
+
+// The registry key of a provider.
+func providerName(p Provider) string {
+    if p == Provider.Postgres {
+        return "postgres"
+    }
+    return "sqlite"
+}
+
+// The dialect of provider p: the registered one, else the built-in one
+// (the built-ins register themselves here until they move to their own
+// packages).
+func dialectOf(p Provider) Dialect {
+    var d = DialectByName(providerName(p))
+    if d == nil {
+        if p == Provider.Postgres {
+            d = PostgresDialect{}
+        } else {
+            d = SqliteDialect{}
+        }
+        RegisterDialect(d)
+    }
+    return d
+}
+
+// The index of a dialect in the registry (plans are cached per dialect).
+func dialectKey(d Dialect) int {
+    var h = dialectRegistry()
+    for i, n in h.names {
+        if n == d.Name() {
+            return i
+        }
+    }
+    return 0
+}
+
+// ---- the translator as seen by a dialect --------------------------------------------
+
+// A translated scalar: its SQL text and static type.
+struct SqlExpr {
+    Text string
+    Type *reflect.TypeInfo
+}
+
+// The translation state handed to Dialect.TranslateCall/TranslateMember:
+// it translates subtrees with the core (constants and captured values
+// become bound parameters) and takes the dialect's result.
+struct SqlBuilder {
+    cx  *tcx
+    out sv
+    set bool
+
+    // The dialect being translated for.
+    func Dialect() Dialect {
+        return this.cx.d
+    }
+
+    // A scalar subtree.
+    func Value(n *expr.Node) SqlExpr! {
+        var v = trValue(this.cx, n)?
+        return SqlExpr{Text: v.s, Type: v.t}
+    }
+
+    // A condition subtree (bool).
+    func Pred(n *expr.Node) SqlExpr! {
+        var v = trPred(this.cx, n)?
+        return SqlExpr{Text: v.s, Type: v.t}
+    }
+
+    // The value of a Const or Captured node (to inspect it at translation
+    // time, e.g. a configuration name), and whether n is one. A plan that
+    // reads it is not cached.
+    func Constant(n *expr.Node) (any, bool) {
+        switch *n {
+        case expr.Node.Const(v, _):
+            return (v, true)
+        case expr.Node.Captured(_, _, v, _):
+            this.cx.nocache = true
+            return (v, true)
+        }
+        return (nil, false)
+    }
+
+    // The result: text of type t.
+    func Emit(text string, t *reflect.TypeInfo) {
+        this.out = sv{s: text, t: t}
+        this.set = true
+    }
+
+    // An error: the expression cannot be translated (why).
+    func Fail(why string) error {
+        return untranslatable(why)
+    }
+}

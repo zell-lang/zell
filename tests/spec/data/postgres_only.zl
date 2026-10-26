@@ -1,0 +1,70 @@
+// test: the PostgreSQL-only features as SQL text on the PostgreSQL dialect (jsonb operators and jsonb_set, array operators and ANY, ILIKE, regex, full-text search with ts_rank, DISTINCT ON, row locks) and the run-time error each gives on SQLite ("... is not supported by sqlite")
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.postgres_only
+
+import encoding.json
+import io
+
+struct Meta {
+    Plan string
+}
+
+struct User {
+    Id   int
+    Name string
+    Bio  string
+    @data.jsonb Meta Meta
+    Tags []string
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+async func fails(what string, q data.Query<User>) void {
+    try {
+        _ = await q.ToList()?
+        println(what, "ran")
+    } catch err {
+        println(what, err.Message())
+    }
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    var tags = ["a", "b"]
+    var doc = json.Format(Meta{Plan: "pro"})
+    var q = "fast compiler"
+    println(pg.Users.Where((u) => data.JsonContains(u.Meta, doc) && data.JsonHasKey(u.Meta, "Plan") && data.JsonHasAnyKey(u.Meta, tags) && data.JsonHasAllKeys(u.Meta, ["x"]) && !data.JsonContainedBy(u.Meta, "{}")).ToSql())
+    println(pg.Users.Where((u) => data.JsonPathExists(u.Meta, "$.Plan") || data.JsonPathMatch(u.Meta, "$.Plan == \"pro\"")).ToSql())
+    println(pg.Users.Where((u) => data.ArrayContains(u.Tags, tags) && data.ArrayOverlaps(u.Tags, ["z"]) && data.ArrayContainedBy(u.Tags, tags) && "a" == data.AnyOf(u.Tags) && len(u.Tags) > 1).ToSql())
+    println(pg.Users.Where((u) => data.ILike(u.Name, "a%") && data.Regex(u.Name, "^A") && !data.IRegex(u.Bio, "x$")).ToSql())
+    var fts = pg.Users.Where((u) => data.Matches(data.ToTsVector("english", u.Bio), data.WebSearchToTsQuery("english", q))).OrderByDescending((u) => data.TsRank(data.ToTsVector("english", u.Bio), data.PlainToTsQuery("english", q)))
+    println(fts.ToSql(), fts.Args())
+    println(pg.Users.AsQuery().DistinctOn((u) => (u.Name, u.Bio)).OrderBy((u) => (u.Name, u.Bio, u.Id)).ToSql())
+    println(pg.Users.Where((u) => u.Id > 1).ForUpdate().SkipLocked().Take(5).ToSql())
+    println(pg.Users.AsQuery().ForShare().NoWait().ToSql())
+    println(pg.Users.Where((u) => u.Name == "a").ForUpdate().ToSql())
+
+    await fails("ILike", ctx.Users.Where((u) => data.ILike(u.Name, "a%")))
+    await fails("JsonContains", ctx.Users.Where((u) => data.JsonContains(u.Meta, doc)))
+    await fails("ArrayOverlaps", ctx.Users.Where((u) => data.ArrayOverlaps(u.Tags, tags)))
+    await fails("Matches", ctx.Users.Where((u) => data.Matches(data.ToTsVector("english", u.Bio), data.PlainToTsQuery("english", q))))
+    await fails("DistinctOn", ctx.Users.AsQuery().DistinctOn((u) => u.Name))
+    await fails("ForUpdate", ctx.Users.AsQuery().ForUpdate())
+    try {
+        await ctx.Notify("ch", "x")?
+    } catch err {
+        println("Notify", err.Message())
+    }
+    try {
+        _ = await ctx.Listen("ch")?
+    } catch err {
+        println("Listen", err.Message())
+    }
+    println(data.ILike("Ann", "a%"), data.Regex("Ann", "^A"), data.ArrayOverlaps(["a"], tags), data.Matches(data.ToTsVector("english", "A fast compiler"), data.PlainToTsQuery("english", q)))
+}

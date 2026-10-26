@@ -1,0 +1,68 @@
+// test: a @data.jsonb struct field is a JSON document (TEXT on SQLite, jsonb on PostgreSQL) and []T fields of scalars are arrays (JSON arrays on SQLite, text[]/bigint[] on PostgreSQL): round trip, change tracking, paths in lambdas (json_extract vs ->>/#>> with casts), len of an array, Setters on both, GIN indexes in the DDL, LIKE with EscapeLike, UpsertWith/InsertOrIgnore and RETURNING on SQLite
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.jsonb_arrays
+
+import encoding.json
+import io
+
+struct Limits {
+    Seats int
+    Pro   bool
+}
+
+struct Meta {
+    Plan   string
+    Limits Limits
+}
+
+struct User {
+    Id   int
+    Name string
+    @data.jsonb @data.index(using: "gin") Meta Meta
+    Tags []string
+    Nums []int
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    for s in pg.CreateScript() {
+        println(s)
+    }
+    for s in ctx.CreateScript() {
+        println(s)
+    }
+    await ctx.EnsureCreated()?
+    var ann = new User{Name: "Ann", Meta: Meta{Plan: "pro", Limits: Limits{Seats: 5, Pro: true}}, Tags: ["a", "b"], Nums: [1, 2, 3]}
+    ctx.Users.AddRange([ann, new User{Name: "b_%", Meta: Meta{Plan: "free", Limits: Limits{Seats: 1, Pro: false}}, Tags: [], Nums: [7]}])
+    _ = await ctx.SaveChanges()?
+    ann.Tags = append(ann.Tags, "c")
+    println(ctx.Entry(ann).ChangedColumns())
+    _ = await ctx.SaveChanges()?
+    var back = await ctx.Users.AsNoTracking().OrderBy((u) => u.Id).ToList()?
+    for u in back {
+        println(u.Name, u.Meta.Plan, u.Meta.Limits.Seats, u.Meta.Limits.Pro, u.Tags, u.Nums)
+    }
+    var q = ctx.Users.Where((u) => u.Meta.Limits.Seats > 2 && u.Meta.Plan == "pro" && len(u.Tags) == 3)
+    println(q.ToSql())
+    println(pg.Users.Where((u) => u.Meta.Limits.Seats > 2 && u.Meta.Plan == "pro" && u.Meta.Limits.Pro && len(u.Tags) == 3).ToSql())
+    println((await q.Single()?).Name)
+    var like = ctx.Users.Where((u) => data.Like(u.Name, data.EscapeLike("b_%")))
+    println(like.ToSql(), like.Args(), await like.Count()?)
+    var n = await ctx.Users.Where((u) => u.Name == "Ann").ExecuteUpdate((s) => s.Set((u) => u.Tags, ["x"]).Set((u) => u.Meta, Meta{Plan: "team", Limits: Limits{Seats: 9, Pro: true}}))?
+    var one = await ctx.Users.AsNoTracking().Where((u) => u.Meta.Plan == "team").Single()?
+    println(n, one.Tags, one.Meta.Limits.Seats, json.Format(one.Meta))
+    ctx.Users.InsertOrIgnore(new User{Id: ann.Id, Name: "dup", Meta: Meta{}, Tags: [], Nums: []}, (u) => u.Id)
+    ctx.Users.UpsertWith(new User{Id: ann.Id, Name: "Ann2", Meta: Meta{Plan: "x"}, Tags: [], Nums: []}, (u) => u.Id, (u) => u.Name)
+    _ = await ctx.SaveChanges()?
+    var names = await ctx.Users.AsNoTracking().OrderBy((u) => u.Id).Select((u) => (u.Name, u.Meta.Plan)).ToList()?
+    println(names)
+    var gone = await ctx.Users.Where((u) => u.Name == "b_%").ExecuteDeleteReturning((u) => u.Name)?
+    println(gone, await ctx.Users.Count()?)
+}

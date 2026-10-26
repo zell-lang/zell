@@ -593,6 +593,18 @@ func columnType(t *reflect.TypeInfo) colType {
     return colType{kind: "", nullable: false, base: nil}
 }
 
+// The column type of a []T of scalars: "string[]", "int64[]", ... ("": none).
+func arrayKind(t *reflect.TypeInfo) string {
+    if t.Kind != reflect.Kind.Slice || t.Elem.Kind == reflect.Kind.Uint8 {
+        return ""
+    }
+    var k = scalarKind(t.Elem)
+    if k == "" || k == "bytes" || k == "json" {
+        return ""
+    }
+    return k + "[]"
+}
+
 // A struct that can be the target of a navigation: it has a key (Id,
 // <Type>Id or @key).
 func entityLike(t *reflect.TypeInfo) bool {
@@ -653,6 +665,7 @@ func buildEntity(cm *ctxModel, t *reflect.TypeInfo) *entModel! {
     var navs []*navMeta = []
     var ixFields [][]string = []
     var ixUnique []bool = []
+    var ixUsing []string = []
     var ixNames []string = []
     var keyField = fl.key
     var never = ""
@@ -663,6 +676,14 @@ func buildEntity(cm *ctxModel, t *reflect.TypeInfo) *entModel! {
             continue
         }
         var ct = columnType(f.Type)
+        if f.Attribute<data.jsonb>() != nil {
+            ct = colType{kind: "json", nullable: false, base: f.Type}
+        } else if ct.kind == "" {
+            var ak = arrayKind(f.Type)
+            if ak != "" {
+                ct = colType{kind: ak, nullable: false, base: f.Type}
+            }
+        }
         if ct.kind != "" {
             var c = ColumnMeta{
                 Name: database.sql.SnakeCase(f.Name),
@@ -714,6 +735,7 @@ func buildEntity(cm *ctxModel, t *reflect.TypeInfo) *entModel! {
             if ia != nil {
                 ixFields = append(ixFields, [f.Name])
                 ixUnique = append(ixUnique, ia.unique)
+                ixUsing = append(ixUsing, ia.using)
                 ixNames = append(ixNames, ia.name)
             }
             var pc = fl.prop(f.Name)
@@ -754,6 +776,7 @@ func buildEntity(cm *ctxModel, t *reflect.TypeInfo) *entModel! {
     for ix in fl.indexes {
         ixFields = append(ixFields, ix.fields)
         ixUnique = append(ixUnique, ix.unique)
+        ixUsing = append(ixUsing, "")
         ixNames = append(ixNames, ix.name)
     }
     // the key: @key, Configure's HasKey, else Id or <Type>Id
@@ -839,7 +862,7 @@ func buildEntity(cm *ctxModel, t *reflect.TypeInfo) *entModel! {
             }
             iname = prefix + tableName + "_" + strings.Join(cnames, "_")
         }
-        idx = append(idx, IndexMeta{Name: iname, Columns: cnames, Unique: ixUnique[i]})
+        idx = append(idx, IndexMeta{Name: iname, Columns: cnames, Unique: ixUnique[i], Using: ixUsing[i]})
     }
     var meta = new EntityMeta{Entity: name, Table: tableName, Columns: cols, Key: key, Token: token, Indexes: idx, ForeignKeys: []}
     return new entModel{t: t, meta: meta, navs: navs, fieldCol: fieldCol, fieldNav: fieldNav, bases: bases}
@@ -1134,7 +1157,20 @@ func checkEntity<T>() {
             }
             continue
         }
-        if f.Type.Kind == reflect.Kind.Struct &&
+        if f.Attribute<data.jsonb>() != nil {
+            if !(f.Type.Kind == reflect.Kind.Struct || f.Type.Kind == reflect.Kind.Map) {
+                reflect.Error("data: @jsonb on " + reflect.TypeOf<T>().Name + "." + f.Name + ": the field must be a struct or a map")
+            }
+        } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
+            if !(f.Type.Elem.Kind == reflect.Kind.Int ||
+                f.Type.Elem.Kind == reflect.Kind.Int32 ||
+                f.Type.Elem.Kind == reflect.Kind.Int16 ||
+                f.Type.Elem.Kind == reflect.Kind.Float ||
+                f.Type.Elem.Kind == reflect.Kind.Bool ||
+                f.Type.Elem.Kind == reflect.Kind.String) {
+                reflect.Error("data: field " + reflect.TypeOf<T>().Name + "." + f.Name + " of type " + f.Type.Name + " cannot be mapped to a column (arrays hold int, float, bool or string)")
+            }
+        } else if f.Type.Kind == reflect.Kind.Struct &&
             f.Type != reflect.TypeOf<time.Time>() &&
             f.Type != reflect.TypeOf<math.big.Decimal>() &&
             f.Type != reflect.TypeOf<encoding.json.Value>() {
@@ -1242,7 +1278,13 @@ func scanEntity<T>(em *entModel, vals []any, off int, p *T) void! {
                 f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
             var ci = em.fieldCol[f.Index]
             if ci >= 0 {
-                database.sql.convertInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
+                if f.Attribute<data.jsonb>() != nil {
+                    jsonInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
+                } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
+                    arrayInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
+                } else {
+                    database.sql.convertInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
+                }
             }
         }
     }
@@ -1260,7 +1302,11 @@ func valuesOf<T>(em *entModel, p *T) []any {
                 f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
                 f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
             if em.fieldCol[f.Index] >= 0 {
-                if f.Type.Kind == reflect.Kind.Enum {
+                if f.Attribute<data.jsonb>() != nil {
+                    out = append(out, encoding.json.Format(f.Get(p)))
+                } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
+                    out = append(out, arrayArg(f.Get(p)))
+                } else if f.Type.Kind == reflect.Kind.Enum {
                     out = append(out, fmt.Format("{0}", f.Get(p)))
                 } else {
                     out = append(out, database.sql.argOf(f.Get(p)))
@@ -1282,6 +1328,12 @@ func columnValue<T>(em *entModel, p *T, i int) any {
                 f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
                 f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
             if em.fieldCol[f.Index] == i {
+                if f.Attribute<data.jsonb>() != nil {
+                    return encoding.json.Format(f.Get(p))
+                }
+                if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
+                    return arrayArg(f.Get(p))
+                }
                 if f.Type.Kind == reflect.Kind.Enum {
                     return fmt.Format("{0}", f.Get(p))
                 }
@@ -1303,10 +1355,62 @@ func setColumn<T>(em *entModel, p *T, i int, v any) void! {
                 f.Type.Elem != reflect.TypeOf<math.big.Decimal>() &&
                 f.Type.Elem != reflect.TypeOf<encoding.json.Value>()) {
             if em.fieldCol[f.Index] == i {
-                database.sql.convertInto(f.Addr(p), v, em.meta.Columns[i].Name)?
+                if f.Attribute<data.jsonb>() != nil {
+                    jsonInto(f.Addr(p), v, em.meta.Columns[i].Name)?
+                } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
+                    arrayInto(f.Addr(p), v, em.meta.Columns[i].Name)?
+                } else {
+                    database.sql.convertInto(f.Addr(p), v, em.meta.Columns[i].Name)?
+                }
             }
         }
     }
+}
+
+// A @data.jsonb field from its column (JSON text).
+func jsonInto<F>(p *F, v any, col string) void! {
+    switch v {
+    case nil:
+        return
+    case string s:
+        *p = encoding.json.Parse<F>(s)?
+        return
+    }
+    return error("data: column " + col + ": expected JSON text")
+}
+
+// An array field from its column: a PostgreSQL array ([]any from the
+// driver) or a JSON array (SQLite).
+func arrayInto<E>(p *[]E, v any, col string) void! {
+    switch v {
+    case nil:
+        var none []E = []
+        *p = none
+        return
+    case []any xs:
+        var out []E = []
+        for x in xs {
+            var e E
+            database.sql.convertInto(&e, x, col)?
+            out = append(out, e)
+        }
+        *p = out
+        return
+    case string s:
+        *p = encoding.json.Parse<[]E>(s)?
+        return
+    }
+    return error("data: column " + col + ": expected an array")
+}
+
+// The driver value of an array field: []any (the dialect binds it:
+// PostgreSQL as an array, SQLite as a JSON array).
+func arrayArg<E>(xs []E) any {
+    var out []any = []
+    for x in xs {
+        out = append(out, database.sql.argOf(x))
+    }
+    return out
 }
 
 // Resets the reference and many-to-many navigations of p (see ctxState.Drop).
@@ -1453,7 +1557,7 @@ func includeOf<T, E>(cm *ctxModel, em *entModel, n *navMeta) Include<T> {
             var e2 *Entity<E> = wte
             await loadNav<T, E>(st, em, e2, n, ps, tr)?
         },
-        join: Frag{pg: join, lite: join, args: []},
+        join: Frag{s: join, args: []},
         cols: columnList(tm, a),
         ncols: len(tm.Columns),
         childKey: tm.Key,

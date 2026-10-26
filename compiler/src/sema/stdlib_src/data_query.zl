@@ -10,8 +10,7 @@ namespace data
 
 // A SQL fragment for both dialects and its arguments.
 struct Frag {
-    pg   string
-    lite string
+    s    string
     args []any
 }
 
@@ -26,7 +25,7 @@ func addFrag(xs []Frag, f Frag) []Frag {
 
 // A statement being written: text and arguments with numbered placeholders.
 struct sqlw {
-    pg     bool
+    d      Dialect
     b      strings.Builder
     args   []any
     // GROUP BY keys, referenced as {#i} by the projection of a group
@@ -35,28 +34,32 @@ struct sqlw {
     // the markers {?mbase + i} of the enclosing plan (data_sub.zl)
     mark   bool
     mbase  int
+    // the dialect's placeholders are all ? (no call per argument)
+    qmark  bool
 
     func raw(s string) {
         this.b.Write(s)
     }
 
     func ph(v any) {
-        this.args = append(this.args, v)
+        switch v {
+        case []any xs:
+            this.args = append(this.args, this.d.BindArray(xs))
+        default:
+            this.args = append(this.args, v)
+        }
         if this.mark {
             this.b.Write("{?" + strconv.Itoa(this.mbase + len(this.args) - 1) + "}")
-        } else if this.pg {
-            this.b.Write("$" + fmt.Format("{0}", len(this.args)))
-        } else {
+        } else if this.qmark {
             this.b.Write("?")
+        } else {
+            this.b.Write(this.d.Placeholder(len(this.args)))
         }
     }
 
     // Appends fragment f with its markers replaced by placeholders.
     func frag(f Frag) {
-        var s = f.lite
-        if this.pg {
-            s = f.pg
-        }
+        var s = f.s
         var n = len(s)
         var i = 0
         var start = 0
@@ -116,6 +119,21 @@ struct sqlw {
     }
 }
 
+// The rarely used parts of a core.
+struct coreExt {
+    // a feature the dialect may lack (Dialect.Require, when it runs)
+    needs      string
+    // the FROM source instead of the table: a derived table (set
+    // operations, CTEs; data_set.zl), written as FROM <src> AS t0
+    src        Frag
+    hasSrc     bool
+    // DISTINCT ON (keys) (with distinct set), and the row lock clause
+    distinctOn string
+    lockMode   string
+    lockWait   string
+    lockSql    string
+}
+
 // The SQL parts of a query over a root table aliased t0.
 struct core {
     st       *ctxState
@@ -130,11 +148,32 @@ struct core {
     distinct bool
     // a translation error: running the query fails with it
     err      string
-    // a feature SQLite has only from 3.39 (checked when the query runs)
-    needs    string
+    // the rarely used parts (nil: none), shared by copies: replaced, not
+    // changed (ext)
+    x        *coreExt
+
+    // A copy of the extension to change and store in x.
+    func ext() *coreExt {
+        if this.x == nil {
+            return new coreExt{src: Frag{s: "", args: []}, hasSrc: false, distinctOn: "", lockMode: "", lockWait: "", lockSql: "", needs: ""}
+        }
+        var e = *this.x
+        return new coreExt{src: e.src, hasSrc: e.hasSrc, distinctOn: e.distinctOn, lockMode: e.lockMode, lockWait: e.lockWait, lockSql: e.lockSql, needs: e.needs}
+    }
+
+    func hasSrc() bool {
+        return this.x != nil && this.x.hasSrc
+    }
+
+    func needs() string {
+        if this.x == nil {
+            return ""
+        }
+        return this.x.needs
+    }
 
     func writer() sqlw {
-        return sqlw{pg: this.st.pg(), b: strings.Builder{}, args: [], groups: this.groups}
+        return sqlw{d: this.st.d, b: strings.Builder{}, args: [], groups: this.groups, qmark: this.st.qmark}
     }
 
     func paged() bool {
@@ -143,7 +182,13 @@ struct core {
 
     // FROM ... WHERE ... GROUP BY ... HAVING ...
     func from(w *sqlw) {
-        w.raw(" FROM " + quoteIdent(this.meta.Table) + " AS t0")
+        if this.hasSrc() {
+            w.raw(" FROM ")
+            w.frag(this.x.src)
+            w.raw(" AS t0")
+        } else {
+            w.raw(" FROM " + quoteIdent(this.meta.Table) + " AS t0")
+        }
         for j in this.joins {
             w.frag(j)
         }
@@ -207,26 +252,26 @@ struct core {
     }
 
     func paging(w *sqlw) {
-        if this.take >= 0 {
-            w.raw(" LIMIT " + fmt.Format("{0}", this.take))
-        } else if this.skip > 0 && !this.st.pg() {
-            w.raw(" LIMIT -1")
-        }
-        if this.skip > 0 {
-            w.raw(" OFFSET " + fmt.Format("{0}", this.skip))
+        if this.take >= 0 || this.skip > 0 {
+            w.raw(w.d.Paging(this.take, this.skip))
         }
     }
 
     // SELECT [DISTINCT] sel FROM ... ORDER BY ... LIMIT ...
     func selectSql(w *sqlw, sel Frag) {
         w.raw("SELECT ")
-        if this.distinct {
+        if this.x != nil && this.x.distinctOn != "" {
+            w.raw("DISTINCT ON (" + this.x.distinctOn + ") ")
+        } else if this.distinct {
             w.raw("DISTINCT ")
         }
         w.frag(sel)
         this.from(w)
         this.orderBy(w, "")
         this.paging(w)
+        if this.x != nil && this.x.lockSql != "" {
+            w.raw(this.x.lockSql)
+        }
     }
 
     // SELECT COUNT(*) ...
@@ -301,7 +346,7 @@ func newCore(st *ctxState, m *EntityMeta) core {
 
 func entityCols(st *ctxState, m *EntityMeta) Frag {
     var cols = st.cols(m)
-    return Frag{pg: cols, lite: cols, args: []}
+    return Frag{s: cols, args: []}
 }
 
 // A navigation loaded with the query (Include): joined into the query or
@@ -396,15 +441,15 @@ struct Query<T> {
     // The lambda is an expression tree, translated to SQL once per lambda
     // site; constants and captured values are statement arguments.
     func Where(p expr<func(*T) bool>) Query<T> {
-        var cm = this.c.st.model
-        var pl = lookupPlan(cm, p.SiteId(), 0)
+        var st = this.c.st
+        var pl = lookupPlan(st.model, st.dk, p.SiteId(), 0)
         if pl == nil {
-            pl = predPlan(cm, this.ent.em, p)
+            pl = predPlan(st, this.ent.em, p)
         }
         if pl.err != "" {
             return this.fail(pl.err)
         }
-        return this.where_(pl.pg, pl.lite, planArgs(pl, &p))
+        return this.where_(pl.s, planArgs(pl, &p))
     }
 
     // Orders by a value or a tuple of values: OrderBy((u) => (u.Last, u.First)).
@@ -426,19 +471,19 @@ struct Query<T> {
     }
 
     func ordered(key expr<func(*T) any>, desc bool, then bool) Query<T> {
-        var cm = this.c.st.model
+        var st = this.c.st
         var role = 1
         if desc {
             role = 2
         }
-        var pl = lookupPlan(cm, key.SiteId(), role)
+        var pl = lookupPlan(st.model, st.dk, key.SiteId(), role)
         if pl == nil {
-            pl = orderPlan(cm, this.ent.em, key, desc)
+            pl = orderPlan(st, this.ent.em, key, desc)
         }
         if pl.err != "" {
             return this.fail(pl.err)
         }
-        return this.order_(pl.pg, pl.lite, planArgs(pl, &key), then)
+        return this.order_(pl.s, planArgs(pl, &key), then)
     }
 
     // Loads a navigation with the query: Include((u) => u.Orders).
@@ -459,27 +504,27 @@ struct Query<T> {
     // UserDto{Name: u.Name}) or Select((u) => u.Email).
     func Select<R>(f expr<func(*T) R>) Projection<R> {
         selectCheck<R>()
-        var cm = this.c.st.model
-        var pl = lookupPlan(cm, f.SiteId(), 3)
+        var st = this.c.st
+        var pl = lookupPlan(st.model, st.dk, f.SiteId(), 3)
         if pl == nil {
-            pl = selectPlan(cm, this.ent.em, f)
+            pl = selectPlan(st, this.ent.em, f)
         }
         var c = this.c
         if pl.err != "" && c.err == "" {
             c.err = pl.err
         }
-        return Projection<R>{c: c, sel: Frag{pg: pl.pg, lite: pl.lite, args: planArgs(pl, &f)}, m: rowMapper<R>(pl.shape)}
+        return Projection<R>{c: c, sel: Frag{s: pl.s, args: planArgs(pl, &f)}, m: rowMapper<R>(pl.shape)}
     }
 
     // Groups the rows: GroupBy((o) => o.Product) or GroupBy((o) => (o.A, o.B)),
     // then Where (HAVING), OrderBy and Select over the groups.
     func GroupBy<K>(key expr<func(*T) K>) Grouped<T, K> {
-        var cm = this.c.st.model
-        var pl = lookupPlan(cm, key.SiteId(), 8)
+        var st = this.c.st
+        var pl = lookupPlan(st.model, st.dk, key.SiteId(), 8)
         if pl == nil {
-            pl = groupKeyPlan(cm, this.ent.em, key)
+            pl = groupKeyPlan(st, this.ent.em, key)
         }
-        var g = this.group_<K>(pl.pgs, pl.lites, planArgs(pl, &key))
+        var g = this.group_<K>(pl.ss, planArgs(pl, &key))
         if pl.err != "" && g.c.err == "" {
             g.c.err = pl.err
         }
@@ -515,14 +560,14 @@ struct Query<T> {
         selectCheck<R>()
         var c = this.c
         var p = newPlan()
-        try crossInto(c.st.model, this.ent.em, inner.ent.em, result.Root(), p) catch err {
+        try crossInto(c.st, this.ent.em, inner.ent.em, result.Root(), p) catch err {
             if c.err == "" {
                 c.err = err.Message()
             }
         }
         var j = " CROSS JOIN " + quoteIdent(inner.ent.Meta.Table) + " AS t1"
-        c.joins = addFrag(c.joins, Frag{pg: j, lite: j, args: []})
-        return Projection<R>{c: c, sel: Frag{pg: p.pg, lite: p.lite, args: p.vals}, m: rowMapper<R>(p.shape)}
+        c.joins = addFrag(c.joins, Frag{s: j, args: []})
+        return Projection<R>{c: c, sel: Frag{s: p.s, args: p.vals}, m: rowMapper<R>(p.shape)}
     }
 
     func join_<I, K, R>(kw string, inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
@@ -531,15 +576,17 @@ struct Query<T> {
         var p = newPlan()
         var j = newPlan()
         if kw != " JOIN " && kw != " LEFT JOIN " {
-            c.needs = "RIGHT and FULL joins"
+            var e = c.ext()
+            e.needs = "right-join"
+            c.x = e
         }
-        try joinInto(kw, c.st.model, this.ent.em, inner.ent.em, outerKey.Root(), innerKey.Root(), result.Root(), j, p) catch err {
+        try joinInto(kw, c.st, this.ent.em, inner.ent.em, outerKey.Root(), innerKey.Root(), result.Root(), j, p) catch err {
             if c.err == "" {
                 c.err = err.Message()
             }
         }
-        c.joins = addFrag(c.joins, Frag{pg: j.pg, lite: j.lite, args: j.vals})
-        return Projection<R>{c: c, sel: Frag{pg: p.pg, lite: p.lite, args: p.vals}, m: rowMapper<R>(p.shape)}
+        c.joins = addFrag(c.joins, Frag{s: j.s, args: j.vals})
+        return Projection<R>{c: c, sel: Frag{s: p.s, args: p.vals}, m: rowMapper<R>(p.shape)}
     }
 
     // Updates the matching rows (set-based, without loading or tracking):
@@ -548,11 +595,11 @@ struct Query<T> {
     func ExecuteUpdate(f func(Setters<T>) Setters<T>) Task<int!> {
         var s = f(Setters<T>{items: []})
         var q = *this
-        var u = updateParts(q.c.st.model, q.ent.em, s.items)
+        var u = updateParts(q.c.st, q.ent.em, s.items)
         if u.err != "" && q.c.err == "" {
             q.c.err = u.err
         }
-        return query_update(q, u.pg, u.lite, u.args)
+        return query_update(q, u.s, u.args)
     }
 
     // The query with each predicate added (First(p), Count(p), ...).
@@ -566,16 +613,16 @@ struct Query<T> {
 
     // Whether every row satisfies the predicate.
     func All(p expr<func(*T) bool>) Task<bool!> {
-        var cm = this.c.st.model
-        var pl = lookupPlan(cm, p.SiteId(), 0)
+        var st = this.c.st
+        var pl = lookupPlan(st.model, st.dk, p.SiteId(), 0)
         if pl == nil {
-            pl = predPlan(cm, this.ent.em, p)
+            pl = predPlan(st, this.ent.em, p)
         }
         var q = *this
         if pl.err != "" && q.c.err == "" {
             q.c.err = pl.err
         }
-        return query_all(q, pl.pg, pl.lite, planArgs(pl, &p))
+        return query_all(q, pl.s, planArgs(pl, &p))
     }
 
     // SUM of a value (0 for no rows).
@@ -600,30 +647,30 @@ struct Query<T> {
     }
 
     func aggregate<N, R>(f expr<func(*T) N>, what string, role int, empty int) Task<R!> {
-        var cm = this.c.st.model
-        var pl = lookupPlan(cm, f.SiteId(), role)
+        var st = this.c.st
+        var pl = lookupPlan(st.model, st.dk, f.SiteId(), role)
         if pl == nil {
-            pl = aggPlan(cm, this.ent.em, f, what, role)
+            pl = aggPlan(st, this.ent.em, f, what, role)
         }
         var q = *this
         if pl.err != "" && q.c.err == "" {
             q.c.err = pl.err
         }
-        return q.scalar_<R>(pl.pg, pl.lite, planArgs(pl, &f), empty, what + " " + this.c.meta.Entity)
+        return q.scalar_<R>(pl.s, planArgs(pl, &f), empty, what + " " + this.c.meta.Entity)
     }
 
-    func where_(pg string, lite string, args []any) Query<T> {
+    func where_(s string, args []any) Query<T> {
         var q = *this
-        q.c.wheres = addFrag(q.c.wheres, Frag{pg: pg, lite: lite, args: args})
+        q.c.wheres = addFrag(q.c.wheres, Frag{s: s, args: args})
         return q
     }
 
-    func order_(pg string, lite string, args []any, then bool) Query<T> {
+    func order_(s string, args []any, then bool) Query<T> {
         var q = *this
         if !then {
             q.c.orders = []
         }
-        q.c.orders = addFrag(q.c.orders, Frag{pg: pg, lite: lite, args: args})
+        q.c.orders = addFrag(q.c.orders, Frag{s: s, args: args})
         return q
     }
 
@@ -638,36 +685,36 @@ struct Query<T> {
         return q
     }
 
-    func group_<K>(pgs []string, lites []string, args []any) Grouped<T, K> {
+    func group_<K>(ss []string, args []any) Grouped<T, K> {
         var c = this.c
         c.groups = []
-        for i, pg in pgs {
-            c.groups = addFrag(c.groups, Frag{pg: pg, lite: lites[i], args: args})
+        for g in ss {
+            c.groups = addFrag(c.groups, Frag{s: g, args: args})
         }
         return Grouped<T, K>{c: c, ent: this.ent}
     }
 
     // An aggregate (SUM, MIN, ...): empty 0 gives the zero value for an
     // empty set, 1 fails with NoElementsError.
-    func scalar_<R>(pg string, lite string, args []any, empty int, what string) Task<R!> {
-        return query_scalar<T, R>(*this, pg, lite, args, empty, what)
+    func scalar_<R>(s string, args []any, empty int, what string) Task<R!> {
+        return query_scalar<T, R>(*this, s, args, empty, what)
     }
 
     // All(pred): NOT EXISTS (... WHERE NOT pred).
-    func all_(pg string, lite string, args []any) Task<bool!> {
-        return query_all(*this, pg, lite, args)
+    func all_(s string, args []any) Task<bool!> {
+        return query_all(*this, s, args)
     }
 
     // ExecuteUpdate: UPDATE ... SET (generated) WHERE ...
-    func update_(pg string, lite string, args []any) Task<int!> {
-        return query_update(*this, pg, lite, args)
+    func update_(s string, args []any) Task<int!> {
+        return query_update(*this, s, args)
     }
 
     // The WHERE of a set-based statement (a key subquery for paged or
     // joined queries).
     func setScope(w *sqlw) {
         var m = this.c.meta
-        if this.c.paged() || len(this.c.joins) > 0 || len(this.c.orders) > 0 && this.c.paged() {
+        if this.c.paged() || len(this.c.joins) > 0 || this.c.hasSrc() {
             if m.Key < 0 {
                 return
             }
@@ -680,6 +727,35 @@ struct Query<T> {
             return
         }
         this.c.whereGroup(w)
+    }
+
+    // ExecuteUpdate returning a value of every updated row (UPDATE ...
+    // RETURNING; PostgreSQL, SQLite 3.35+).
+    func ExecuteUpdateReturning<R>(f func(Setters<T>) Setters<T>, sel expr<func(*T) R>) Task<[]R!> {
+        selectCheck<R>()
+        var s = f(Setters<T>{items: []})
+        var q = *this
+        var u = updateParts(q.c.st, q.ent.em, s.items)
+        if u.err != "" && q.c.err == "" {
+            q.c.err = u.err
+        }
+        var pl = selectPlan(q.c.st, q.ent.em, sel)
+        if pl.err != "" && q.c.err == "" {
+            q.c.err = pl.err
+        }
+        return query_returning<T, R>(q, "UPDATE", Frag{s: u.s, args: u.args}, Frag{s: pl.s, args: planArgs(pl, &sel)}, rowMapper<R>(pl.shape))
+    }
+
+    // ExecuteDelete returning a value of every deleted row (DELETE ...
+    // RETURNING; PostgreSQL, SQLite 3.35+).
+    func ExecuteDeleteReturning<R>(sel expr<func(*T) R>) Task<[]R!> {
+        selectCheck<R>()
+        var q = *this
+        var pl = selectPlan(q.c.st, q.ent.em, sel)
+        if pl.err != "" && q.c.err == "" {
+            q.c.err = pl.err
+        }
+        return query_returning<T, R>(q, "DELETE", Frag{s: "", args: []}, Frag{s: pl.s, args: planArgs(pl, &sel)}, rowMapper<R>(pl.shape))
     }
 
     // Deletes the matching rows (set-based, without loading or tracking);
@@ -709,6 +785,123 @@ struct Query<T> {
         return subq{c: this.c, em: this.ent.em, sel: entityCols(this.c.st, this.c.meta)}
     }
 
+    // One row per distinct key, the first in the query's order
+    // (PostgreSQL DISTINCT ON; order by the key first): DistinctOn((o) =>
+    // o.UserId).OrderBy((o) => (o.UserId, o.Date)).
+    func DistinctOn(key expr<func(*T) any>) Query<T> {
+        var d = this.c.st.d
+        if !d.DistinctOn() {
+            return this.fail("data: DistinctOn (DISTINCT ON) is not supported by " + d.Name())
+        }
+        var root = key.Root()
+        var cx = newTcx(this.c.st, root, 0)
+        cx.bindEntity(0, this.ent.em, "t0")
+        var q = *this
+        try {
+            var keys = keyValues(cx, root)?
+            if len(cx.args) > 0 {
+                return this.fail("data: DistinctOn keys must be columns or expressions of the row without values")
+            }
+            var ks []string = []
+            for k in keys {
+                ks = append(ks, k.s)
+            }
+            var e = q.c.ext()
+            e.distinctOn = strings.Join(ks, ", ")
+            q.c.x = e
+            q.c.distinct = true
+        } catch err {
+            return this.fail(err.Message())
+        }
+        return q
+    }
+
+    // Locks the selected rows for update (SELECT ... FOR UPDATE).
+    func ForUpdate() Query<T> {
+        return this.locked("update", this.c.ext().lockWait)
+    }
+
+    // Locks the selected rows against updates (FOR SHARE).
+    func ForShare() Query<T> {
+        return this.locked("share", this.c.ext().lockWait)
+    }
+
+    // With ForUpdate/ForShare: rows locked by others are skipped.
+    func SkipLocked() Query<T> {
+        return this.locked(this.c.ext().lockMode, "skip locked")
+    }
+
+    // With ForUpdate/ForShare: fail instead of waiting for a lock.
+    func NoWait() Query<T> {
+        return this.locked(this.c.ext().lockMode, "nowait")
+    }
+
+    func locked(mode string, wait string) Query<T> {
+        var q = *this
+        var e = q.c.ext()
+        e.lockMode = mode
+        e.lockWait = wait
+        if mode == "" {
+            mode = "update"
+        }
+        try {
+            e.lockSql = this.c.st.d.Lock(mode, wait)?
+        } catch err {
+            return this.fail(err.Message())
+        }
+        q.c.x = e
+        return q
+    }
+
+    // The rows of both queries without duplicates (UNION).
+    func Union(other Query<T>) Query<T> {
+        return setQuery(*this, "UNION", other)
+    }
+
+    // The rows of both queries (UNION ALL).
+    func UnionAll(other Query<T>) Query<T> {
+        return setQuery(*this, "UNION ALL", other)
+    }
+
+    // The rows in both queries (INTERSECT).
+    func Intersect(other Query<T>) Query<T> {
+        return setQuery(*this, "INTERSECT", other)
+    }
+
+    // The rows not in other (EXCEPT).
+    func Except(other Query<T>) Query<T> {
+        return setQuery(*this, "EXCEPT", other)
+    }
+
+    // The query as a named common table expression: FROM (WITH "name" AS
+    // (...) SELECT * FROM "name") AS t0.
+    func AsCte(name string) Query<T> {
+        var w = markWriter(this.c.st)
+        this.c.selectSql(&w, entityCols(this.c.st, this.c.meta))
+        var q = *this
+        q.c = cteCore(this.c, name, Frag{s: w.text(), args: w.args}, false)
+        q.includes = []
+        return q
+    }
+
+    // A recursive query (WITH RECURSIVE): the rows of this query and,
+    // repeatedly, the rows of the table related by step to a row found so
+    // far, without duplicates (so cycles end): the subtree of a category is
+    // ctx.Categories.Where((c) => c.Id == root).Recursive((child, parent) =>
+    // child.ParentId == parent.Id).
+    func Recursive(step expr<func(*T, *T) bool>) Query<T> {
+        var cte = this.c.meta.Table + "_tree"
+        var q = *this
+        q.includes = []
+        try {
+            var body = recursiveBody(this.c, this.ent.em, step.Root(), cte)?
+            q.c = cteCore(this.c, cte, body, true)
+        } catch err {
+            q.c.err = err.Message()
+        }
+        return q
+    }
+
     func joined() bool {
         return len(this.includes) > 0 && !this.split
     }
@@ -728,7 +921,7 @@ struct Query<T> {
         if m.Key >= 0 {
             key = "t0." + quoteIdent(m.Columns[m.Key].Name)
         }
-        if this.c.paged() || this.c.distinct {
+        if this.c.paged() || this.c.distinct || this.c.hasSrc() {
             w.raw(" FROM (")
             this.c.selectSql(w, entityCols(this.c.st, m))
             w.raw(") AS t0")
@@ -746,6 +939,9 @@ struct Query<T> {
             this.c.whereGroup(w)
         }
         this.c.orderBy(w, key)
+        if this.c.x != nil && this.c.x.lockSql != "" {
+            w.raw(this.c.x.lockSql)
+        }
     }
 
     // Runs the query: the entities in order (tracked ones are the
@@ -821,13 +1017,13 @@ struct Query<T> {
     }
 }
 
-async func query_scalar<T, R>(q Query<T>, pg string, lite string, args []any, empty int, what string) R! {
+async func query_scalar<T, R>(q Query<T>, s string, args []any, empty int, what string) R! {
     if q.c.err != "" {
         return error(q.c.err)
     }
     var w = q.c.writer()
     w.raw("SELECT ")
-    w.frag(Frag{pg: pg, lite: lite, args: args})
+    w.frag(Frag{s: s, args: args})
     q.c.source(&w)
     var rows = await q.c.st.all(w.text(), w.args)?
     var r R
@@ -841,24 +1037,54 @@ async func query_scalar<T, R>(q Query<T>, pg string, lite string, args []any, em
     return r
 }
 
-async func query_all<T>(q Query<T>, pg string, lite string, args []any) bool! {
+async func query_all<T>(q Query<T>, s string, args []any) bool! {
     if q.c.err != "" {
         return error(q.c.err)
     }
-    var q2 = q.where_("NOT (" + pg + ")", "NOT (" + lite + ")", args)
+    var q2 = q.where_("NOT (" + s + ")", args)
     return !await q2.c.exists(entityCols(q2.c.st, q2.c.meta))?
 }
 
-async func query_update<T>(q Query<T>, pg string, lite string, args []any) int! {
+async func query_update<T>(q Query<T>, s string, args []any) int! {
     if q.c.err != "" {
         return error(q.c.err)
     }
     var w = q.c.writer()
     w.raw("UPDATE " + quoteIdent(q.c.meta.Table) + " AS t0 SET ")
-    w.frag(Frag{pg: pg, lite: lite, args: args})
+    w.frag(Frag{s: s, args: args})
     q.setScope(&w)
     var r = await q.c.st.exec(w.text(), w.args)?
     return r.RowsAffected
+}
+
+async func query_returning<T, R>(q Query<T>, what string, set Frag, sel Frag, m func([]any, *R) void!) []R! {
+    if q.c.err != "" {
+        return error(q.c.err)
+    }
+    var d = q.c.st.d
+    if !d.Returning() {
+        d.Require("returning")?
+        return error("data: RETURNING is not supported by " + d.Name())
+    }
+    var w = q.c.writer()
+    if what == "UPDATE" {
+        w.raw("UPDATE " + quoteIdent(q.c.meta.Table) + " AS t0 SET ")
+        w.frag(set)
+    } else {
+        w.raw("DELETE FROM " + quoteIdent(q.c.meta.Table) + " AS t0")
+    }
+    q.setScope(&w)
+    // unqualified: SQLite's RETURNING does not see the alias t0
+    w.raw(" RETURNING ")
+    w.frag(Frag{s: strings.ReplaceAll(sel.s, "t0.", ""), args: sel.args})
+    var rows = await q.c.st.all(w.text(), w.args)?
+    var out []R = []
+    for vals in rows {
+        var r R
+        m(vals, &r)?
+        out = append(out, r)
+    }
+    return out
 }
 
 async func query_ExecuteDelete<T>(q Query<T>) int! {
@@ -1045,6 +1271,22 @@ struct Projection<R> {
         return subq{c: this.c, em: nil, sel: this.sel}
     }
 
+    func Union(other Projection<R>) Projection<R> {
+        return setProjection(*this, "UNION", other)
+    }
+
+    func UnionAll(other Projection<R>) Projection<R> {
+        return setProjection(*this, "UNION ALL", other)
+    }
+
+    func Intersect(other Projection<R>) Projection<R> {
+        return setProjection(*this, "INTERSECT", other)
+    }
+
+    func Except(other Projection<R>) Projection<R> {
+        return setProjection(*this, "EXCEPT", other)
+    }
+
     func ToList() Task<[]R!> {
         return projection_ToList(*this)
     }
@@ -1089,7 +1331,9 @@ async func projection_ToList<R>(q Projection<R>) []R! {
     if q.c.err != "" {
         return error(q.c.err)
     }
-    await needsLite339(q.c.st, q.c.needs)?
+    if q.c.needs() != "" {
+        q.c.st.d.Require(q.c.needs())?
+    }
     var w = q.c.writer()
     q.c.selectSql(&w, q.sel)
     var rows = await q.c.st.all(w.text(), w.args)?
@@ -1150,18 +1394,18 @@ struct Grouped<T, K> {
     c   core
     ent *Entity<T>
 
-    func having_(pg string, lite string, args []any) Grouped<T, K> {
+    func having_(s string, args []any) Grouped<T, K> {
         var q = *this
-        q.c.havings = addFrag(q.c.havings, Frag{pg: pg, lite: lite, args: args})
+        q.c.havings = addFrag(q.c.havings, Frag{s: s, args: args})
         return q
     }
 
-    func order_(pg string, lite string, args []any, then bool) Grouped<T, K> {
+    func order_(s string, args []any, then bool) Grouped<T, K> {
         var q = *this
         if !then {
             q.c.orders = []
         }
-        q.c.orders = addFrag(q.c.orders, Frag{pg: pg, lite: lite, args: args})
+        q.c.orders = addFrag(q.c.orders, Frag{s: s, args: args})
         return q
     }
 
@@ -1180,21 +1424,21 @@ struct Grouped<T, K> {
         if kt.Kind == reflect.Kind.Tuple {
             for i, f in kt.Fields {
                 var m = "{#" + strconv.Itoa(i) + "}"
-                out = append(out, sv{pg: m, lite: m, t: f.Type})
+                out = append(out, sv{s: m, t: f.Type})
             }
         } else {
-            out = append(out, sv{pg: "{#0}", lite: "{#0}", t: kt})
+            out = append(out, sv{s: "{#0}", t: kt})
         }
         return out
     }
 
     // HAVING: Where((g) => g.Sum((o) => o.Qty) > 3).
     func Where(p expr<func(Group<K, T>) bool>) Grouped<T, K> {
-        var pl = groupPlan(this.c.st.model, this.ent.em, this.keys(), p, 0)
+        var pl = groupPlan(this.c.st, this.ent.em, this.keys(), p, 0)
         if pl.err != "" {
             return this.fail(pl.err)
         }
-        return this.having_(pl.pg, pl.lite, planArgs(pl, &p))
+        return this.having_(pl.s, planArgs(pl, &p))
     }
 
     func OrderBy(key expr<func(Group<K, T>) any>) Grouped<T, K> {
@@ -1214,22 +1458,22 @@ struct Grouped<T, K> {
     }
 
     func ordered(key expr<func(Group<K, T>) any>, what int, then bool) Grouped<T, K> {
-        var pl = groupPlan(this.c.st.model, this.ent.em, this.keys(), key, what)
+        var pl = groupPlan(this.c.st, this.ent.em, this.keys(), key, what)
         if pl.err != "" {
             return this.fail(pl.err)
         }
-        return this.order_(pl.pg, pl.lite, planArgs(pl, &key), then)
+        return this.order_(pl.s, planArgs(pl, &key), then)
     }
 
     // The values of every group: Select((g) => (g.Key, g.Count())).
     func Select<R>(f expr<func(Group<K, T>) R>) Projection<R> {
         selectCheck<R>()
-        var pl = groupPlan(this.c.st.model, this.ent.em, this.keys(), f, 3)
+        var pl = groupPlan(this.c.st, this.ent.em, this.keys(), f, 3)
         var c = this.c
         if pl.err != "" && c.err == "" {
             c.err = pl.err
         }
-        return Projection<R>{c: c, sel: Frag{pg: pl.pg, lite: pl.lite, args: planArgs(pl, &f)}, m: rowMapper<R>(pl.shape)}
+        return Projection<R>{c: c, sel: Frag{s: pl.s, args: planArgs(pl, &f)}, m: rowMapper<R>(pl.shape)}
     }
 
     // Groups are only read through Select (an error at compile time, raised
@@ -1266,6 +1510,7 @@ struct Group<K, T> {
     // SUM of a value of the rows.
     @expr.call
     func Sum<N: Add>(f func(*T) N) N {
+        numberCheck<N>("Sum")
         var s N
         for x in this.items {
             s = s + f(x)
@@ -1300,6 +1545,7 @@ struct Group<K, T> {
     // AVG of a value of the rows.
     @expr.call
     func Average<N>(f func(*T) N) float {
+        numberCheck<N>("Average")
         var s = 0.0
         for x in this.items {
             s += toFloat(f(x))
@@ -1389,7 +1635,7 @@ async func loadIn<T>(st *ctxState, ent *Entity<T>, col string, keys []any, track
     if len(uniq) == 0 {
         return out
     }
-    var w = sqlw{pg: st.pg(), b: strings.Builder{}, args: [], groups: []}
+    var w = sqlw{d: st.d, b: strings.Builder{}, args: [], groups: [], qmark: st.qmark}
     w.raw("SELECT " + columnList(ent.Meta, "t0") + " FROM " + quoteIdent(ent.Meta.Table) + " AS t0 WHERE t0." + quoteIdent(col) + " IN (")
     w.list(uniq)
     w.raw(")")
@@ -1422,7 +1668,7 @@ async func loadThrough<T>(st *ctxState, ent *Entity<T>, through string, ownerCol
     if len(uniq) == 0 || ent.Meta.Key < 0 {
         return out
     }
-    var w = sqlw{pg: st.pg(), b: strings.Builder{}, args: [], groups: []}
+    var w = sqlw{d: st.d, b: strings.Builder{}, args: [], groups: [], qmark: st.qmark}
     var k = quoteIdent(ent.Meta.Columns[ent.Meta.Key].Name)
     w.raw("SELECT " + columnList(ent.Meta, "t0") + ", j." + quoteIdent(ownerCol) + " FROM " + quoteIdent(ent.Meta.Table) + " AS t0 JOIN " + quoteIdent(through) + " AS j ON j." + quoteIdent(targetCol) + " = t0." + k + " WHERE j." + quoteIdent(ownerCol) + " IN (")
     w.list(uniq)
@@ -1497,31 +1743,28 @@ func toFloat(v any) float {
 }
 
 // The join fragment and the result selection of Join.
-func joinInto(kw string, cm *ctxModel, outer *entModel, inner *entModel, ok *expr.Node, ik *expr.Node, res *expr.Node, j *plan, p *plan) void! {
-    var cx1 = newTcx(cm, ok, 0)
+func joinInto(kw string, st *ctxState, outer *entModel, inner *entModel, ok *expr.Node, ik *expr.Node, res *expr.Node, j *plan, p *plan) void! {
+    var cx1 = newTcx(st, ok, 0)
     cx1.bindEntity(0, outer, "t0")
     var oks = keyValues(cx1, ok)?
-    var cx2 = newTcx(cm, ik, len(cx1.args))
+    var cx2 = newTcx(st, ik, len(cx1.args))
     cx2.bindEntity(0, inner, "t1")
     var iks = keyValues(cx2, ik)?
     if len(oks) != len(iks) {
         return untranslatable("the outer and inner keys of Join must have the same number of values")
     }
-    j.pg = kw + quoteIdent(inner.meta.Table) + " AS t1 ON "
-    j.lite = j.pg
+    j.s = kw + quoteIdent(inner.meta.Table) + " AS t1 ON "
     for i, a in oks {
         if i > 0 {
-            j.pg = j.pg + " AND "
-            j.lite = j.lite + " AND "
+            j.s = j.s + " AND "
         }
-        j.pg = j.pg + a.pg + " = " + iks[i].pg
-        j.lite = j.lite + a.lite + " = " + iks[i].lite
+        j.s = j.s + a.s + " = " + iks[i].s
     }
     j.vals = treeArgs(cx1, cxValues(cx1, ok))
     for a in treeArgs(cx2, cxValues(cx2, ik)) {
         j.vals = append(j.vals, a)
     }
-    var cx3 = newTcx(cm, res, 0)
+    var cx3 = newTcx(st, res, 0)
     cx3.bindEntity(0, outer, "t0")
     cx3.bindEntity(1, inner, "t1")
     projection(cx3, res, p)?
@@ -1529,8 +1772,8 @@ func joinInto(kw string, cm *ctxModel, outer *entModel, inner *entModel, ok *exp
 }
 
 // The result selection of CrossJoin.
-func crossInto(cm *ctxModel, outer *entModel, inner *entModel, res *expr.Node, p *plan) void! {
-    var cx = newTcx(cm, res, 0)
+func crossInto(st *ctxState, outer *entModel, inner *entModel, res *expr.Node, p *plan) void! {
+    var cx = newTcx(st, res, 0)
     cx.bindEntity(0, outer, "t0")
     cx.bindEntity(1, inner, "t1")
     projection(cx, res, p)?
@@ -1579,6 +1822,14 @@ struct Setters<T> {
         var v any = nil
         if reflect.TypeOf<V>().Kind == reflect.Kind.Enum {
             v = fmt.Format("{0}", value)
+        } else if reflect.TypeOf<V>().Kind == reflect.Kind.Slice && reflect.TypeOf<V>().Elem.Kind != reflect.Kind.Uint8 {
+            v = arrayArg(value)
+        } else if reflect.TypeOf<V>().Kind == reflect.Kind.Map ||
+            (reflect.TypeOf<V>().Kind == reflect.Kind.Struct &&
+                reflect.TypeOf<V>() != reflect.TypeOf<time.Time>() &&
+                reflect.TypeOf<V>() != reflect.TypeOf<math.big.Decimal>() &&
+                reflect.TypeOf<V>() != reflect.TypeOf<encoding.json.Value>()) {
+            v = encoding.json.Format(value)
         } else {
             v = database.sql.argOf(value)
         }
@@ -1606,28 +1857,26 @@ func appendSetter(xs []setter, x setter) []setter {
 
 // The SET list of ExecuteUpdate.
 struct updParts {
-    pg   string
-    lite string
+    s    string
     args []any
     err  string
 }
 
-func updateParts(cm *ctxModel, em *entModel, items []setter) updParts {
-    var u = updParts{pg: "", lite: "", args: [], err: ""}
-    try updateInto(cm, em, items, &u) catch err {
+func updateParts(st *ctxState, em *entModel, items []setter) updParts {
+    var u = updParts{s: "", args: [], err: ""}
+    try updateInto(st, em, items, &u) catch err {
         u.err = err.Message()
     }
     return u
 }
 
-func updateInto(cm *ctxModel, em *entModel, items []setter, u *updParts) void! {
+func updateInto(st *ctxState, em *entModel, items []setter, u *updParts) void! {
     if len(items) == 0 {
         return error("data: ExecuteUpdate needs at least one s.Set(...)")
     }
     for i, it in items {
         if i > 0 {
-            u.pg = u.pg + ", "
-            u.lite = u.lite + ", "
+            u.s = u.s + ", "
         }
         var ci = em.colOf(it.col)
         if ci < 0 {
@@ -1639,11 +1888,10 @@ func updateInto(cm *ctxModel, em *entModel, items []setter, u *updParts) void! {
         }
         var lhs = quoteIdent(c.Name) + " = "
         if it.isTree {
-            var cx = newTcx(cm, it.tree, len(u.args))
+            var cx = newTcx(st, it.tree, len(u.args))
             cx.bindEntity(0, em, "t0")
             var v = trValue(cx, it.tree)?
-            u.pg = u.pg + lhs + v.pg
-            u.lite = u.lite + lhs + v.lite
+            u.s = u.s + lhs + v.s
             for a in treeArgs(cx, cxValues(cx, it.tree)) {
                 u.args = append(u.args, a)
             }
@@ -1652,8 +1900,7 @@ func updateInto(cm *ctxModel, em *entModel, items []setter, u *updParts) void! {
                 return error("data: " + c.Field + " is not nullable")
             }
             var m = "{?" + strconv.Itoa(len(u.args)) + "}"
-            u.pg = u.pg + lhs + m
-            u.lite = u.lite + lhs + m
+            u.s = u.s + lhs + m
             u.args = append(u.args, it.value)
         }
     }
@@ -1702,6 +1949,7 @@ func Count<E>(xs []E, p func(E) bool) int {
 // The sum of f over xs.
 @expr.call
 func Sum<E, N: Add>(xs []E, f func(E) N) N {
+    numberCheck<N>("Sum")
     var s N
     for x in xs {
         s = s + f(x)
@@ -1736,6 +1984,7 @@ func Max<E, N: Ordered>(xs []E, f func(E) N) N {
 // The average of f over xs.
 @expr.call
 func Average<E, N>(xs []E, f func(E) N) float {
+    numberCheck<N>("Average")
     var s = 0.0
     for x in xs {
         s += toFloat(f(x))

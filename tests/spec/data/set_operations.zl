@@ -1,0 +1,48 @@
+// test: Union, UnionAll, Intersect and Except between queries of one entity and between projections of one row type are derived tables that later operators (Where, OrderBy, Take, Count, subqueries) apply to; an ordered or paged operand becomes a subquery (SQLite); parameters of both operands stay bound in order
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.set_operations
+
+import io
+
+struct User {
+    Id   int
+    Name string
+    Age  int
+}
+
+struct Shop {
+    data.Context
+    Users data.Set<User>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    ctx.Users.AddRange([new User{Name: "Ann", Age: 30}, new User{Name: "Bob", Age: 17}, new User{Name: "Cid", Age: 45}, new User{Name: "Dan", Age: 30}])
+    _ = await ctx.SaveChanges()?
+
+    var young = ctx.Users.Where((u) => u.Age < 35)
+    var thirty = ctx.Users.Where((u) => u.Age == 30)
+    var u = young.Union(ctx.Users.Where((u) => u.Name == "Cid")).Where((u) => u.Name != "Bob").OrderBy((u) => u.Name)
+    println(u.ToSql(), u.Args())
+    for x in await u.ToList()? {
+        println(" ", x.Name)
+    }
+    println(await young.UnionAll(thirty).Count()?)
+    var i = young.Intersect(thirty).OrderByDescending((u) => u.Name)
+    println(pg.Users.Where((u) => u.Age < 35).Intersect(pg.Users.Where((u) => u.Age == 30)).ToSql())
+    for x in await i.ToList()? {
+        println(" ", x.Name)
+    }
+    var e = ctx.Users.AsQuery().Except(thirty).OrderBy((u) => u.Id).Take(1)
+    println((await e.First()?).Name)
+    var top = ctx.Users.OrderByDescending((u) => u.Age).Take(1)
+    var t = top.Union(ctx.Users.Where((u) => u.Age < 18))
+    println(t.ToSql())
+    println(await t.Count()?)
+    var names = ctx.Users.Where((u) => u.Age < 20).Select((u) => u.Name).Union(ctx.Users.Where((u) => u.Age > 40).Select((u) => u.Name))
+    println(names.ToSql(), names.Args())
+    println(len(await names.ToList()?))
+}

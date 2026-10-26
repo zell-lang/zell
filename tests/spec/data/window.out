@@ -1,0 +1,17 @@
+SELECT t0."name", ROW_NUMBER() OVER (PARTITION BY t0."dept" ORDER BY t0."salary" DESC, t0."name" DESC), RANK() OVER (PARTITION BY t0."dept" ORDER BY t0."salary" DESC), DENSE_RANK() OVER (ORDER BY t0."salary" DESC) FROM "employees" AS t0 ORDER BY t0."id" ASC
+  (Ann 1 1 1)
+  (Bob 3 2 3)
+  (Cid 2 2 3)
+  (Dan 2 2 4)
+  (Eve 1 1 2)
+  Ann nil 200 300
+  Bob 300 200 500
+  Cid 200 150 700
+  Dan 200 250 850
+  Eve 150 nil 1100
+SELECT t0."name", CAST(SUM(t0."salary") OVER (PARTITION BY t0."dept") AS bigint), CAST(AVG(t0."salary") OVER (PARTITION BY t0."dept") AS double precision), COUNT(*) OVER () FROM "employees" AS t0
+  (Ann 3 233.33333333333334 150 300)
+  (Bob 3 233.33333333333334 150 300)
+  (Cid 3 233.33333333333334 150 300)
+  (Dan 2 200 150 300)
+  (Eve 2 200 150 300)

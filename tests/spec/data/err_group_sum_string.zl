@@ -1,0 +1,19 @@
+// error: Sum and Average need a number, found string
+// status: passing
+namespace spec.data.err_group_sum_string
+
+struct Order {
+    Id      int
+    UserId  int
+    Product string
+}
+
+struct Shop {
+    data.Context
+    Orders data.Set<Order>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    _ = await ctx.Orders.GroupBy((o) => o.UserId).Where((g) => g.Sum((o) => o.Product) != "").Select((g) => g.Key).ToList()?
+}

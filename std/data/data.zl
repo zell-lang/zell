@@ -44,11 +44,13 @@ struct column {
 }
 
 // @index / @index(unique: true): a single-column index (composite indexes:
-// ModelBuilder.HasIndex((u) => (u.A, u.B))).
+// ModelBuilder.HasIndex((u) => (u.A, u.B))); using: an index method
+// ("gin" for jsonb and arrays on PostgreSQL; SQLite makes a plain index).
 @attribute(targets: [reflect.Target.Field])
 struct index {
     unique bool = false
     name   string = ""
+    using  string = ""
 }
 
 // @maxLength(100): varchar(n) in migrations.
@@ -101,6 +103,15 @@ struct manyToMany {
 @attribute(targets: [reflect.Target.Field])
 struct concurrencyToken {}
 
+// @jsonb on a struct or map field: stored as a JSON document (jsonb on
+// PostgreSQL, TEXT on SQLite; encoding.json names its keys); query lambdas
+// read paths into it (u.Meta.Plan == "pro": meta ->> 'plan' on
+// PostgreSQL, json_extract on SQLite). A []T field of scalars needs no
+// attribute: it is an array column (text[], bigint[] on PostgreSQL, a
+// JSON array on SQLite).
+@attribute(targets: [reflect.Target.Field])
+struct jsonb {}
+
 // @ignore: not mapped.
 @attribute(targets: [reflect.Target.Field])
 struct ignore {}
@@ -137,6 +148,7 @@ struct IndexMeta {
     Name    string
     Columns []string
     Unique  bool
+    Using   string
 }
 
 struct ForeignKeyMeta {
@@ -247,6 +259,10 @@ struct entry {
     obj      any
     state    int
     conflict []string
+    // ON CONFLICT ... DO UPDATE SET only these columns (empty: all), or
+    // DO NOTHING
+    updCols  []string
+    ignore   bool
     snap   []any
     key    string
     values func() []any
@@ -271,12 +287,11 @@ struct ctxState {
     orphans  []func()
     hasLog   bool
     log      func(string)
-    // sqlite_version() as 3039000 for 3.39.0 (0: not read yet)
-    liteVer  int
+    // the SQL dialect of the provider (data_dialect.zl) and its key
+    d        Dialect
+    dk       int
+    qmark    bool
 
-    func pg() bool {
-        return this.provider == Provider.Postgres
-    }
 
     // Tracked entities loaded with navigations in both directions
     // (u.Orders[i].User == u) keep each other alive (no tracing GC): when
@@ -478,6 +493,19 @@ func sameValue(a any, b any) bool {
                 case []byte y:
                     return bytes.Equal(x, y)
             }
+        case []any x:
+            switch b {
+                case []any y:
+                    if len(x) != len(y) {
+                        return false
+                    }
+                    for i, e in x {
+                        if !sameValue(e, y[i]) {
+                            return false
+                        }
+                    }
+                    return true
+            }
     }
     return false
 }
@@ -610,6 +638,18 @@ struct Context {
         return this.st
     }
 
+    // NOTIFY channel, 'payload' (PostgreSQL; in a transaction it is sent
+    // at commit).
+    func Notify(channel string, payload string) Task<void!> {
+        return notifyPg(this.st, channel, payload)
+    }
+
+    // LISTEN channel on a dedicated connection (PostgreSQL): the payloads
+    // arrive on the subscription's channel C until Close.
+    func Listen(channel string) Task<*Subscription!> {
+        return listenPg(this.st, channel)
+    }
+
     // The provider of the context.
     func Provider() Provider {
         return this.st.provider
@@ -682,13 +722,13 @@ struct Context {
 
     // The DDL of the model (EnsureCreated's statements).
     func CreateScript() []string {
-        var m = Migrator{provider: this.st.provider, stmts: []}
+        var m = Migrator{provider: this.st.provider, stmts: [], d: this.st.d}
         for t in this.st.tables {
             m.createTableMeta(t)
         }
         for t in this.st.tables {
             for ix in t.Indexes {
-                m.CreateIndex(t.Table, ix.Name, ix.Columns, ix.Unique)
+                m.CreateIndexUsing(t.Table, ix.Name, ix.Columns, ix.Unique, ix.Using)
             }
         }
         return m.Statements()
@@ -734,42 +774,19 @@ async func rawQuery<T>(st *ctxState, query string, args []any) []T! {
     return await st.db.Query<T>(query, args)?
 }
 
-// Fails when SQLite is older than 3.39 and the query needs `what` (RIGHT
-// and FULL joins).
-async func needsLite339(st *ctxState, what string) void! {
-    if what == "" || st.pg() {
-        return
-    }
-    if st.liteVer == 0 {
-        var rows = await st.all("SELECT sqlite_version()", [])?
-        var v = ""
-        if len(rows) > 0 && len(rows[0]) > 0 {
-            database.sql.convertInto(&v, rows[0][0], "version")?
-        }
-        var n = 0
-        for part in strings.Split(v, ".") {
-            n = n * 1000 + (try strconv.Atoi(part) else 0)
-        }
-        st.liteVer = n
-    }
-    if st.liteVer < 3039000 {
-        return error("data: " + what + " need SQLite 3.39 or later (this is " + fmt.Format("{0}.{1}", st.liteVer / 1000000, st.liteVer / 1000 % 1000) + ")")
-    }
-}
-
 async func executeSql(st *ctxState, query string, args []any) int! {
     var r = await st.exec(query, args)?
     return r.RowsAffected
 }
 
 async func ensureCreated(st *ctxState) void! {
-    var m = Migrator{provider: st.provider, stmts: []}
+    var m = Migrator{provider: st.provider, stmts: [], d: st.d}
     for t in st.tables {
         m.createTableMeta(t)
     }
     for t in st.tables {
         for ix in t.Indexes {
-            m.CreateIndex(t.Table, ix.Name, ix.Columns, ix.Unique)
+            m.CreateIndexUsing(t.Table, ix.Name, ix.Columns, ix.Unique, ix.Using)
         }
     }
     for s in m.Statements() {
@@ -779,21 +796,19 @@ async func ensureCreated(st *ctxState) void! {
 
 // Creates the context state over db.
 func newState(p Provider, db *database.sql.DB) *ctxState {
-    return new ctxState{model: nil, db: db, provider: p, ids: map[string]*entry{}, byPtr: map[int]*entry{}, colsOf: map[string]string{}, entries: []}
+    var d = dialectOf(p)
+    return new ctxState{model: nil, db: db, provider: p, d: d, dk: dialectKey(d), qmark: d.Placeholder(1) == "?", ids: map[string]*entry{}, byPtr: map[int]*entry{}, colsOf: map[string]string{}, entries: []}
 }
 
 // Opens the pool of provider p (SQLite ":memory:" databases get one
 // connection, so that every statement sees the same database).
 func openDB(p Provider, dsn string) *database.sql.DB! {
-    if p == Provider.Postgres {
-        return database.postgres.Open(dsn)?
+    var d = dialectOf(p)
+    switch d {
+    case Opener o:
+        return o.Open(dsn)?
     }
-    var db = database.sqlite.Open(dsn)
-    if strings.Contains(dsn, ":memory:") || strings.Contains(dsn, "mode=memory") {
-        db.SetMaxOpenConns(1)
-        db.SetMaxIdleConns(1)
-    }
-    return db
+    return error("data: the " + d.Name() + " dialect cannot open connections (use data.OpenDB)")
 }
 
 // Parses "postgres"/"postgresql"/"pg" or "sqlite"/"sqlite3".
@@ -1024,12 +1039,49 @@ struct Set<T> {
     }
 
     func upsertBy_(e *T, cols []string) {
+        _ = this.upsertEntry_(e, cols)
+    }
+
+    func upsertEntry_(e *T, cols []string) *entry {
         var x = entryOf(this.st, e)
         if x != nil && x.state != 4 {
             this.st.forget(x)
         }
         var n = attachEntity(this.st, this.ent, e, 5)
         n.conflict = cols
+        return n
+    }
+
+    // The column names a selector lambda picks ((u) => u.Email, (u) =>
+    // (u.A, u.B)).
+    func columnsOf_(what string, sel expr<func(*T) any>) []string {
+        var names []string = []
+        for f in selectedFields(sel.Root()) {
+            var ci = this.ent.em.colOf(f)
+            if ci < 0 {
+                panic("data: " + what + ": " + this.ent.Meta.Entity + " has no column " + f)
+            }
+            names = append(names, this.ent.Meta.Columns[ci].Name)
+        }
+        if len(names) == 0 {
+            panic("data: " + what + " takes lambdas selecting columns: (x) => x.Email or (x) => (x.A, x.B)")
+        }
+        return names
+    }
+
+    // SaveChanges inserts e, or on a conflict over the conflict columns
+    // updates only the update columns (INSERT ... ON CONFLICT (c) DO UPDATE
+    // SET u = excluded.u): UpsertWith(u, (x) => x.Email, (x) => x.Name).
+    func UpsertWith(e *T, conflict expr<func(*T) any>, update expr<func(*T) any>) {
+        var n = this.upsertEntry_(e, this.columnsOf_("UpsertWith", conflict))
+        n.updCols = this.columnsOf_("UpsertWith", update)
+    }
+
+    // SaveChanges inserts e unless a row conflicts over the columns
+    // (INSERT ... ON CONFLICT (c) DO NOTHING); e then keeps a zero key.
+    func InsertOrIgnore(e *T, conflict expr<func(*T) any>) {
+        var n = this.upsertEntry_(e, this.columnsOf_("InsertOrIgnore", conflict))
+        n.ignore = true
     }
 
     // Marks e as modified: SaveChanges updates all of its columns (e need
@@ -1221,7 +1273,7 @@ async func setFind<T>(s Set<T>, k any) *T! {
     }
     var q = s.AsQuery()
     var col = "t0." + quoteIdent(m.Columns[m.Key].Name) + " = {?0}"
-    var q2 = q.where_(col, col, [kv])
+    var q2 = q.where_(col, [kv])
     return await q2.FirstOrDefault()?
 }
 
@@ -1241,12 +1293,9 @@ async func reload<T>(en Entry<T>) void! {
     }
 }
 
-// $n on PostgreSQL, ? on SQLite.
+// The placeholder of argument n of the context's dialect.
 func placeholder(st *ctxState, n int) string {
-    if st.pg() {
-        return "$" + fmt.Format("{0}", n)
-    }
-    return "?"
+    return st.d.Placeholder(n)
 }
 
 // A list argument ({*i}): the driver values of xs.

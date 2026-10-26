@@ -177,3 +177,34 @@ fn orm_real_postgres() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&proj);
 }
+
+/// The PostgreSQL-only features of `data` (`fixtures/data/pg_features.zl`)
+/// on a real server: `PGTEST_DSN` if set (e.g. a throwaway container),
+/// else the temporary cluster; skipped without either.
+#[test]
+fn pg_features() {
+    ensure_runtime();
+    let dir = std::env::temp_dir().join(format!("zell_data_pgf_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let mut cluster = None;
+    let dsn = match std::env::var("PGTEST_DSN") {
+        Ok(d) if !d.is_empty() => d,
+        _ => {
+            let Some(_) = pgcluster::available() else { return };
+            let c = pgcluster::start(&dir);
+            let d = c.dsn();
+            cluster = Some(c);
+            d
+        }
+    };
+    let src = repo().join("compiler/tests/fixtures/data/pg_features.zl");
+    let exe = dir.join("pg_features");
+    let b = zell().arg("build").arg(&src).arg("-o").arg(&exe).arg("--leak-check").output().unwrap();
+    assert!(b.status.success(), "build failed:\n{}", text(&b));
+    let run = Command::new(&exe).env("PGTEST_DSN", &dsn).env("ZELL_NO_BACKTRACE", "1").env_remove("HTTP_PROXY").env_remove("HTTPS_PROXY").output().unwrap();
+    assert!(run.status.success(), "program failed ({:?}):\n{}", run.status.code(), text(&run));
+    let want = std::fs::read_to_string(repo().join("compiler/tests/fixtures/data/pg_features.out")).unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), want);
+    drop(cluster);
+    let _ = std::fs::remove_dir_all(&dir);
+}

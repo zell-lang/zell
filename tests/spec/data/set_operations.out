@@ -1,0 +1,13 @@
+SELECT t0."id", t0."name", t0."age" FROM (SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (t0."age" < ?) UNION SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (t0."name" = ?)) AS t0 WHERE (t0."name" <> ?) ORDER BY t0."name" ASC [35 Cid Bob]
+  Ann
+  Cid
+  Dan
+5
+SELECT t0."id", t0."name", t0."age" FROM (SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (t0."age" < $1) INTERSECT SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (t0."age" = $2)) AS t0
+  Dan
+  Ann
+Bob
+SELECT t0."id", t0."name", t0."age" FROM (SELECT * FROM (SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 ORDER BY t0."age" DESC LIMIT 1) AS u UNION SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (t0."age" < ?)) AS t0
+2
+SELECT * FROM (SELECT t0."name" FROM "users" AS t0 WHERE (t0."age" < ?) UNION SELECT t0."name" FROM "users" AS t0 WHERE (t0."age" > ?)) AS t0 [20 40]
+2

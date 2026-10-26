@@ -1,0 +1,18 @@
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 WHERE (((((t0."meta" @> CAST($1 AS jsonb)) AND (t0."meta" ? $2)) AND (t0."meta" ?| ARRAY[$3, $4]::text[])) AND (t0."meta" ?& ARRAY[$5]::text[])) AND (NOT (t0."meta" <@ CAST($6 AS jsonb))))
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 WHERE ((t0."meta" @? CAST($1 AS jsonpath)) OR (t0."meta" @@ CAST($2 AS jsonpath)))
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 WHERE (((((t0."tags" @> ARRAY[$1, $2]::text[]) AND (t0."tags" && ARRAY[$3]::text[])) AND (t0."tags" <@ ARRAY[$4, $5]::text[])) AND ($6 = ANY(t0."tags"))) AND (cardinality(t0."tags") > $7))
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 WHERE (((t0."name" ILIKE $1) AND (t0."name" ~ $2)) AND (NOT (t0."bio" ~* $3)))
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 WHERE (to_tsvector(CAST($1 AS regconfig), t0."bio") @@ websearch_to_tsquery(CAST($2 AS regconfig), $3)) ORDER BY ts_rank(to_tsvector(CAST($4 AS regconfig), t0."bio"), plainto_tsquery(CAST($5 AS regconfig), $6)) DESC [english english fast compiler english english fast compiler]
+SELECT DISTINCT ON (t0."name", t0."bio") t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 ORDER BY t0."name" ASC, t0."bio" ASC, t0."id" ASC
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 WHERE (t0."id" > $1) LIMIT 5 FOR UPDATE SKIP LOCKED
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 FOR SHARE NOWAIT
+SELECT t0."id", t0."name", t0."bio", t0."meta", t0."tags" FROM "users" AS t0 WHERE (t0."name" = $1) FOR UPDATE
+ILike data: expression cannot be translated to SQL: ILike is not supported by sqlite (a PostgreSQL function) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)
+JsonContains data: expression cannot be translated to SQL: JsonContains is not supported by sqlite (a PostgreSQL function) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)
+ArrayOverlaps data: expression cannot be translated to SQL: ArrayOverlaps is not supported by sqlite (a PostgreSQL function) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)
+Matches data: expression cannot be translated to SQL: Matches is not supported by sqlite (a PostgreSQL function) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)
+DistinctOn data: DistinctOn (DISTINCT ON) is not supported by sqlite
+ForUpdate data: row locking (FOR UPDATE/FOR SHARE) is not supported by sqlite
+Notify data: Notify (NOTIFY) is not supported by sqlite
+Listen data: Listen (LISTEN) is not supported by sqlite
+true true true true

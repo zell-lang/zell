@@ -12,10 +12,7 @@ namespace data
 // Bound parameters per statement: SQLite's SQLITE_MAX_VARIABLE_NUMBER
 // (32766 since 3.32), PostgreSQL's 16-bit parameter count.
 func paramLimit(st *ctxState) int {
-    if st.pg() {
-        return 65535
-    }
-    return 32766
+    return st.d.MaxParams()
 }
 
 // Rows per multi-row INSERT of ncols columns: as many as the parameter
@@ -73,10 +70,10 @@ func isIntType(t string) bool {
 // Inserts a batch of added entries of one table and column set.
 async func insertBatch(st *ctxState, batch []*entry, allVals [][]any, cols []int, ret []int) void! {
     var m = batch[0].meta
-    var w = sqlw{pg: st.pg(), b: strings.Builder{}, args: [], groups: []}
+    var w = sqlw{d: st.d, b: strings.Builder{}, args: [], groups: [], qmark: st.qmark}
     w.raw("INSERT INTO " + quoteIdent(m.Table))
     if len(cols) == 0 {
-        if len(batch) > 1 && !st.pg() {
+        if len(batch) > 1 && !st.d.MultiRowDefaultValues() {
             // SQLite has no multi-row DEFAULT VALUES
             for i, e in batch {
                 await insertBatch(st, [e], [allVals[i]], cols, ret)?
@@ -156,7 +153,7 @@ async func upsertEntry(st *ctxState, e *entry) void! {
             }
         }
     }
-    var w = sqlw{pg: st.pg(), b: strings.Builder{}, args: [], groups: []}
+    var w = sqlw{d: st.d, b: strings.Builder{}, args: [], groups: [], qmark: st.qmark}
     w.raw("INSERT INTO " + quoteIdent(m.Table) + " (")
     for i, c in cols {
         if i > 0 {
@@ -182,11 +179,11 @@ async func upsertEntry(st *ctxState, e *entry) void! {
     var sets []string = []
     for c in cols {
         var name = m.Columns[c].Name
-        if c != m.Key && !contains(e.conflict, name) {
+        if c != m.Key && !contains(e.conflict, name) && (len(e.updCols) == 0 || contains(e.updCols, name)) {
             sets = append(sets, quoteIdent(name) + " = excluded." + quoteIdent(name))
         }
     }
-    if len(sets) == 0 {
+    if len(sets) == 0 || e.ignore {
         w.raw(" DO NOTHING")
     } else {
         w.raw(" DO UPDATE SET " + strings.Join(sets, ", "))
@@ -240,7 +237,7 @@ async func updateEntry(st *ctxState, e *entry) bool! {
     if len(changed) == 0 {
         return false
     }
-    var w = sqlw{pg: st.pg(), b: strings.Builder{}, args: [], groups: []}
+    var w = sqlw{d: st.d, b: strings.Builder{}, args: [], groups: [], qmark: st.qmark}
     w.raw("UPDATE " + quoteIdent(m.Table) + " SET ")
     var next any = nil
     var bump = m.Token >= 0 && isIntType(m.Columns[m.Token].Type)
@@ -282,7 +279,7 @@ async func updateEntry(st *ctxState, e *entry) bool! {
 
 async func deleteEntry(st *ctxState, e *entry) void! {
     var m = e.meta
-    var w = sqlw{pg: st.pg(), b: strings.Builder{}, args: [], groups: []}
+    var w = sqlw{d: st.d, b: strings.Builder{}, args: [], groups: [], qmark: st.qmark}
     w.raw("DELETE FROM " + quoteIdent(m.Table))
     keyWhere(&w, e)
     var r = await st.exec(w.text(), w.args)?

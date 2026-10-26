@@ -17,8 +17,7 @@ namespace data
 // A translated subexpression: SQL for both dialects and what it is.
 @acyclic
 struct sv {
-    pg    string
-    lite  string
+    s     string
     // static type of the value (scalars)
     t     *reflect.TypeInfo
     // 0 scalar, 1 entity row, 2 collection navigation, 3 reference
@@ -36,22 +35,22 @@ struct sv {
     isList bool
 }
 
-func scalarSv(pg string, lite string, t *reflect.TypeInfo) sv {
-    return sv{pg: pg, lite: lite, t: t}
+func scalarSv(s string, t *reflect.TypeInfo) sv {
+    return sv{s: s, t: t}
 }
 
 func sameSv(s string, t *reflect.TypeInfo) sv {
-    return sv{pg: s, lite: s, t: t}
+    return sv{s: s, t: t}
 }
 
 // `a` + x + `b` in both dialects.
 func around(a string, x sv, b string, t *reflect.TypeInfo) sv {
-    return sv{pg: a + x.pg + b, lite: a + x.lite + b, t: t}
+    return sv{s: a + x.s + b, t: t}
 }
 
 // `a` + x + `mid` + y + `b` in both dialects.
 func around2(a string, x sv, mid string, y sv, b string, t *reflect.TypeInfo) sv {
-    return sv{pg: a + x.pg + mid + y.pg + b, lite: a + x.lite + mid + y.lite + b, t: t}
+    return sv{s: a + x.s + mid + y.s + b, t: t}
 }
 
 // What a parameter of the tree is bound to.
@@ -68,6 +67,9 @@ struct tbind {
 @acyclic
 struct tcx {
     cm    *ctxModel
+    // the dialect translated for and its registry key
+    d     Dialect
+    dk    int
     binds []tbind
     // every Const and Captured node, in walk order
     vnodes []*expr.Node
@@ -146,8 +148,8 @@ struct tcx {
     }
 }
 
-func newTcx(cm *ctxModel, root *expr.Node, base int) *tcx {
-    var cx = new tcx{cm: cm, binds: [], vnodes: [], args: [], lists: [], convs: [], base: base, sub: 0}
+func newTcx(st *ctxState, root *expr.Node, base int) *tcx {
+    var cx = new tcx{cm: st.model, d: st.d, dk: st.dk, binds: [], vnodes: [], args: [], lists: [], convs: [], base: base, sub: 0}
     expr.Walk(root, (x) => {
         switch *x {
         case expr.Node.Const(_, _):
@@ -278,7 +280,7 @@ func tr(cx *tcx, n *expr.Node) sv! {
     case expr.Node.Param(i, t):
         var b = cx.binding(i)
         if b.kind == 1 {
-            return sv{pg: b.alias, lite: b.alias, t: t, kind: 1, em: b.em, alias: b.alias}
+            return sv{s: b.alias, t: t, kind: 1, em: b.em, alias: b.alias}
         }
         if b.kind == 2 {
             return sv{t: t, kind: 4, em: b.em, alias: b.alias, keys: b.keys}
@@ -286,7 +288,7 @@ func tr(cx *tcx, n *expr.Node) sv! {
         return untranslatable("a lambda parameter outside a query")
     case expr.Node.Field(base, name, _, t, _):
         var b = tr(cx, base)?
-        return member(cx, b, name, t)?
+        return member(cx, b, name, t, n)?
     case expr.Node.Const(v, t):
         return valueArg(cx, n, v, t, true)?
     case expr.Node.Captured(_, _, v, t):
@@ -321,18 +323,18 @@ func tr(cx *tcx, n *expr.Node) sv! {
 // A Const or Captured value: an argument (a list for a slice).
 func valueArg(cx *tcx, n *expr.Node, v any, t *reflect.TypeInfo, isConst bool) sv! {
     if isConst && v == nil {
-        return sv{pg: "NULL", lite: "NULL", t: t, isNil: true}
+        return sv{s: "NULL", t: t, isNil: true}
     }
     if t != nil && t.Kind == reflect.Kind.Slice && !(t.Elem.Kind == reflect.Kind.Uint8) {
         var m = cx.marker(n, true, t)
-        return sv{pg: m, lite: m, t: t, isList: true}
+        return sv{s: m, t: t, isList: true}
     }
     var m = cx.marker(n, false, t)
     return sameSv(m, t)
 }
 
 // `b.name`.
-func member(cx *tcx, b sv, name string, t *reflect.TypeInfo) sv! {
+func member(cx *tcx, b sv, name string, t *reflect.TypeInfo, n *expr.Node) sv! {
     if b.kind == 1 {
         return colSv(cx, b.em, b.alias, name, t)?
     }
@@ -361,6 +363,13 @@ func member(cx *tcx, b sv, name string, t *reflect.TypeInfo) sv! {
     }
     if b.kind == 5 {
         return untranslatable("members of a composite key cannot be used in SQL")
+    }
+    if b.kind == 0 {
+        // a path into a value column (jsonb): the dialect's
+        var sb = SqlBuilder{cx: cx, out: sv{}, set: false}
+        if cx.d.TranslateMember(&sb, SqlExpr{Text: b.s, Type: b.t}, expr.FieldOf(n), t)? {
+            return sb.out
+        }
     }
     return untranslatable(describe(b) + " has no member " + name + " in SQL")
 }
@@ -522,13 +531,13 @@ func convert(cx *tcx, x *expr.Node, t *reflect.TypeInfo) sv! {
         return untranslatable("cannot convert " + describe(v) + " to " + t.Name)
     }
     if t.Kind == reflect.Kind.Float || t.Kind == reflect.Kind.Float32 {
-        return scalarSv("CAST(" + v.pg + " AS double precision)", "CAST(" + v.lite + " AS REAL)", t)
+        return scalarSv("CAST(" + v.s + " AS " + cx.d.CastType("float") + ")", t)
     }
     if t.Kind == reflect.Kind.Int32 {
-        return scalarSv("CAST(" + v.pg + " AS integer)", "CAST(" + v.lite + " AS INTEGER)", t)
+        return scalarSv("CAST(" + v.s + " AS " + cx.d.CastType("int32") + ")", t)
     }
     if isIntKind(t.Kind) {
-        return scalarSv("CAST(" + v.pg + " AS bigint)", "CAST(" + v.lite + " AS INTEGER)", t)
+        return scalarSv("CAST(" + v.s + " AS " + cx.d.CastType("int64") + ")", t)
     }
     return untranslatable("conversion to " + t.Name + " is not supported")
 }
@@ -536,8 +545,24 @@ func convert(cx *tcx, x *expr.Node, t *reflect.TypeInfo) sv! {
 // Calls: string functions, collection aggregates, group aggregates, `len`,
 // `slices.Contains`, `math.Abs`.
 func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
+    // the dialect first: its own functions and the ones whose SQL differs
+    var b = SqlBuilder{cx: cx, out: sv{}, set: false}
+    if cx.d.TranslateCall(&b, fname, args, t)? {
+        return b.out
+    }
     if isSubCall(fname) {
         return subCall(cx, fname, args, t)?
+    }
+    if isWindowCall(fname) {
+        return windowCall(cx, fname, args, t)?
+    }
+    if fname == "data.Like" {
+        var x = trValue(cx, args[0])?
+        var p = trValue(cx, args[1])?
+        return scalarSv("(" + x.s + " LIKE " + p.s + " ESCAPE '\\')", reflect.TypeOf<bool>())
+    }
+    if fname == "data.Sql" || fname == "data.Sql1" || fname == "data.Sql2" || fname == "data.Sql3" {
+        return rawSql(cx, args, t)?
     }
     if fname == "len" {
         var v = tr(cx, args[0])?
@@ -545,7 +570,7 @@ func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
             return collOp(cx, v, "Count", nil)?
         }
         if v.kind == 0 && isStrTy(v.t) {
-            return scalarSv("char_length(" + v.pg + ")", "length(" + v.lite + ")", reflect.TypeOf<int>())
+            return scalarSv("char_length(" + v.s + ")", reflect.TypeOf<int>())
         }
         return untranslatable("len of " + describe(v) + " is not supported")
     }
@@ -612,42 +637,39 @@ func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
     return untranslatable("function " + fname + " cannot be translated")
 }
 
-// String functions for both dialects.
+// String tests in standard SQL (SQL:2016 POSITION/SUBSTRING forms);
+// dialects with cheaper functions translate them in TranslateCall.
 func stringFn(m string, x sv, a sv) sv! {
     if m == "Contains" {
-        return scalarSv("(strpos(" + x.pg + ", " + a.pg + ") > 0)", "(instr(" + x.lite + ", " + a.lite + ") > 0)", reflect.TypeOf<bool>())
+        return scalarSv("(position(" + a.s + " in " + x.s + ") > 0)", reflect.TypeOf<bool>())
     }
     if m == "HasPrefix" {
-        return scalarSv("starts_with(" + x.pg + ", " + a.pg + ")", "(substr(" + x.lite + ", 1, length(" + a.lite + ")) = " + a.lite + ")", reflect.TypeOf<bool>())
+        return scalarSv("(substring(" + x.s + " from 1 for char_length(" + a.s + ")) = " + a.s + ")", reflect.TypeOf<bool>())
     }
-    return scalarSv(
-        "(right(" + x.pg + ", length(" + a.pg + ")) = " + a.pg + ")",
-        "(length(" + a.lite + ") = 0 OR substr(" + x.lite + ", -length(" + a.lite + ")) = " + a.lite + ")",
-        reflect.TypeOf<bool>(),
-    )
+    return scalarSv("(char_length(" + a.s + ") = 0 OR substring(" + x.s + " from char_length(" + x.s + ") - char_length(" + a.s + ") + 1) = " + a.s + ")", reflect.TypeOf<bool>())
 }
 
-// Aggregate SQL for both dialects: SUM/AVG need casts on PostgreSQL
-// (numeric results).
-func aggregate(f string, x sv, coalesce bool) sv {
+// Aggregate SQL; the dialect casts results whose type would differ
+// (PostgreSQL: SUM of bigint and AVG are numeric).
+func aggregate(d Dialect, f string, x sv, coalesce bool) sv {
+    var r = sv{}
     if f == "Sum" {
-        var s = sv{pg: "SUM(" + x.pg + ")", lite: "SUM(" + x.lite + ")", t: baseOf(x.t)}
-        if isIntTy(x.t) {
-            s.pg = "CAST(SUM(" + x.pg + ") AS bigint)"
-        }
-        if coalesce {
-            s.pg = "COALESCE(" + s.pg + ", 0)"
-            s.lite = "COALESCE(" + s.lite + ", 0)"
-        }
-        return s
+        r = sv{s: "SUM(" + x.s + ")", t: baseOf(x.t)}
+    } else if f == "Average" {
+        r = sv{s: "AVG(" + x.s + ")", t: reflect.TypeOf<float>()}
+    } else if f == "Min" {
+        r = around("MIN(", x, ")", x.t)
+    } else {
+        r = around("MAX(", x, ")", x.t)
     }
-    if f == "Average" {
-        return scalarSv("CAST(AVG(" + x.pg + ") AS double precision)", "AVG(" + x.lite + ")", reflect.TypeOf<float>())
+    var k = d.AggregateCast(f, isIntTy(x.t))
+    if k != "" {
+        r.s = "CAST(" + r.s + " AS " + d.CastType(k) + ")"
     }
-    if f == "Min" {
-        return around("MIN(", x, ")", x.t)
+    if coalesce {
+        r.s = "COALESCE(" + r.s + ", 0)"
     }
-    return around("MAX(", x, ")", x.t)
+    return r
 }
 
 func isNumTy(t *reflect.TypeInfo) bool {
@@ -674,16 +696,14 @@ func collOp(cx *tcx, v sv, m string, lam *expr.Node) sv! {
     var corr = correlate(n, v.em, v.alias, target, alias)?
     if m == "Any" || m == "Count" {
         var w = ""
-        var wl = ""
         if lam != nil {
             var p = trPred(cx, lambdaBody(cx, lam, target, alias))?
-            w = " AND (" + p.pg + ")"
-            wl = " AND (" + p.lite + ")"
+            w = " AND (" + p.s + ")"
         }
         if m == "Any" {
-            return scalarSv("EXISTS (SELECT 1 FROM " + corr + w + ")", "EXISTS (SELECT 1 FROM " + corr + wl + ")", reflect.TypeOf<bool>())
+            return scalarSv("EXISTS (SELECT 1 FROM " + corr + w + ")", reflect.TypeOf<bool>())
         }
-        return scalarSv("(SELECT COUNT(*) FROM " + corr + w + ")", "(SELECT COUNT(*) FROM " + corr + wl + ")", reflect.TypeOf<int>())
+        return scalarSv("(SELECT COUNT(*) FROM " + corr + w + ")", reflect.TypeOf<int>())
     }
     if lam == nil {
         return untranslatable("data." + m + " needs a lambda")
@@ -697,7 +717,7 @@ func collOp(cx *tcx, v sv, m string, lam *expr.Node) sv! {
     if m != "Min" && m != "Max" && !isNumTy(x.t) {
         return untranslatable("data." + m + " needs a number, found " + describe(x))
     }
-    var agg = aggregate(m, x, m == "Sum")
+    var agg = aggregate(cx.d, m, x, m == "Sum")
     return around("(SELECT ", agg, " FROM " + corr + ")", agg.t)
 }
 
@@ -717,7 +737,7 @@ func groupOp(cx *tcx, g sv, m string, lam *expr.Node) sv! {
     if m != "Min" && m != "Max" && !isNumTy(x.t) {
         return untranslatable(m + " needs a number, found " + describe(x))
     }
-    return aggregate(m, x, false)
+    return aggregate(cx.d, m, x, false)
 }
 
 // The values of a key lambda body: one value, a tuple of values, or a
@@ -758,14 +778,12 @@ func orderKeys(cx *tcx, n *expr.Node, desc bool) sv! {
     if desc {
         dir = " DESC"
     }
-    var r = sv{pg: "", lite: ""}
+    var r = sv{s: ""}
     for i, k in keys {
         if i > 0 {
-            r.pg = r.pg + ", "
-            r.lite = r.lite + ", "
+            r.s = r.s + ", "
         }
-        r.pg = r.pg + k.pg + dir
-        r.lite = r.lite + k.lite + dir
+        r.s = r.s + k.s + dir
     }
     return r
 }
@@ -829,11 +847,9 @@ func projection(cx *tcx, n *expr.Node, p *plan) void! {
     p.shape = shapeOf(cx, n, &leaves, true)?
     for i, l in leaves {
         if i > 0 {
-            p.pg = p.pg + ", "
-            p.lite = p.lite + ", "
+            p.s = p.s + ", "
         }
-        p.pg = p.pg + l.pg
-        p.lite = p.lite + l.lite
+        p.s = p.s + l.s
     }
 }
 
@@ -869,12 +885,11 @@ func mapRow<R>(sh *rowShape, vals []any, r *R) void! {
 
 // ---- plans --------------------------------------------------------------------------
 
-// A translated lambda: SQL for both dialects and where its arguments
+// A translated lambda: its SQL for one dialect and where its arguments
 // come from.
 @acyclic
 struct plan {
-    pg     string
-    lite   string
+    s      string
     // per argument marker: the walk ordinal of its value node, whether
     // it is a list, and how it becomes a driver value
     ords   []int
@@ -890,8 +905,7 @@ struct plan {
     // projections
     shape  *rowShape
     // GROUP BY: one fragment per key
-    pgs    []string
-    lites  []string
+    ss     []string
 }
 
 // The plans of one lambda site, by role.
@@ -903,12 +917,12 @@ struct sitePlans {
 // Roles of a lambda in a query (the SQL differs).
 //   0 predicate over t0, 1 ascending keys, 2 descending keys, 3 projection,
 //   4 Sum, 5 Min, 6 Max, 7 Average, 8 group keys
-func lookupPlan(cm *ctxModel, site int, role int) *plan {
+func lookupPlan(cm *ctxModel, dk int, site int, role int) *plan {
     if site < 0 {
         return nil
     }
     lockInt(&cm.lock)
-    var sp = cm.plans[site]
+    var sp = cm.plans[site * 16 + dk]
     var p *plan = nil
     if sp != nil {
         p = sp.byRole[role]
@@ -917,20 +931,22 @@ func lookupPlan(cm *ctxModel, site int, role int) *plan {
     return p
 }
 
-func storePlan(cm *ctxModel, site int, role int, p *plan) {
-    lockInt(&cm.lock)
-    var sp = cm.plans[site]
+func storePlan(st *ctxState, site int, role int, p *plan) {
+    var m = st.model
+    var k = site * 16 + st.dk
+    lockInt(&m.lock)
+    var sp = m.plans[k]
     if sp == nil {
         sp = new sitePlans{byRole: [nil, nil, nil, nil, nil, nil, nil, nil, nil]}
-        cm.plans[site] = sp
+        m.plans[k] = sp
     }
     sp.byRole[role] = p
-    unlockInt(&cm.lock)
+    unlockInt(&m.lock)
 }
 
 // Finishes plan p of tree e translated by cx (caching it when the tree
 // belongs to a lambda site).
-func finishPlan<F>(cm *ctxModel, e expr.Expr<F>, root *expr.Node, role int, cx *tcx, p *plan) *plan {
+func finishPlan<F>(st *ctxState, e expr.Expr<F>, root *expr.Node, role int, cx *tcx, p *plan) *plan {
     p.ords = cx.args
     p.lists = cx.lists
     p.convs = cx.convs
@@ -938,7 +954,7 @@ func finishPlan<F>(cm *ctxModel, e expr.Expr<F>, root *expr.Node, role int, cx *
     if site >= 0 && !cx.nocache {
         p.cached = true
         p.slots = markerSlots(e.Slots(), cx.args)
-        storePlan(cm, site, role, p)
+        storePlan(st, site, role, p)
     } else {
         p.vals = cxValues(cx, root)
     }
@@ -963,7 +979,7 @@ func cxValues(cx *tcx, root *expr.Node) []any {
 }
 
 func newPlan() *plan {
-    return new plan{pg: "", lite: "", ords: [], lists: [], convs: [], cached: false, slots: [], vals: [], err: "", shape: nil, pgs: [], lites: []}
+    return new plan{s: "", ords: [], lists: [], convs: [], cached: false, slots: [], vals: [], err: "", shape: nil, ss: []}
 }
 
 // The slot of each argument marker (the slot of its value node).
@@ -1068,27 +1084,26 @@ func listValue(v any) any {
 }
 
 // The plan of predicate tree e over entity em (role 0).
-func predPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>) *plan {
+func predPlan<F>(st *ctxState, em *entModel, e expr.Expr<F>) *plan {
     var root = e.Root()
-    var cx = newTcx(cm, root, 0)
+    var cx = newTcx(st, root, 0)
     cx.bindEntity(0, em, "t0")
     var p = newPlan()
     try predInto(cx, root, p) catch err {
         p.err = err.Message()
     }
-    return finishPlan(cm, e, root, 0, cx, p)
+    return finishPlan(st, e, root, 0, cx, p)
 }
 
 func predInto(cx *tcx, root *expr.Node, p *plan) void! {
     var v = trPred(cx, root)?
-    p.pg = v.pg
-    p.lite = v.lite
+    p.s = v.s
 }
 
 // The plan of an ordering tree over em (role 1 or 2).
-func orderPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>, desc bool) *plan {
+func orderPlan<F>(st *ctxState, em *entModel, e expr.Expr<F>, desc bool) *plan {
     var root = e.Root()
-    var cx = newTcx(cm, root, 0)
+    var cx = newTcx(st, root, 0)
     cx.bindEntity(0, em, "t0")
     var p = newPlan()
     try orderInto(cx, root, desc, p) catch err {
@@ -1098,37 +1113,36 @@ func orderPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>, desc bool) *plan {
     if desc {
         role = 2
     }
-    return finishPlan(cm, e, root, role, cx, p)
+    return finishPlan(st, e, root, role, cx, p)
 }
 
 func orderInto(cx *tcx, root *expr.Node, desc bool, p *plan) void! {
     var v = orderKeys(cx, root, desc)?
-    p.pg = v.pg
-    p.lite = v.lite
+    p.s = v.s
 }
 
 // The plan of a projection tree over em (role 3).
-func selectPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>) *plan {
+func selectPlan<F>(st *ctxState, em *entModel, e expr.Expr<F>) *plan {
     var root = e.Root()
-    var cx = newTcx(cm, root, 0)
+    var cx = newTcx(st, root, 0)
     cx.bindEntity(0, em, "t0")
     var p = newPlan()
     try projection(cx, root, p) catch err {
         p.err = err.Message()
     }
-    return finishPlan(cm, e, root, 3, cx, p)
+    return finishPlan(st, e, root, 3, cx, p)
 }
 
 // The plan of an aggregate's value tree over em (roles 4-7).
-func aggPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>, f string, role int) *plan {
+func aggPlan<F>(st *ctxState, em *entModel, e expr.Expr<F>, f string, role int) *plan {
     var root = e.Root()
-    var cx = newTcx(cm, root, 0)
+    var cx = newTcx(st, root, 0)
     cx.bindEntity(0, em, "t0")
     var p = newPlan()
     try aggInto(cx, root, f, p) catch err {
         p.err = err.Message()
     }
-    return finishPlan(cm, e, root, role, cx, p)
+    return finishPlan(st, e, root, role, cx, p)
 }
 
 func aggInto(cx *tcx, root *expr.Node, f string, p *plan) void! {
@@ -1136,37 +1150,35 @@ func aggInto(cx *tcx, root *expr.Node, f string, p *plan) void! {
     if (f == "Sum" || f == "Average") && !isNumTy(x.t) {
         return untranslatable(f + " needs a number, found " + describe(x))
     }
-    var a = aggregate(f, x, false)
-    p.pg = a.pg
-    p.lite = a.lite
+    var a = aggregate(cx.d, f, x, false)
+    p.s = a.s
 }
 
 // The plan of a GroupBy key tree over em (role 8).
-func groupKeyPlan<F>(cm *ctxModel, em *entModel, e expr.Expr<F>) *plan {
+func groupKeyPlan<F>(st *ctxState, em *entModel, e expr.Expr<F>) *plan {
     var root = e.Root()
-    var cx = newTcx(cm, root, 0)
+    var cx = newTcx(st, root, 0)
     cx.bindEntity(0, em, "t0")
     var p = newPlan()
     try groupKeysInto(cx, root, p) catch err {
         p.err = err.Message()
     }
-    return finishPlan(cm, e, root, 8, cx, p)
+    return finishPlan(st, e, root, 8, cx, p)
 }
 
 func groupKeysInto(cx *tcx, root *expr.Node, p *plan) void! {
     var keys = keyValues(cx, root)?
     for k in keys {
-        p.pgs = append(p.pgs, k.pg)
-        p.lites = append(p.lites, k.lite)
+        p.ss = append(p.ss, k.s)
     }
 }
 
 // The plan of a tree over a group (Where as HAVING, OrderBy, Select of a
 // GroupBy); not cached (it depends on the keys). what: 0 predicate, 1/2
 // ascending/descending keys, 3 projection.
-func groupPlan<F>(cm *ctxModel, em *entModel, keys []sv, e expr.Expr<F>, what int) *plan {
+func groupPlan<F>(st *ctxState, em *entModel, keys []sv, e expr.Expr<F>, what int) *plan {
     var root = e.Root()
-    var cx = newTcx(cm, root, 0)
+    var cx = newTcx(st, root, 0)
     cx.bindGroup(0, em, "t0", keys)
     var p = newPlan()
     try groupInto(cx, root, what, p) catch err {

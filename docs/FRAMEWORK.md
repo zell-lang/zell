@@ -329,6 +329,76 @@ await ctx.SaveChanges()?        // change tracking: UPDATE только изме
   (`db.Query<T>(sql, args)`) без трекинга.
 - NoSQL: `zell.data.redis`, `zell.data.mongo` отдельными пакетами.
 
+#### Расширенный SQL (2026-10-26)
+
+| Возможность | SQLite | PostgreSQL | API |
+|---|---|---|---|
+| Подзапросы `EXISTS`/`NOT EXISTS` (в т.ч. коррелированные) | ✓ | ✓ | `data.Exists(data.Where(orders, (o) => o.UserId == u.Id))`, `data.NotExists(q)` |
+| `IN (SELECT …)` | ✓ | ✓ | `data.In(u.Id, ctx.Orders.Select((o) => o.UserId))` |
+| Скалярные подзапросы | ✓ | ✓ | `data.CountOf(q)`, `SumOf/MinOf/MaxOf/AverageOf(q, (o) => o.Total)`, `data.Value(proj)` |
+| `LEFT JOIN`, `CROSS JOIN` | ✓ | ✓ | `q.LeftJoin(ctx.Orders, ok, ik, (u, o) => (u.Name, data.Nullable(o.Total)))`, `o == nil`, `q.CrossJoin(s, (a, b) => …)` |
+| `RIGHT JOIN`, `FULL JOIN` | ≥ 3.39 (ошибка при выполнении иначе) | ✓ | `q.RightJoin(...)`, `q.FullJoin(...)` |
+| `GROUP BY` + `HAVING`, составной ключ, `ORDER BY` агрегата | ✓ | ✓ | `GroupBy((o) => (o.A, o.B)).Where((g) => g.Sum((o) => o.Qty) > 3).OrderByDescending((g) => g.Count())` |
+| `UNION [ALL]`, `INTERSECT`, `EXCEPT` | ✓ | ✓ | `a.Union(b)`, `UnionAll`, `Intersect`, `Except` (запросы и проекции) |
+| CTE, `WITH RECURSIVE` | ✓ | ✓ | `q.AsCte("name")`, `q.Recursive((child, parent) => child.ParentId == parent.Id)` |
+| Оконные функции | ✓ | ✓ (с приведениями) | `data.RowNumber/Rank/DenseRank(w)`, `Lag/Lead(x, w)` (указатель), `SumOver/AverageOver/MinOver/MaxOver(x, w)`, `CountOver(w)`, `w = data.Over().PartitionBy(…).OrderBy(…)` |
+| `ON CONFLICT … DO UPDATE/DO NOTHING` | ✓ | ✓ | `Upsert`, `UpsertBy`, `UpsertWith(e, (x) => x.Email, (x) => x.Name)`, `InsertOrIgnore(e, (x) => x.Email)` |
+| `RETURNING` в UPDATE/DELETE | ≥ 3.35 | ✓ | `q.ExecuteUpdateReturning(f, (u) => u.Id)`, `q.ExecuteDeleteReturning((u) => (u.Id, u.Name))` |
+| Сырые фрагменты (параметры связаны) | ✓ | ✓ | `data.Sql1<string>("lower(?)", u.Name)`, `Sql`, `Sql2`, `Sql3`; `??` — буквальный `?` |
+| `LIKE … ESCAPE` | ✓ | ✓ | `data.Like(u.Name, data.EscapeLike(q) + "%")` |
+| `jsonb`-документы, пути | JSON-текст, `json_extract` | `jsonb`, `->>`/`#>>` с приведением | `@data.jsonb Meta Meta`; `u.Meta.Limits.Seats > 1` |
+| Операторы `jsonb` | ошибка | ✓ | `JsonContains` (`@>`), `JsonContainedBy` (`<@`), `JsonHasKey` (`?`), `JsonHasAnyKey` (`?\|`), `JsonHasAllKeys` (`?&`), `JsonPathExists` (`@?`), `JsonPathMatch` (`@@`), `JsonSet` (`jsonb_set`) |
+| Массивы `[]T` | JSON-массив, `len` | `text[]`/`bigint[]`… | `ArrayContains` (`@>`), `ArrayContainedBy`, `ArrayOverlaps` (`&&`), `x == data.AnyOf(u.Tags)`, `len` (`cardinality`) — операторы только PostgreSQL |
+| `ILIKE`, регулярные выражения | ошибка | ✓ | `data.ILike`, `data.Regex` (`~`), `data.IRegex` (`~*`) |
+| Полнотекстовый поиск | ошибка | ✓ | `data.Matches(data.ToTsVector("english", u.Bio), data.PlainToTsQuery("english", q))`, `WebSearchToTsQuery`, `ToTsQuery`, `TsRank` |
+| `DISTINCT ON` | ошибка | ✓ | `q.DistinctOn((o) => o.UserId)` |
+| Блокировки строк | ошибка | ✓ | `q.ForUpdate()`, `ForShare()`, `SkipLocked()`, `NoWait()` |
+| `LISTEN`/`NOTIFY` | ошибка | ✓ | `await ctx.Notify("ch", "x")`, `var s = await ctx.Listen("ch")?; await s.C.Recv()`, `s.Close()` |
+| GIN-индексы | обычный индекс | `USING gin` | `@data.index(using: "gin")`, `Migrator.CreateIndexUsing` |
+
+Ошибки «не поддерживается» — при выполнении запроса (провайдер
+известен только во время выполнения): `data: ... ILike is not supported
+by sqlite (a PostgreSQL function)`; ошибки компиляции — у неверных типов
+(`Sum` строк, `data.Sql` с нелитеральным текстом — при выполнении).
+Захваченный запрос в лямбде делает её план некэшируемым (SQL зависит от
+запроса).
+
+#### Диалекты (провайдеры): плагин SQL
+
+Ядро ORM (будущий `zell-lang/db`) не ветвится по провайдеру: оно обходит
+деревья выражений и пишет общий SQL (SELECT, JOIN, GROUP BY/HAVING,
+подзапросы, CTE, операции над множествами, стандартные оконные функции,
+INSERT/UPDATE/DELETE), а всё, что различается, спрашивает у
+`interface Dialect` (`data_dialect.zl`, как провайдеры EF Core; DDL —
+встроенный `DdlDialect`, открытие соединений — `Opener`). Диалект
+реализует все методы; ANSI-версии — функции `ansi<Метод>(d, …)`, к
+которым он делегирует (методы интерфейса по умолчанию проверялись бы в
+каждой программе):
+
+| Метод | Что |
+|---|---|
+| `Name()` | `"sqlite"`, `"postgres"`: ключ реестра и имя в ошибках |
+| `Open(dsn)` (`Opener`) | пул соединений драйвера |
+| `BindArray(xs)` | значение столбца-массива (PostgreSQL — массив, SQLite — JSON) |
+| `Quote(ident)`, `Placeholder(n)` | кавычки идентификаторов (DDL; запросы ядро пишет в ANSI-кавычках), `?` / `$n` |
+| `Paging(take, skip)` | `LIMIT/OFFSET` (MSSQL/Oracle: `OFFSET … FETCH`) |
+| `MaxParams()`, `MultiRowDefaultValues()` | пакетная вставка |
+| `CastType(kind)`, `AggregateCast(f, isInt)` | типы `CAST`, приведение результатов `SUM`/`AVG` |
+| `TranslateCall(b, name, args, t) bool!`, `TranslateMember(b, base, name, t) bool!` | вызовы и члены, которые ядро не знает или пишет иначе; `false` — к общей трансляции; `b *SqlBuilder` переводит поддеревья (`Value`, `Pred`), значения остаются параметрами |
+| `Returning()`, `Lock(mode, wait)`, `DistinctOn()`, `Require(feature)` | `RETURNING`, `FOR UPDATE/SHARE`, `DISTINCT ON`, проверка версии (SQLite < 3.39 — без `RIGHT/FULL JOIN`) |
+| `ColumnType`, `DefaultSql`, `ColumnDef`, `ZeroLiteral`, `AlterColumn`, `AddForeignKey`, `DropForeignKey`, `CreateIndex` | DDL миграций |
+
+`Provider` (`data.Provider.Postgres`/`.Sqlite`) разрешается в `Dialect`
+по имени через реестр (`data.RegisterDialect(d)`, `data.DialectByName`);
+встроенные диалекты — `data_sqlite.zl` (`SqliteDialect`) и
+`data_postgres.zl` (`PostgresDialect`), по файлу на будущий репозиторий
+драйвера. Функции, которые есть только в одной базе (PostgreSQL:
+`ILike`, `Json*`, `Array*`, `Matches`, …), объявлены в файле своего
+диалекта с `@expr.call` и реализацией в памяти для `Compile()`; их
+переводит только `TranslateCall` этого диалекта, другой отвечает ошибкой
+`ILike is not supported by sqlite`. Планы кэшируются по месту лямбды и
+диалекту.
+
 #### Статус реализации (`data`)
 
 Реализовано как `data` (пока нет реестра пакетов; `import data` —

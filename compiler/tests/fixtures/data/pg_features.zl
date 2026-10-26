@@ -1,0 +1,161 @@
+// The PostgreSQL-specific features of data against a real server
+// (compiler/tests/data.rs runs it when PGTEST_DSN is set, after a schema
+// reset, and compares the output with pg_features.out): jsonb documents
+// (paths, @>, ?, ?|, ?&, @?, @@, jsonb_set), arrays (@>, &&, ANY,
+// cardinality), ILIKE, regex, full-text search with ts_rank, DISTINCT ON,
+// row locks, RETURNING and ON CONFLICT, CTEs, window functions, set
+// operations, subqueries, outer joins, LISTEN/NOTIFY and the GIN DDL.
+namespace pgfeatures
+
+import data
+import encoding.json
+import io
+import os
+
+struct Limits {
+    Seats int
+    Pro   bool
+}
+
+struct Meta {
+    Plan   string
+    Age    int
+    Limits Limits
+}
+
+struct User {
+    Id   int
+    Name string
+    @data.jsonb @data.index(using: "gin") Meta Meta
+    @data.index(using: "gin") Tags []string
+    Scores []int
+    Bio  string
+}
+
+struct Order {
+    Id     int
+    UserId int
+    Total  float
+}
+
+struct Category {
+    @data.key(generated: false) Id int
+    Name     string
+    ParentId int
+}
+
+struct Shop {
+    data.Context
+    Users      data.Set<User>
+    Orders     data.Set<Order>
+    Categories data.Set<Category>
+}
+
+async func names(q data.Query<User>) string! {
+    var out []string = []
+    for u in await q.OrderBy((u) => u.Id).ToList()? {
+        out = append(out, u.Name)
+    }
+    return strings.Join(out, ",")
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Postgres, os.Getenv("PGTEST_DSN"))?
+    _ = await ctx.ExecuteSql("DROP TABLE IF EXISTS users, orders, categories CASCADE", [])?
+    for s in ctx.CreateScript() {
+        if strings.Contains(s, "gin") {
+            println(s)
+        }
+    }
+    await ctx.EnsureCreated()?
+    var ann = new User{Name: "Ann", Meta: Meta{Plan: "pro", Age: 34, Limits: Limits{Seats: 5, Pro: true}}, Tags: ["admin", "dev"], Scores: [3, 9], Bio: "Writes compilers and databases"}
+    var bob = new User{Name: "Bob", Meta: Meta{Plan: "free", Age: 17, Limits: Limits{Seats: 1, Pro: false}}, Tags: ["dev"], Scores: [], Bio: "Plays jazz guitar"}
+    var cid = new User{Name: "cid_%", Meta: Meta{Plan: "free", Age: 51, Limits: Limits{Seats: 2, Pro: false}}, Tags: [], Scores: [1], Bio: "Database administrator"}
+    ctx.Users.AddRange([ann, bob, cid])
+    _ = await ctx.SaveChanges()?
+    ctx.Orders.AddRange([new Order{UserId: ann.Id, Total: 120.0}, new Order{UserId: ann.Id, Total: 30.0}, new Order{UserId: bob.Id, Total: 60.0}, new Order{UserId: 99, Total: 5.0}])
+    _ = await ctx.SaveChanges()?
+
+    // jsonb
+    var back = await ctx.Users.AsNoTracking().Where((u) => u.Id == ann.Id).Single()?
+    println("doc", back.Meta.Plan, back.Meta.Age, back.Meta.Limits.Seats, back.Tags, back.Scores)
+    println("path", await names(ctx.Users.Where((u) => u.Meta.Plan == "pro"))?)
+    println("int path", await names(ctx.Users.Where((u) => u.Meta.Age >= 18))?)
+    println("nested", await names(ctx.Users.Where((u) => u.Meta.Limits.Seats > 1 && !u.Meta.Limits.Pro))?)
+    println(ctx.Users.Where((u) => u.Meta.Limits.Seats > 1).ToSql())
+    var filter = json.Format(Limits{Seats: 5, Pro: true})
+    println("@>", await names(ctx.Users.Where((u) => data.JsonContains(u.Meta, "{\"Plan\":\"pro\"}") || data.JsonContainedBy(u.Meta, "{}")))?)
+    println("?", await names(ctx.Users.Where((u) => data.JsonHasKey(u.Meta, "Limits")))?, filter != "")
+    println("?|", await names(ctx.Users.Where((u) => data.JsonHasAnyKey(u.Meta, ["x", "Plan"])))?)
+    println("?&", await names(ctx.Users.Where((u) => data.JsonHasAllKeys(u.Meta, ["Plan", "y"])))?)
+    println("@?", await names(ctx.Users.Where((u) => data.JsonPathExists(u.Meta, "$.Limits ? (@.Seats > 1)")))?)
+    println("@@", await names(ctx.Users.Where((u) => data.JsonPathMatch(u.Meta, "$.Age > 40")))?)
+    var n = await ctx.Users.Where((u) => u.Id == bob.Id).ExecuteUpdate((s) => s.SetWith((u) => u.Meta, (u) => data.JsonSet(u.Meta, ["Plan"], json.Format("team"))))?
+    println("jsonb_set", n, await names(ctx.Users.Where((u) => u.Meta.Plan == "team"))?)
+
+    // arrays
+    println("arr @>", await names(ctx.Users.Where((u) => data.ArrayContains(u.Tags, ["dev"])))?)
+    println("arr &&", await names(ctx.Users.Where((u) => data.ArrayOverlaps(u.Tags, ["admin", "ops"])))?)
+    println("any", await names(ctx.Users.Where((u) => "dev" == data.AnyOf(u.Tags)))?)
+    println("int any", await names(ctx.Users.Where((u) => 9 == data.AnyOf(u.Scores) || data.ArrayContainedBy(u.Scores, [1, 2])))?)
+    println("cardinality", await ctx.Users.OrderBy((u) => u.Id).Select((u) => (u.Name, len(u.Tags))).ToList()?)
+
+    // text
+    println("ilike", await names(ctx.Users.Where((u) => data.ILike(u.Name, "a%")))?)
+    println("like escaped", await names(ctx.Users.Where((u) => data.Like(u.Name, data.EscapeLike("cid_%"))))?)
+    println("regex", await names(ctx.Users.Where((u) => data.Regex(u.Name, "^[AB]") && !data.IRegex(u.Name, "^b")))?)
+    var words = "database"
+    var fts = ctx.Users.Where((u) => data.Matches(data.ToTsVector("english", u.Bio), data.PlainToTsQuery("english", words))).OrderByDescending((u) => data.TsRank(data.ToTsVector("english", u.Bio), data.WebSearchToTsQuery("english", words))).Select((u) => u.Name)
+    println("fts", await fts.ToList()?)
+
+    // DISTINCT ON, locks
+    var firsts = ctx.Orders.AsQuery().DistinctOn((o) => o.UserId).OrderBy((o) => (o.UserId, o.Total)).Select((o) => (o.UserId, o.Total))
+    println("distinct on", len(await firsts.ToList()?))
+    await ctx.Transaction(async () => {
+        var locked = await ctx.Orders.Where((o) => o.Total > 50.0).ForUpdate().SkipLocked().ToList()?
+        println("for update skip locked", len(locked))
+        var shared = await ctx.Orders.Where((o) => o.Total > 50.0).ForShare().NoWait().Count()?
+        println("for share nowait", shared)
+    })?
+
+    // RETURNING, ON CONFLICT
+    var raised = await ctx.Orders.Where((o) => o.Total < 50.0).ExecuteUpdateReturning((s) => s.SetWith((o) => o.Total, (o) => o.Total * 2.0), (o) => o.Total)?
+    println("update returning", raised)
+    var gone = await ctx.Orders.Where((o) => o.UserId == 99).ExecuteDeleteReturning((o) => (o.Id > 0, o.Total))?
+    println("delete returning", gone)
+    var dup = new Category{Id: 1, Name: "root", ParentId: 0}
+    ctx.Categories.Add(dup)
+    _ = await ctx.SaveChanges()?
+    ctx.Categories.InsertOrIgnore(new Category{Id: 1, Name: "ignored", ParentId: 0}, (c) => c.Id)
+    ctx.Categories.UpsertWith(new Category{Id: 2, Name: "books", ParentId: 1}, (c) => c.Id, (c) => c.Name)
+    _ = await ctx.SaveChanges()?
+    ctx.Categories.UpsertWith(new Category{Id: 2, Name: "Books", ParentId: 7}, (c) => c.Id, (c) => c.Name)
+    ctx.Categories.AddRange([new Category{Id: 3, Name: "novels", ParentId: 2}, new Category{Id: 4, Name: "jazz", ParentId: 9}])
+    _ = await ctx.SaveChanges()?
+    println("upsert", await ctx.Categories.AsNoTracking().OrderBy((c) => c.Id).Select((c) => (c.Name, c.ParentId)).ToList()?)
+
+    // CTE, window, set operations, subqueries, joins
+    var tree = ctx.Categories.Where((c) => c.Id == 1).Recursive((child, parent) => child.ParentId == parent.Id).OrderBy((c) => c.Id).Select((c) => c.Name)
+    println("recursive", await tree.ToList()?)
+    println("cte", await ctx.Categories.Where((c) => c.ParentId == 0).AsCte("roots").Count()?)
+    var ranks = ctx.Orders.OrderBy((o) => o.Id).Select((o) => (o.UserId, data.RowNumber(data.Over().PartitionBy(o.UserId).OrderByDescending(o.Total)), data.SumOver(o.Total, data.Over().OrderBy(o.Id)), data.Lag(o.Total, data.Over().OrderBy(o.Id)) == nil))
+    println("window", await ranks.ToList()?)
+    var adults = ctx.Users.Where((u) => u.Meta.Age >= 18)
+    println("union", await names(adults.Union(ctx.Users.Where((u) => u.Name == "Bob")))?, "intersect", await names(adults.Intersect(ctx.Users.Where((u) => u.Name == "Ann")))?, "except", await names(adults.Except(ctx.Users.Where((u) => u.Name == "Ann")))?)
+    var orders = ctx.Orders.AsQuery()
+    println("exists", await names(ctx.Users.Where((u) => data.Exists(data.Where(orders, (o) => o.UserId == u.Id && o.Total > 100.0))))?)
+    println("in", await names(ctx.Users.Where((u) => data.In(u.Id, ctx.Orders.Select((o) => o.UserId))))?)
+    println("scalar", await ctx.Users.OrderBy((u) => u.Id).Select((u) => (u.Name, data.CountOf(data.Where(orders, (o) => o.UserId == u.Id)), data.SumOf(data.Where(orders, (o) => o.UserId == u.Id), (o) => o.Total))).ToList()?)
+    var full = ctx.Users.FullJoin(ctx.Orders, (u) => u.Id, (o) => o.UserId, (u, o) => (data.Nullable(u.Name), data.Nullable(o.Total)))
+    println("full join", len(await full.ToList()?))
+    var right = ctx.Users.RightJoin(ctx.Orders, (u) => u.Id, (o) => o.UserId, (u, o) => u == nil)
+    println("right join", await right.ToList()?)
+    println("raw", await ctx.Users.Where((u) => data.Sql2<bool>("? ~* ?", u.Name, "^ann$")).Select((u) => data.Sql1<string>("upper(?)", u.Name)).ToList()?)
+
+    // LISTEN/NOTIFY
+    var sub = await ctx.Listen("events")?
+    await ctx.Notify("events", "hello")?
+    await ctx.Notify("events", "world")?
+    println("notify", await sub.C.Recv()?, await sub.C.Recv()?)
+    sub.Close()
+}

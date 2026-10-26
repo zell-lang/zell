@@ -68,6 +68,7 @@ func CountOf<U>(q Query<U>) int {
 // (SELECT COALESCE(SUM(f), 0) FROM q).
 @expr.call
 func SumOf<U, N>(q Query<U>, f func(*U) N) N {
+    numberCheck<N>("Sum")
     panic("data.SumOf is translated to SQL: use it inside a query lambda")
 }
 
@@ -83,6 +84,7 @@ func MaxOf<U, N>(q Query<U>, f func(*U) N) N {
 
 @expr.call
 func AverageOf<U, N>(q Query<U>, f func(*U) N) float {
+    numberCheck<N>("Average")
     panic("data.AverageOf is translated to SQL: use it inside a query lambda")
 }
 
@@ -157,29 +159,25 @@ func subWrite(w *sqlw, q subq, form int) {
         w.raw(") AS t0")
         return
     }
-    w.raw(" FROM " + quoteIdent(q.c.meta.Table) + " AS t0")
-    q.c.whereGroup(w)
+    q.c.from(w)
 }
 
 // The text of a subquery in both dialects with markers of cx, the root
 // aliased `alias` (a fresh one when ""); `where`: the text has a WHERE.
 struct subText {
-    pg    string
-    lite  string
+    s     string
     alias string
     where bool
 }
 
 func renderSub(cx *tcx, q subq, form int) subText {
     var start = cx.base + len(cx.args)
-    var wp = sqlw{pg: true, b: strings.Builder{}, args: [], groups: q.c.groups, mark: true, mbase: start}
-    var wl = sqlw{pg: false, b: strings.Builder{}, args: [], groups: q.c.groups, mark: true, mbase: start}
+    var wp = sqlw{d: cx.d, b: strings.Builder{}, args: [], groups: q.c.groups, mark: true, mbase: start}
     subWrite(&wp, q, form)
-    subWrite(&wl, q, form)
     cx.addExtra(wp.args)
     var alias = subAlias(wp.text())
     var simple = !(q.c.paged() || q.c.distinct || len(q.c.groups) > 0 || len(q.c.joins) > 0)
-    return subText{pg: renameRoot(wp.text(), alias), lite: renameRoot(wl.text(), alias), alias: alias, where: form == 0 && simple && len(q.c.wheres) > 0}
+    return subText{s: renameRoot(wp.text(), alias), alias: alias, where: form == 0 && simple && len(q.c.wheres) > 0}
 }
 
 // The FROM ... WHERE of a query source with its correlation predicates.
@@ -195,8 +193,7 @@ func subFrom(cx *tcx, src subSrc) subText! {
             kw = " AND "
         }
         // every condition the translator makes is self-delimited
-        t.pg = t.pg + kw + v.pg
-        t.lite = t.lite + kw + v.lite
+        t.s = t.s + kw + v.s
         t.where = true
     }
     return t
@@ -219,9 +216,9 @@ func subCall(cx *tcx, f string, args []*expr.Node, t *reflect.TypeInfo) sv! {
         }
         var s = renderSub(cx, src.q, 1)
         if f == "data.Value" {
-            return scalarSv("(" + s.pg + ")", "(" + s.lite + ")", t)
+            return scalarSv("(" + s.s + ")", t)
         }
-        return scalarSv("(" + x.pg + " IN (" + s.pg + "))", "(" + x.lite + " IN (" + s.lite + "))", reflect.TypeOf<bool>())
+        return scalarSv("(" + x.s + " IN (" + s.s + "))", reflect.TypeOf<bool>())
     }
     var src = subSource(args[0])?
     var from = subFrom(cx, src)?
@@ -230,16 +227,16 @@ func subCall(cx *tcx, f string, args []*expr.Node, t *reflect.TypeInfo) sv! {
         if f == "data.NotExists" {
             kw = "NOT EXISTS (SELECT 1"
         }
-        return scalarSv("(" + kw + from.pg + "))", "(" + kw + from.lite + "))", reflect.TypeOf<bool>())
+        return scalarSv("(" + kw + from.s + "))", reflect.TypeOf<bool>())
     }
     if f == "data.CountOf" {
-        return scalarSv("(SELECT COUNT(*)" + from.pg + ")", "(SELECT COUNT(*)" + from.lite + ")", reflect.TypeOf<int>())
+        return scalarSv("(SELECT COUNT(*)" + from.s + ")", reflect.TypeOf<int>())
     }
     var m = f[5..len(f) - 2]
     var x = trValue(cx, lambdaBody(cx, args[1], src.q.em, from.alias))?
     if m != "Min" && m != "Max" && !isNumTy(x.t) {
         return untranslatable(f + " needs a number, found " + describe(x))
     }
-    var agg = aggregate(m, x, m == "Sum")
-    return scalarSv("(SELECT " + agg.pg + from.pg + ")", "(SELECT " + agg.lite + from.lite + ")", agg.t)
+    var agg = aggregate(cx.d, m, x, m == "Sum")
+    return scalarSv("(SELECT " + agg.s + from.s + ")", agg.t)
 }

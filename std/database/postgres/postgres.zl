@@ -156,6 +156,8 @@ struct conn {
     onNotice func(Error)
     onNotify func(Notification)
     cfg      Config
+    // a Listener's connection: recv returns after each notification
+    listening bool
 
     // ---- low level I/O ----
 
@@ -205,6 +207,9 @@ struct conn {
                     var pid = r.i32()
                     var ch = r.cstr()
                     this.onNotify(Notification{Pid: pid, Channel: ch, Payload: r.cstr()})
+                }
+                if this.listening {
+                    return (t, payload)
                 }
                 continue
             }
@@ -1251,4 +1256,51 @@ struct Scram {
 func md5Password(user string, password string, salt []byte) string {
     var inner = crypto.hash.Md5Hex(password + user)
     return "md5" + crypto.hash.Md5Hex(inner + strings.FromBytes(salt))
+}
+
+// ---- LISTEN ----------------------------------------------------------------------
+
+struct notifyQueue {
+    items []Notification
+}
+
+// A dedicated connection receiving LISTEN/NOTIFY notifications.
+struct Listener {
+    c *conn
+    q *notifyQueue
+
+    // Waits for the next notification (fails once closed).
+    async func Next() Notification! {
+        for len(this.q.items) == 0 {
+            if this.c.closed {
+                return error("postgres: the listener is closed")
+            }
+            _ = await this.c.recv()?
+        }
+        var n = this.q.items[0]
+        this.q.items = this.q.items[1..len(this.q.items)]
+        return n
+    }
+
+    // Closes the connection (a waiting Next fails).
+    func Close() {
+        _ = this.c.Close()
+    }
+}
+
+// Opens a connection to dsn that listens on the channels.
+async func Listen(dsn string, channels []string) *Listener! {
+    var q = new notifyQueue{items: []}
+    var dc = await connect(dsn, nil, (n) => {
+        q.items = append(q.items, n)
+    })?
+    switch dc {
+    case *conn c:
+        for ch in channels {
+            _ = await c.simpleExec("LISTEN \"" + strings.ReplaceAll(ch, "\"", "\"\"") + "\"")?
+        }
+        c.listening = true
+        return new Listener{c: c, q: q}
+    }
+    return error("postgres: unexpected connection type")
 }

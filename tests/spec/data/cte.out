@@ -1,0 +1,9 @@
+SELECT t0."id", t0."name", t0."parent_id" FROM (WITH RECURSIVE "categories_tree" AS (SELECT t0."id", t0."name", t0."parent_id" FROM "categories" AS t0 WHERE (t0."id" = ?) UNION SELECT r1."id", r1."name", r1."parent_id" FROM "categories" AS r1 JOIN "categories_tree" AS r0 ON (r1."parent_id" = r0."id")) SELECT * FROM "categories_tree") AS t0 [2]
+  books
+  novels
+  poetry
+6
+SELECT t0."id", t0."name", t0."parent_id" FROM (WITH RECURSIVE "categories_tree" AS (SELECT t0."id", t0."name", t0."parent_id" FROM "categories" AS t0 WHERE (t0."name" = $1) UNION SELECT r1."id", r1."name", r1."parent_id" FROM "categories" AS r1 JOIN "categories_tree" AS r0 ON (r0."parent_id" = r1."id")) SELECT * FROM "categories_tree") AS t0
+[all music]
+SELECT t0."id", t0."name", t0."parent_id" FROM (WITH "roots" AS (SELECT t0."id", t0."name", t0."parent_id" FROM "categories" AS t0 WHERE (t0."parent_id" = ?)) SELECT * FROM "roots") AS t0
+all

@@ -1,0 +1,6 @@
+SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE ((lower(t0."name")) = (lower(?))) [BOB]
+bob
+SELECT t0."name", (t0."age" + ?), ('a?' <> 'b') FROM "users" AS t0 ORDER BY (random() * 0) ASC, t0."id" ASC
+[(Ann 31 true) (bob 18 true)]
+SELECT t0."id", t0."name", t0."age" FROM "users" AS t0 WHERE (t0."name" ~* $1)
+data: expression cannot be translated to SQL: the SQL text of data.Sql must be a string literal (values go in as arguments, bound as parameters) (query lambdas are translated to SQL; to evaluate it in memory, load the rows first with .AsEnumerable() and filter them with ordinary code)
