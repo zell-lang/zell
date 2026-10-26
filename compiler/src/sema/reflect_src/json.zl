@@ -342,6 +342,19 @@ func decode<T>(d *document, n int, out *T) void! {
         *out = Value{d: d, n: n}
         return
     }
+    if reflect.TypeOf<T>() == reflect.TypeOf<time.Time>() {
+        if rtKind(n) != 3 {
+            return mismatch("string", n)
+        }
+        *out = try time.ParseTime(time.RFC3339Nano, rtStr(n)) catch err {
+            return fail("invalid time " + Quote(rtStr(n)) + " (want RFC 3339)")
+        }
+        return
+    }
+    if reflect.TypeOf<T>() == reflect.TypeOf<time.Duration>() {
+        *out = time.Nanoseconds(intIn(n, math.MinInt, math.MaxInt)?)
+        return
+    }
     if reflect.TypeOf<T>().Kind == reflect.Kind.Pointer ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Slice ||
         reflect.TypeOf<T>().Kind == reflect.Kind.Map {
@@ -511,6 +524,12 @@ func FormatIndent<T>(v T, prefix string, indent string) string {
 func write<T>(w int, v T) {
     if reflect.TypeOf<T>() == reflect.TypeOf<Value>() {
         rtWNode(w, v.n)
+    } else if reflect.TypeOf<T>() == reflect.TypeOf<time.Time>() {
+        // RFC 3339 with nanoseconds, as Go's time.Time.MarshalJSON
+        rtWStr(w, v.Format(time.RFC3339Nano))
+    } else if reflect.TypeOf<T>() == reflect.TypeOf<time.Duration>() {
+        // an integer count of nanoseconds, as Go
+        rtWInt(w, v.Nanoseconds())
     } else if reflect.TypeOf<T>().Kind == reflect.Kind.Struct {
         rtWRaw(w, "{")
         var first = true
