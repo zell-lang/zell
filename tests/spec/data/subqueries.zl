@@ -1,0 +1,78 @@
+// test: a captured query in a lambda is a subquery: data.Exists/NotExists (EXISTS), data.Where correlates it with the outer row, data.In over a one-column projection (IN (SELECT ...)), data.CountOf/SumOf/MaxOf and data.Value as scalar subqueries in Where, Select and ExecuteUpdate; a paged subquery is a derived table; parameters stay bound in both dialects
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.subqueries
+
+import io
+
+struct User {
+    Id    int
+    Name  string
+    Spent float
+}
+
+struct Order {
+    Id     int
+    UserId int
+    Total  float
+}
+
+struct Shop {
+    data.Context
+    Users  data.Set<User>
+    Orders data.Set<Order>
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    var ann = new User{Name: "Ann"}
+    var bob = new User{Name: "Bob"}
+    var cid = new User{Name: "Cid"}
+    ctx.Users.AddRange([ann, bob, cid])
+    _ = await ctx.SaveChanges()?
+    ctx.Orders.AddRange([new Order{UserId: ann.Id, Total: 120.0}, new Order{UserId: ann.Id, Total: 30.0}, new Order{UserId: bob.Id, Total: 60.0}])
+    _ = await ctx.SaveChanges()?
+
+    var min = 50.0
+    var big = ctx.Orders.Where((o) => o.Total > min)
+    var q1 = ctx.Users.Where((u) => data.Exists(data.Where(big, (o) => o.UserId == u.Id))).OrderBy((u) => u.Id)
+    println(q1.ToSql(), q1.Args())
+    for u in await q1.ToList()? {
+        println(" ", u.Name)
+    }
+    var orders = ctx.Orders.AsQuery()
+    var q2 = ctx.Users.Where((u) => data.NotExists(data.Where(orders, (o) => o.UserId == u.Id)))
+    println(q2.ToSql())
+    println((await q2.Single()?).Name)
+
+    var buyers = ctx.Orders.Where((o) => o.Total >= 100.0).Select((o) => o.UserId)
+    var q3 = ctx.Users.Where((u) => data.In(u.Id, buyers) || u.Name == "Cid").OrderBy((u) => u.Name)
+    println(q3.ToSql(), q3.Args())
+    println(pg.Users.Where((u) => data.In(u.Id, buyers) && u.Name != "x").ToSql())
+    for u in await q3.ToList()? {
+        println(" ", u.Name)
+    }
+
+    var p = ctx.Users.Where((u) => data.Exists(data.Where(orders, (o) => o.UserId == u.Id))).OrderBy((u) => u.Id).Select((u) => (u.Name, data.CountOf(data.Where(orders, (o) => o.UserId == u.Id)), data.MaxOf(data.Where(orders, (o) => o.UserId == u.Id), (o) => o.Total)))
+    println(p.ToSql())
+    for r in await p.ToList()? {
+        println(" ", r)
+    }
+    var top = ctx.Orders.OrderByDescending((o) => o.Total).Select((o) => o.UserId).Take(1)
+    var q4 = ctx.Users.Where((u) => u.Id == data.Value(top))
+    println(pg.Users.Where((u) => u.Id == data.Value(top)).ToSql())
+    println((await q4.Single()?).Name)
+
+    var two = ctx.Orders.OrderBy((o) => o.Total).Take(2)
+    var q5 = ctx.Users.Where((u) => data.Exists(data.Where(two, (o) => o.UserId == u.Id))).OrderBy((u) => u.Id)
+    println(q5.ToSql())
+    println(len(await q5.ToList()?))
+
+    var n = await ctx.Users.ExecuteUpdate((s) => s.SetWith((u) => u.Spent, (u) => data.SumOf(data.Where(orders, (o) => o.UserId == u.Id), (o) => o.Total)))?
+    println(n)
+    for u in await ctx.Users.AsNoTracking().OrderBy((u) => u.Id).ToList()? {
+        println(" ", u.Name, u.Spent)
+    }
+}

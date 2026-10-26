@@ -232,9 +232,20 @@ impl<'a> Sema<'a> {
                 _ => {}
             });
         }
-        for (fid, d) in std::mem::take(&mut self.refl.deferred) {
-            let in_boxed = matches!(self.funcs[fid.0 as usize].kind, hir::FuncKind::Method { struct_id, .. } if boxed.contains(&struct_id));
-            if used.contains(&fid.0) || in_boxed {
+        // A boxed struct's method is reachable through its method table only
+        // if some interface declares a method of that name.
+        let iface_names: std::collections::HashSet<&str> = self.interfaces.iter().flat_map(|i| i.methods.iter().map(|m| m.name.as_str())).collect();
+        let mut deferred = std::mem::take(&mut self.refl.deferred);
+        let hits: Vec<bool> = deferred
+            .iter()
+            .map(|(fid, _)| {
+                let f = &self.funcs[fid.0 as usize];
+                let in_boxed = matches!(f.kind, hir::FuncKind::Method { struct_id, .. } if boxed.contains(&struct_id)) && iface_names.contains(f.name.as_str());
+                used.contains(&fid.0) || in_boxed
+            })
+            .collect();
+        for (hit, (_, d)) in hits.into_iter().zip(deferred.drain(..)) {
+            if hit {
                 self.push_diag(d);
             }
         }

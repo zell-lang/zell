@@ -886,7 +886,11 @@ impl<'a> Sema<'a> {
     /// subexpressions into slots (captured ones are replaced by a read of
     /// the environment).
     fn tree_emit(&mut self, tb: &mut Tb, f: usize, e: &mut hir::Expr) {
-        if !tb.mentions_param(f, e) {
+        // A call of an `@expr.call` function stays a node even without
+        // parameters (`data.Exists(q)`: the library translates it, the
+        // value would only be computed in memory); its arguments are slots.
+        let marked = matches!(&e.kind, ExprKind::Call { callee: Callee::Func(fid), .. } if self.tree_marked(*fid));
+        if !marked && !tb.mentions_param(f, e) {
             self.tree_slot(tb, f, e);
             return;
         }

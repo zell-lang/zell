@@ -1,0 +1,245 @@
+namespace data
+
+// Subqueries in query lambdas (docs/FRAMEWORK.md section 3, "Advanced
+// SQL"): a query value captured by a lambda becomes a subquery of the
+// statement. The query is built outside the lambda (a captured slot) and
+// rendered when the lambda is translated: its text is embedded with its
+// parameters turned into markers of the enclosing plan (sqlw.mark), so
+// they are still bound, never interpolated. A plan with a subquery
+// depends on the captured query and is not cached.
+//
+//   var big = ctx.Orders.Where((o) => o.Total > 100).AsQuery()
+//   ctx.Users.Where((u) => data.Exists(data.Where(big, (o) => o.UserId == u.Id)))
+//   ctx.Users.Where((u) => data.In(u.Id, ctx.Orders.Select((o) => o.UserId)))
+//   ctx.Users.Select((u) => (u.Name, data.CountOf(data.Where(orders, (o) => o.UserId == u.Id))))
+//
+// The functions run only inside query lambdas (in memory they panic).
+
+// What a captured query gives the translator.
+@acyclic
+struct subq {
+    c   core
+    // the entity of a Query (nil for a projection)
+    em  *entModel
+    sel Frag
+}
+
+interface subqueryLike {
+    func subquery_() subq
+}
+
+// EXISTS (q).
+@expr.call
+func Exists<U>(q Query<U>) bool {
+    panic("data.Exists is translated to SQL: use it inside a query lambda")
+}
+
+// NOT EXISTS (q).
+@expr.call
+func NotExists<U>(q Query<U>) bool {
+    panic("data.NotExists is translated to SQL: use it inside a query lambda")
+}
+
+// q with a further predicate that may reference the outer lambda's
+// parameters (a correlated subquery): data.Where(orders, (o) => o.UserId == u.Id).
+@expr.call
+func Where<U>(q Query<U>, p func(*U) bool) Query<U> {
+    panic("data.Where is translated to SQL: use it inside a query lambda")
+}
+
+// x IN (SELECT ...) over a one-column projection.
+@expr.call
+func In<V>(x V, q Projection<V>) bool {
+    panic("data.In is translated to SQL: use it inside a query lambda")
+}
+
+// The value of a one-row, one-column projection: (SELECT ...).
+@expr.call
+func Value<V>(q Projection<V>) V {
+    panic("data.Value is translated to SQL: use it inside a query lambda")
+}
+
+// (SELECT COUNT(*) FROM q).
+@expr.call
+func CountOf<U>(q Query<U>) int {
+    panic("data.CountOf is translated to SQL: use it inside a query lambda")
+}
+
+// (SELECT COALESCE(SUM(f), 0) FROM q).
+@expr.call
+func SumOf<U, N>(q Query<U>, f func(*U) N) N {
+    panic("data.SumOf is translated to SQL: use it inside a query lambda")
+}
+
+@expr.call
+func MinOf<U, N>(q Query<U>, f func(*U) N) N {
+    panic("data.MinOf is translated to SQL: use it inside a query lambda")
+}
+
+@expr.call
+func MaxOf<U, N>(q Query<U>, f func(*U) N) N {
+    panic("data.MaxOf is translated to SQL: use it inside a query lambda")
+}
+
+@expr.call
+func AverageOf<U, N>(q Query<U>, f func(*U) N) float {
+    panic("data.AverageOf is translated to SQL: use it inside a query lambda")
+}
+
+func isSubCall(f string) bool {
+    return f == "data.Exists" ||
+        f == "data.NotExists" ||
+        f == "data.Where" ||
+        f == "data.In" ||
+        f == "data.Value" ||
+        f == "data.CountOf" ||
+        f == "data.SumOf" ||
+        f == "data.MinOf" ||
+        f == "data.MaxOf" ||
+        f == "data.AverageOf"
+}
+
+// A subquery source: the captured query and the correlation predicates
+// of data.Where around it (innermost first).
+struct subSrc {
+    q     subq
+    preds []*expr.Node
+}
+
+func subSource(n *expr.Node) subSrc! {
+    switch *n {
+    case expr.Node.Captured(_, _, v, _):
+        switch v {
+        case subqueryLike s:
+            var sq = s.subquery_()
+            if sq.c.err != "" {
+                return untranslatable("the subquery: " + sq.c.err)
+            }
+            return subSrc{q: sq, preds: []}
+        }
+        return untranslatable("a subquery must be a query value")
+    case expr.Node.Call(f, args, _):
+        if f == "data.Where" {
+            var s = subSource(args[0])?
+            s.preds = append(s.preds, args[1])
+            return s
+        }
+    case expr.Node.Const(_, _):
+        return untranslatable("a subquery must be a query value")
+    }
+    return untranslatable("a subquery must be a query built outside the lambda (captured), optionally correlated with data.Where(q, (o) => ...)")
+}
+
+// A free alias q1, q2, ... for a subquery whose text is s.
+func subAlias(s string) string {
+    var k = 1
+    for strings.Contains(s, "q" + strconv.Itoa(k) + ".") {
+        k += 1
+    }
+    return "q" + strconv.Itoa(k)
+}
+
+func renameRoot(s string, alias string) string {
+    return strings.ReplaceAll(strings.ReplaceAll(s, "t0.", alias + "."), " AS t0", " AS " + alias)
+}
+
+// Writes the subquery: form 0 the FROM/WHERE of a query (the paged,
+// distinct or grouped one as a derived table), 1 the whole SELECT of a
+// projection.
+func subWrite(w *sqlw, q subq, form int) {
+    if form == 1 {
+        q.c.selectSql(w, q.sel)
+        return
+    }
+    if q.c.paged() || q.c.distinct || len(q.c.groups) > 0 || len(q.c.joins) > 0 {
+        w.raw(" FROM (")
+        q.c.selectSql(w, entityCols(q.c.st, q.c.meta))
+        w.raw(") AS t0")
+        return
+    }
+    w.raw(" FROM " + quoteIdent(q.c.meta.Table) + " AS t0")
+    q.c.whereGroup(w)
+}
+
+// The text of a subquery in both dialects with markers of cx, the root
+// aliased `alias` (a fresh one when ""); `where`: the text has a WHERE.
+struct subText {
+    pg    string
+    lite  string
+    alias string
+    where bool
+}
+
+func renderSub(cx *tcx, q subq, form int) subText {
+    var start = cx.base + len(cx.args)
+    var wp = sqlw{pg: true, b: strings.Builder{}, args: [], groups: q.c.groups, mark: true, mbase: start}
+    var wl = sqlw{pg: false, b: strings.Builder{}, args: [], groups: q.c.groups, mark: true, mbase: start}
+    subWrite(&wp, q, form)
+    subWrite(&wl, q, form)
+    cx.addExtra(wp.args)
+    var alias = subAlias(wp.text())
+    var simple = !(q.c.paged() || q.c.distinct || len(q.c.groups) > 0 || len(q.c.joins) > 0)
+    return subText{pg: renameRoot(wp.text(), alias), lite: renameRoot(wl.text(), alias), alias: alias, where: form == 0 && simple && len(q.c.wheres) > 0}
+}
+
+// The FROM ... WHERE of a query source with its correlation predicates.
+func subFrom(cx *tcx, src subSrc) subText! {
+    if src.q.em == nil {
+        return untranslatable("this subquery needs a query of entities, not a projection")
+    }
+    var t = renderSub(cx, src.q, 0)
+    for p in src.preds {
+        var v = trPred(cx, lambdaBody(cx, p, src.q.em, t.alias))?
+        var kw = " WHERE "
+        if t.where {
+            kw = " AND "
+        }
+        // every condition the translator makes is self-delimited
+        t.pg = t.pg + kw + v.pg
+        t.lite = t.lite + kw + v.lite
+        t.where = true
+    }
+    return t
+}
+
+func subCall(cx *tcx, f string, args []*expr.Node, t *reflect.TypeInfo) sv! {
+    if f == "data.Where" {
+        return untranslatable("data.Where(q, ...) is a subquery: use it inside data.Exists, data.NotExists, data.CountOf, data.SumOf, ...")
+    }
+    if f == "data.In" || f == "data.Value" {
+        var x = sv{}
+        var qn = args[0]
+        if f == "data.In" {
+            x = trValue(cx, args[0])?
+            qn = args[1]
+        }
+        var src = subSource(qn)?
+        if src.q.em != nil || len(src.preds) > 0 {
+            return untranslatable(f + " needs a projection of one column (q.Select((o) => o.UserId))")
+        }
+        var s = renderSub(cx, src.q, 1)
+        if f == "data.Value" {
+            return scalarSv("(" + s.pg + ")", "(" + s.lite + ")", t)
+        }
+        return scalarSv("(" + x.pg + " IN (" + s.pg + "))", "(" + x.lite + " IN (" + s.lite + "))", reflect.TypeOf<bool>())
+    }
+    var src = subSource(args[0])?
+    var from = subFrom(cx, src)?
+    if f == "data.Exists" || f == "data.NotExists" {
+        var kw = "EXISTS (SELECT 1"
+        if f == "data.NotExists" {
+            kw = "NOT EXISTS (SELECT 1"
+        }
+        return scalarSv("(" + kw + from.pg + "))", "(" + kw + from.lite + "))", reflect.TypeOf<bool>())
+    }
+    if f == "data.CountOf" {
+        return scalarSv("(SELECT COUNT(*)" + from.pg + ")", "(SELECT COUNT(*)" + from.lite + ")", reflect.TypeOf<int>())
+    }
+    var m = f[5..len(f) - 2]
+    var x = trValue(cx, lambdaBody(cx, args[1], src.q.em, from.alias))?
+    if m != "Min" && m != "Max" && !isNumTy(x.t) {
+        return untranslatable(f + " needs a number, found " + describe(x))
+    }
+    var agg = aggregate(m, x, m == "Sum")
+    return scalarSv("(SELECT " + agg.pg + from.pg + ")", "(SELECT " + agg.lite + from.lite + ")", agg.t)
+}

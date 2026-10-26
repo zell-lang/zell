@@ -1,0 +1,75 @@
+// test: LeftJoin keeps outer rows without a match (the inner columns are NULL: data.Nullable(o.Total) selects a pointer, o == nil tests the missing row), RightJoin and FullJoin (SQLite 3.39+, PostgreSQL), CrossJoin pairs every row; results go through a tuple or a struct
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.joins
+
+import io
+
+struct User {
+    Id   int
+    Name string
+}
+
+struct Order {
+    Id     int
+    UserId int
+    Total  float
+}
+
+struct Color {
+    Id   int
+    Name string
+}
+
+struct Row {
+    Name  string
+    Total *float
+}
+
+struct Shop {
+    data.Context
+    Users  data.Set<User>
+    Orders data.Set<Order>
+    Colors data.Set<Color>
+}
+
+func show(p *float) string {
+    if p == nil {
+        return "nil"
+    }
+    return fmt.Format("{0}", *p)
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    await ctx.EnsureCreated()?
+    var ann = new User{Name: "Ann"}
+    var bob = new User{Name: "Bob"}
+    ctx.Users.AddRange([ann, bob])
+    ctx.Colors.AddRange([new Color{Name: "red"}, new Color{Name: "blue"}])
+    _ = await ctx.SaveChanges()?
+    ctx.Orders.AddRange([new Order{UserId: ann.Id, Total: 12.5}, new Order{UserId: 99, Total: 7.0}])
+    _ = await ctx.SaveChanges()?
+
+    var l = ctx.Users.OrderBy((u) => u.Id).LeftJoin(ctx.Orders, (u) => u.Id, (o) => o.UserId, (u, o) => Row{Name: u.Name, Total: data.Nullable(o.Total)})
+    println(l.ToSql())
+    for r in await l.ToList()? {
+        println(" ", r.Name, show(r.Total))
+    }
+    var none = ctx.Users.LeftJoin(ctx.Orders, (u) => u.Id, (o) => o.UserId, (u, o) => (u.Name, o == nil))
+    for r in await none.ToList()? {
+        println(" ", r)
+    }
+    var r = ctx.Users.RightJoin(ctx.Orders, (u) => u.Id, (o) => o.UserId, (u, o) => (data.Nullable(u.Name), o.Total))
+    println(pg.Users.RightJoin(pg.Orders, (u) => u.Id, (o) => o.UserId, (u, o) => (data.Nullable(u.Name), o.Total)).ToSql())
+    println(len(await r.ToList()?))
+    var f = ctx.Users.FullJoin(ctx.Orders, (u) => u.Id, (o) => o.UserId, (u, o) => (data.Nullable(u.Name), data.Nullable(o.Total)))
+    println(f.ToSql())
+    println(len(await f.ToList()?))
+    var c = ctx.Users.OrderBy((u) => u.Id).CrossJoin(ctx.Colors, (u, k) => (u.Name, k.Name))
+    println(c.ToSql())
+    for x in await c.ToList()? {
+        println(" ", x)
+    }
+}

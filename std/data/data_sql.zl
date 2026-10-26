@@ -81,6 +81,11 @@ struct tcx {
     base  int
     // last correlated subquery alias (s1, s2, ...)
     sub   int
+    // values of the markers of embedded subqueries (data_sub.zl): marker
+    // ordinals len(vnodes) + i; such a plan depends on the captured
+    // queries, so it is not cached
+    extra   []any
+    nocache bool
 
     func bindEntity(i int, em *entModel, alias string) {
         for len(this.binds) <= i {
@@ -124,6 +129,20 @@ struct tcx {
     func newAlias() string {
         this.sub += 1
         return "s" + strconv.Itoa(this.sub)
+    }
+
+    // Markers for already converted driver values (the arguments of an
+    // embedded subquery); returns the first marker number.
+    func addExtra(vals []any) int {
+        var first = this.base + len(this.args)
+        for v in vals {
+            this.args = append(this.args, len(this.vnodes) + len(this.extra))
+            this.lists = append(this.lists, false)
+            this.convs = append(this.convs, 0)
+            this.extra = append(this.extra, v)
+        }
+        this.nocache = true
+        return first
     }
 }
 
@@ -483,6 +502,10 @@ func nilTest(cx *tcx, v sv, negated bool) sv! {
         }
         return sameSv("(" + kw + " (SELECT 1 FROM " + corr + "))", reflect.TypeOf<bool>())
     }
+    if v.kind == 1 && v.em.meta.Key >= 0 {
+        // an outer-joined row: missing when its key is NULL
+        return sameSv("(" + v.alias + "." + quoteIdent(v.em.meta.Columns[v.em.meta.Key].Name) + " IS" + not + " NULL)", reflect.TypeOf<bool>())
+    }
     if v.kind != 0 {
         return untranslatable(describe(v) + " cannot be compared with nil")
     }
@@ -513,6 +536,9 @@ func convert(cx *tcx, x *expr.Node, t *reflect.TypeInfo) sv! {
 // Calls: string functions, collection aggregates, group aggregates, `len`,
 // `slices.Contains`, `math.Abs`.
 func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
+    if isSubCall(fname) {
+        return subCall(cx, fname, args, t)?
+    }
     if fname == "len" {
         var v = tr(cx, args[0])?
         if v.kind == 2 {
@@ -545,6 +571,11 @@ func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
         }
         var x = trValue(cx, args[1])?
         return around2("(", x, " IN (", list, "))", reflect.TypeOf<bool>())
+    }
+    if fname == "data.Nullable" {
+        var v = trValue(cx, args[0])?
+        v.t = t
+        return v
     }
     if fname == "math.Abs" {
         var x = trValue(cx, args[0])?
@@ -904,14 +935,31 @@ func finishPlan<F>(cm *ctxModel, e expr.Expr<F>, root *expr.Node, role int, cx *
     p.lists = cx.lists
     p.convs = cx.convs
     var site = e.SiteId()
-    if site >= 0 {
+    if site >= 0 && !cx.nocache {
         p.cached = true
         p.slots = markerSlots(e.Slots(), cx.args)
         storePlan(cm, site, role, p)
     } else {
-        p.vals = expr.Values(root)
+        p.vals = cxValues(cx, root)
     }
     return p
+}
+
+// The values of the markers' ordinals: the tree's values, then the
+// arguments of embedded subqueries.
+func cxValues(cx *tcx, root *expr.Node) []any {
+    var vs = expr.Values(root)
+    if len(cx.extra) == 0 {
+        return vs
+    }
+    var out []any = []
+    for v in vs {
+        out = append(out, v)
+    }
+    for v in cx.extra {
+        out = append(out, v)
+    }
+    return out
 }
 
 func newPlan() *plan {
@@ -1127,11 +1175,11 @@ func groupPlan<F>(cm *ctxModel, em *entModel, keys []sv, e expr.Expr<F>, what in
     p.ords = cx.args
     p.lists = cx.lists
     p.convs = cx.convs
-    if e.SiteId() >= 0 {
+    if e.SiteId() >= 0 && !cx.nocache {
         p.cached = true
         p.slots = markerSlots(e.Slots(), cx.args)
     } else {
-        p.vals = expr.Values(root)
+        p.vals = cxValues(cx, root)
     }
     return p
 }

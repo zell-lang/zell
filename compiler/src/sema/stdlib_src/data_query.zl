@@ -31,6 +31,10 @@ struct sqlw {
     args   []any
     // GROUP BY keys, referenced as {#i} by the projection of a group
     groups []Frag
+    // a subquery rendered into a lambda's fragment: placeholders become
+    // the markers {?mbase + i} of the enclosing plan (data_sub.zl)
+    mark   bool
+    mbase  int
 
     func raw(s string) {
         this.b.Write(s)
@@ -38,7 +42,9 @@ struct sqlw {
 
     func ph(v any) {
         this.args = append(this.args, v)
-        if this.pg {
+        if this.mark {
+            this.b.Write("{?" + strconv.Itoa(this.mbase + len(this.args) - 1) + "}")
+        } else if this.pg {
             this.b.Write("$" + fmt.Format("{0}", len(this.args)))
         } else {
             this.b.Write("?")
@@ -124,6 +130,8 @@ struct core {
     distinct bool
     // a translation error: running the query fails with it
     err      string
+    // a feature SQLite has only from 3.39 (checked when the query runs)
+    needs    string
 
     func writer() sqlw {
         return sqlw{pg: this.st.pg(), b: strings.Builder{}, args: [], groups: this.groups}
@@ -481,11 +489,51 @@ struct Query<T> {
     // An inner join with another set: Join(ctx.Orders, (u) => u.Id, (o) =>
     // o.UserId, (u, o) => (u.Name, o.Total)).
     func Join<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.join_<I, K, R>(" JOIN ", inner, outerKey, innerKey, result)
+    }
+
+    // A left outer join: the inner row may be missing (its columns are
+    // NULL; select them with data.Nullable(o.Total), test it with o == nil).
+    func LeftJoin<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.join_<I, K, R>(" LEFT JOIN ", inner, outerKey, innerKey, result)
+    }
+
+    // A right outer join (PostgreSQL; SQLite 3.39 or later): the outer row
+    // may be missing.
+    func RightJoin<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.join_<I, K, R>(" RIGHT JOIN ", inner, outerKey, innerKey, result)
+    }
+
+    // A full outer join (PostgreSQL; SQLite 3.39 or later): either row may
+    // be missing.
+    func FullJoin<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.join_<I, K, R>(" FULL JOIN ", inner, outerKey, innerKey, result)
+    }
+
+    // Every pair of rows: CrossJoin(ctx.Colors, (u, c) => (u.Name, c.Name)).
+    func CrossJoin<I, R>(inner Set<I>, result expr<func(*T, *I) R>) Projection<R> {
+        selectCheck<R>()
+        var c = this.c
+        var p = newPlan()
+        try crossInto(c.st.model, this.ent.em, inner.ent.em, result.Root(), p) catch err {
+            if c.err == "" {
+                c.err = err.Message()
+            }
+        }
+        var j = " CROSS JOIN " + quoteIdent(inner.ent.Meta.Table) + " AS t1"
+        c.joins = addFrag(c.joins, Frag{pg: j, lite: j, args: []})
+        return Projection<R>{c: c, sel: Frag{pg: p.pg, lite: p.lite, args: p.vals}, m: rowMapper<R>(p.shape)}
+    }
+
+    func join_<I, K, R>(kw string, inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
         selectCheck<R>()
         var c = this.c
         var p = newPlan()
         var j = newPlan()
-        try joinInto(c.st.model, this.ent.em, inner.ent.em, outerKey.Root(), innerKey.Root(), result.Root(), j, p) catch err {
+        if kw != " JOIN " && kw != " LEFT JOIN " {
+            c.needs = "RIGHT and FULL joins"
+        }
+        try joinInto(kw, c.st.model, this.ent.em, inner.ent.em, outerKey.Root(), innerKey.Root(), result.Root(), j, p) catch err {
             if c.err == "" {
                 c.err = err.Message()
             }
@@ -655,6 +703,10 @@ struct Query<T> {
         var w = this.c.writer()
         this.writeSelect(&w)
         return w.args
+    }
+
+    func subquery_() subq {
+        return subq{c: this.c, em: this.ent.em, sel: entityCols(this.c.st, this.c.meta)}
     }
 
     func joined() bool {
@@ -989,6 +1041,10 @@ struct Projection<R> {
         return w.args
     }
 
+    func subquery_() subq {
+        return subq{c: this.c, em: nil, sel: this.sel}
+    }
+
     func ToList() Task<[]R!> {
         return projection_ToList(*this)
     }
@@ -1033,6 +1089,7 @@ async func projection_ToList<R>(q Projection<R>) []R! {
     if q.c.err != "" {
         return error(q.c.err)
     }
+    await needsLite339(q.c.st, q.c.needs)?
     var w = q.c.writer()
     q.c.selectSql(&w, q.sel)
     var rows = await q.c.st.all(w.text(), w.args)?
@@ -1440,7 +1497,7 @@ func toFloat(v any) float {
 }
 
 // The join fragment and the result selection of Join.
-func joinInto(cm *ctxModel, outer *entModel, inner *entModel, ok *expr.Node, ik *expr.Node, res *expr.Node, j *plan, p *plan) void! {
+func joinInto(kw string, cm *ctxModel, outer *entModel, inner *entModel, ok *expr.Node, ik *expr.Node, res *expr.Node, j *plan, p *plan) void! {
     var cx1 = newTcx(cm, ok, 0)
     cx1.bindEntity(0, outer, "t0")
     var oks = keyValues(cx1, ok)?
@@ -1450,7 +1507,7 @@ func joinInto(cm *ctxModel, outer *entModel, inner *entModel, ok *expr.Node, ik 
     if len(oks) != len(iks) {
         return untranslatable("the outer and inner keys of Join must have the same number of values")
     }
-    j.pg = " JOIN " + quoteIdent(inner.meta.Table) + " AS t1 ON "
+    j.pg = kw + quoteIdent(inner.meta.Table) + " AS t1 ON "
     j.lite = j.pg
     for i, a in oks {
         if i > 0 {
@@ -1460,15 +1517,32 @@ func joinInto(cm *ctxModel, outer *entModel, inner *entModel, ok *expr.Node, ik 
         j.pg = j.pg + a.pg + " = " + iks[i].pg
         j.lite = j.lite + a.lite + " = " + iks[i].lite
     }
-    j.vals = treeArgs(cx1, expr.Values(ok))
-    for a in treeArgs(cx2, expr.Values(ik)) {
+    j.vals = treeArgs(cx1, cxValues(cx1, ok))
+    for a in treeArgs(cx2, cxValues(cx2, ik)) {
         j.vals = append(j.vals, a)
     }
     var cx3 = newTcx(cm, res, 0)
     cx3.bindEntity(0, outer, "t0")
     cx3.bindEntity(1, inner, "t1")
     projection(cx3, res, p)?
-    p.vals = treeArgs(cx3, expr.Values(res))
+    p.vals = treeArgs(cx3, cxValues(cx3, res))
+}
+
+// The result selection of CrossJoin.
+func crossInto(cm *ctxModel, outer *entModel, inner *entModel, res *expr.Node, p *plan) void! {
+    var cx = newTcx(cm, res, 0)
+    cx.bindEntity(0, outer, "t0")
+    cx.bindEntity(1, inner, "t1")
+    projection(cx, res, p)?
+    p.vals = treeArgs(cx, cxValues(cx, res))
+}
+
+// A value of an outer-joined row that may be missing: selected as a
+// pointer (nil for NULL), data.Nullable(o.Total) is *float.
+@expr.call
+func Nullable<V>(v V) *V {
+    var x = v
+    return &x
 }
 
 // The arguments of the markers of cx over the tree's values.
@@ -1570,7 +1644,7 @@ func updateInto(cm *ctxModel, em *entModel, items []setter, u *updParts) void! {
             var v = trValue(cx, it.tree)?
             u.pg = u.pg + lhs + v.pg
             u.lite = u.lite + lhs + v.lite
-            for a in treeArgs(cx, it.vals) {
+            for a in treeArgs(cx, cxValues(cx, it.tree)) {
                 u.args = append(u.args, a)
             }
         } else {

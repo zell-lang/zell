@@ -1,0 +1,20 @@
+SELECT t0."id", t0."name", t0."spent" FROM "users" AS t0 WHERE (EXISTS (SELECT 1 FROM "orders" AS q1 WHERE (q1."total" > ?) AND (q1."user_id" = t0."id"))) ORDER BY t0."id" ASC [50]
+  Ann
+  Bob
+SELECT t0."id", t0."name", t0."spent" FROM "users" AS t0 WHERE (NOT EXISTS (SELECT 1 FROM "orders" AS q1 WHERE (q1."user_id" = t0."id")))
+Cid
+SELECT t0."id", t0."name", t0."spent" FROM "users" AS t0 WHERE ((t0."id" IN (SELECT q1."user_id" FROM "orders" AS q1 WHERE (q1."total" >= ?))) OR (t0."name" = ?)) ORDER BY t0."name" ASC [100 Cid]
+SELECT t0."id", t0."name", t0."spent" FROM "users" AS t0 WHERE ((t0."id" IN (SELECT q1."user_id" FROM "orders" AS q1 WHERE (q1."total" >= $1))) AND (t0."name" <> $2))
+  Ann
+  Cid
+SELECT t0."name", (SELECT COUNT(*) FROM "orders" AS q1 WHERE (q1."user_id" = t0."id")), (SELECT MAX(q1."total") FROM "orders" AS q1 WHERE (q1."user_id" = t0."id")) FROM "users" AS t0 WHERE (EXISTS (SELECT 1 FROM "orders" AS q1 WHERE (q1."user_id" = t0."id"))) ORDER BY t0."id" ASC
+  (Ann 2 120)
+  (Bob 1 60)
+SELECT t0."id", t0."name", t0."spent" FROM "users" AS t0 WHERE (t0."id" = (SELECT q1."user_id" FROM "orders" AS q1 ORDER BY q1."total" DESC LIMIT 1))
+Ann
+SELECT t0."id", t0."name", t0."spent" FROM "users" AS t0 WHERE (EXISTS (SELECT 1 FROM (SELECT q1."id", q1."user_id", q1."total" FROM "orders" AS q1 ORDER BY q1."total" ASC LIMIT 2) AS q1 WHERE (q1."user_id" = t0."id"))) ORDER BY t0."id" ASC
+2
+3
+  Ann 150
+  Bob 60
+  Cid 0

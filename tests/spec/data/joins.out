@@ -1,0 +1,14 @@
+SELECT t0."name", t1."total" FROM "users" AS t0 LEFT JOIN "orders" AS t1 ON t0."id" = t1."user_id" ORDER BY t0."id" ASC
+  Ann 12.5
+  Bob nil
+  (Ann false)
+  (Bob true)
+SELECT t0."name", t1."total" FROM "users" AS t0 RIGHT JOIN "orders" AS t1 ON t0."id" = t1."user_id"
+2
+SELECT t0."name", t1."total" FROM "users" AS t0 FULL JOIN "orders" AS t1 ON t0."id" = t1."user_id"
+3
+SELECT t0."name", t1."name" FROM "users" AS t0 CROSS JOIN "colors" AS t1 ORDER BY t0."id" ASC
+  (Ann red)
+  (Ann blue)
+  (Bob red)
+  (Bob blue)

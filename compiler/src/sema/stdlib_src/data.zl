@@ -271,6 +271,8 @@ struct ctxState {
     orphans  []func()
     hasLog   bool
     log      func(string)
+    // sqlite_version() as 3039000 for 3.39.0 (0: not read yet)
+    liteVer  int
 
     func pg() bool {
         return this.provider == Provider.Postgres
@@ -732,6 +734,29 @@ async func rawQuery<T>(st *ctxState, query string, args []any) []T! {
     return await st.db.Query<T>(query, args)?
 }
 
+// Fails when SQLite is older than 3.39 and the query needs `what` (RIGHT
+// and FULL joins).
+async func needsLite339(st *ctxState, what string) void! {
+    if what == "" || st.pg() {
+        return
+    }
+    if st.liteVer == 0 {
+        var rows = await st.all("SELECT sqlite_version()", [])?
+        var v = ""
+        if len(rows) > 0 && len(rows[0]) > 0 {
+            database.sql.convertInto(&v, rows[0][0], "version")?
+        }
+        var n = 0
+        for part in strings.Split(v, ".") {
+            n = n * 1000 + (try strconv.Atoi(part) else 0)
+        }
+        st.liteVer = n
+    }
+    if st.liteVer < 3039000 {
+        return error("data: " + what + " need SQLite 3.39 or later (this is " + fmt.Format("{0}.{1}", st.liteVer / 1000000, st.liteVer / 1000 % 1000) + ")")
+    }
+}
+
 async func executeSql(st *ctxState, query string, args []any) int! {
     var r = await st.exec(query, args)?
     return r.RowsAffected
@@ -847,6 +872,22 @@ struct Set<T> {
 
     func Join<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
         return this.AsQuery().Join<I, K, R>(inner, outerKey, innerKey, result)
+    }
+
+    func LeftJoin<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.AsQuery().LeftJoin<I, K, R>(inner, outerKey, innerKey, result)
+    }
+
+    func RightJoin<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.AsQuery().RightJoin<I, K, R>(inner, outerKey, innerKey, result)
+    }
+
+    func FullJoin<I, K, R>(inner Set<I>, outerKey expr<func(*T) K>, innerKey expr<func(*I) K>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.AsQuery().FullJoin<I, K, R>(inner, outerKey, innerKey, result)
+    }
+
+    func CrossJoin<I, R>(inner Set<I>, result expr<func(*T, *I) R>) Projection<R> {
+        return this.AsQuery().CrossJoin<I, R>(inner, result)
     }
 
     func Skip(n int) Query<T> {
