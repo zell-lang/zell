@@ -44,11 +44,43 @@ struct Category {
     ParentId int
 }
 
+struct Person {
+    Name string
+}
+
+struct DocMeta {
+    Owner   *Person
+    Expires *time.Time
+    Tags    []string
+    Plan    string
+}
+
+// nullable and compound columns
+struct Doc {
+    Id    int
+    Title string
+    @data.jsonb Meta *DocMeta
+}
+
 struct Shop {
     data.Context
     Users      data.Set<User>
     Orders     data.Set<Order>
     Categories data.Set<Category>
+    Docs       data.Set<Doc>
+}
+
+async func docs(q data.Query<Doc>) string! {
+    var out []string = []
+    for d in await q.OrderBy((d) => d.Id).ToList()? {
+        out = append(out, d.Title)
+    }
+    return strings.Join(out, ",")
+}
+
+func at(t time.Time) *time.Time {
+    var x = t
+    return &x
 }
 
 async func names(q data.Query<User>) string! {
@@ -61,9 +93,9 @@ async func names(q data.Query<User>) string! {
 
 async func main() void! {
     var ctx = data.Open<Shop>(data.Provider.Postgres, os.Getenv("PGTEST_DSN"))?
-    _ = await ctx.ExecuteSql("DROP TABLE IF EXISTS users, orders, categories CASCADE", [])?
+    _ = await ctx.ExecuteSql("DROP TABLE IF EXISTS users, orders, categories, docs CASCADE", [])?
     for s in ctx.CreateScript() {
-        if strings.Contains(s, "gin") {
+        if strings.Contains(s, "gin") && !strings.Contains(s, "\"docs\"") {
             println(s)
         }
     }
@@ -158,4 +190,28 @@ async func main() void! {
     await ctx.Notify("events", "world")?
     println("notify", await sub.C.Recv()?, await sub.C.Recv()?)
     sub.Close()
+
+    // nullable and compound columns
+    for s in ctx.CreateScript() {
+        if strings.Contains(s, "\"docs\"") {
+            println(s)
+        }
+    }
+    var exp = time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC())
+    var da = new Doc{Title: "a", Meta: new DocMeta{Owner: new Person{Name: "Ann"}, Expires: at(exp), Tags: ["x"], Plan: "pro"}}
+    var db = new Doc{Title: "b", Meta: new DocMeta{Owner: nil, Expires: nil, Tags: nil, Plan: "free"}}
+    var dc = new Doc{Title: "c", Meta: nil}
+    ctx.Docs.AddRange([da, db, dc])
+    _ = await ctx.SaveChanges()?
+    println("doc null", await ctx.Docs.OrderBy((d) => d.Id).Select((d) => (d.Title, data.Sql1<string>("coalesce(?::text, 'SQL NULL')", d.Meta))).ToList()?)
+    var back2 = await ctx.Docs.AsNoTracking().OrderBy((d) => d.Id).ToList()?
+    println("doc back", back2[0].Meta.Owner.Name, back2[0].Meta.Expires.Equal(exp), back2[1].Meta.Owner == nil, back2[1].Meta.Expires == nil, back2[2].Meta == nil)
+    println("doc == nil", await docs(ctx.Docs.Where((d) => d.Meta == nil))?, "owner == nil", await docs(ctx.Docs.Where((d) => d.Meta != nil && d.Meta.Owner == nil))?)
+    println("owner.name", await docs(ctx.Docs.Where((d) => d.Meta.Owner.Name == "Ann"))?, "plan != pro", await docs(ctx.Docs.Where((d) => d.Meta.Plan != "pro"))?)
+    println("expires", await docs(ctx.Docs.Where((d) => d.Meta.Expires != nil && *d.Meta.Expires > exp.AddDate(0, 0, -1)))?)
+    dc.Meta = new DocMeta{Owner: new Person{Name: "Cid"}, Expires: nil, Tags: [], Plan: "team"}
+    db.Meta = nil
+    _ = await ctx.SaveChanges()?
+    println("doc swap", await docs(ctx.Docs.Where((d) => d.Meta == nil))?, await docs(ctx.Docs.Where((d) => d.Meta.Owner != nil))?)
+
 }

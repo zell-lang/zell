@@ -1,0 +1,25 @@
+// error: data: a field of Order of type []Line, []*Line or *Line cannot be mapped: Line has no key (Id, LineId or @key), so the field is not a navigation; mark it @data.jsonb
+// status: passing
+namespace spec.data.err_document_without_jsonb
+
+import io
+
+struct Line {
+    Sku string
+    Qty int
+}
+
+struct Order {
+    Id    int
+    Lines []Line
+}
+
+struct Shop {
+    data.Context
+    Orders data.Set<Order>
+}
+
+func main() {
+    var ctx = data.OpenDB<Shop>(data.Provider.Sqlite, database.sqlite.Open(":memory:"))
+    println(ctx.Orders.TableName())
+}

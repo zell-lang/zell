@@ -52,6 +52,23 @@ interface Dialect {
     // into a @data.jsonb column): emits through b and returns true, or false.
     func TranslateMember(b *SqlBuilder, base SqlExpr, f *reflect.FieldInfo, t *reflect.TypeInfo) bool!
 
+    // A path into a JSON document: col is a @data.jsonb column (or an
+    // element of a JSON array), keys the members (none: the document
+    // itself). asJson: the JSON value (for the array functions); else its
+    // text, SQL NULL when the member is missing or JSON null (the nil test
+    // of a member: u.Meta.Owner == nil).
+    func JsonExtract(col string, keys []string, asJson bool) string
+
+    // The FROM item over the elements of JSON array arr, as alias.
+    func JsonEach(arr string, alias string) string
+
+    // An element of a JsonEach at alias as a value of type t: a document
+    // (a struct or map) for paths into it, or a scalar.
+    func JsonElement(alias string, t *reflect.TypeInfo) string
+
+    // The length of JSON array arr (NULL for NULL).
+    func JsonLength(arr string) string
+
     // The driver value of an array column's value (xs: driver values).
     func BindArray(xs []any) any
 
@@ -272,11 +289,26 @@ func jsonPathParts(text string) (string, []string) {
     return (text, keys)
 }
 
+// The keys of a JSON path kept as `(col #>> '{a,b}')` by TranslateMember
+// (see jsonPathParts): the column and keys, ok false for any other text.
+func jsonPath(text string) (string, []string, bool) {
+    var (col, keys) = jsonPathParts(text)
+    return (col, keys, len(keys) > 0)
+}
+
 // Whether a value of type t is a JSON document node (a struct or a map
 // inside a @data.jsonb column) rather than a leaf.
 func jsonInner(t *reflect.TypeInfo) bool {
     var b = baseOf(t)
     return b != nil && (b.Kind == reflect.Kind.Map || (b.Kind == reflect.Kind.Struct && b.FullName != "time.Time" && b.FullName != "math.big.Decimal"))
+}
+
+// Whether member type t inside a document is kept as a JSON node by
+// TranslateMember (a struct, map or array: paths, nil tests and the
+// array functions go on from it) rather than read as a leaf.
+func jsonNode(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    return jsonInner(t) || (b != nil && b.Kind == reflect.Kind.Slice && b.Elem.Kind != reflect.Kind.Uint8)
 }
 
 // The keys of a JSON path member access: (column, keys, leaf), or ok

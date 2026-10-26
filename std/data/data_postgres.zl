@@ -40,7 +40,7 @@ struct PostgresDialect {
         if !ok {
             return false
         }
-        if jsonInner(t) {
+        if jsonNode(t) {
             b.Emit("(" + col + " #>> '{" + strings.Join(keys, ",") + "}')", t)
             return true
         }
@@ -48,16 +48,36 @@ struct PostgresDialect {
         if len(keys) == 1 {
             e = "(" + col + " ->> '" + keys[0] + "')"
         }
-        var k = baseOf(t)
-        if k != nil && isIntKind(k.Kind) {
-            e = "(" + e + ")::bigint"
-        } else if k != nil && (k.Kind == reflect.Kind.Float || k.Kind == reflect.Kind.Float32) {
-            e = "(" + e + ")::double precision"
-        } else if k != nil && k.Kind == reflect.Kind.Bool {
-            e = "(" + e + ")::boolean"
-        }
-        b.Emit(e, t)
+        b.Emit(pgJsonCast(e, t), t)
         return true
+    }
+
+    // col #> '{a,b}' (jsonb) or col #>> '{a,b}' (text).
+    func JsonExtract(col string, keys []string, asJson bool) string {
+        var op = " #>> '{"
+        if asJson {
+            if len(keys) == 0 {
+                return col
+            }
+            op = " #> '{"
+        }
+        return "(" + col + op + strings.Join(keys, ",") + "}')"
+    }
+
+    func JsonEach(arr string, alias string) string {
+        return "jsonb_array_elements(" + pgArrayOnly(arr) + ") AS " + alias
+    }
+
+    // A scalar element is read as text and cast like a path.
+    func JsonElement(alias string, t *reflect.TypeInfo) string {
+        if jsonInner(t) {
+            return alias
+        }
+        return pgJsonCast("(" + alias + " #>> '{}')", t)
+    }
+
+    func JsonLength(arr string) string {
+        return "jsonb_array_length(" + pgArrayOnly(arr) + ")"
     }
 
     func TranslateCall(b *SqlBuilder, name string, args []*expr.Node, t *reflect.TypeInfo) bool! {
@@ -65,9 +85,17 @@ struct PostgresDialect {
             b.Emit(postgresCall(b, name, args, t)?, t)
             return true
         }
-        if name == "len" && isSliceTy(expr.TypeOf(args[0])) {
+        if name == "len" && isAnySliceTy(expr.TypeOf(args[0])) {
             var x = b.Value(args[0])?
-            b.Emit("cardinality(" + x.Text + ")", reflect.TypeOf<int>())
+            var (col, keys, path) = jsonPath(x.Text)
+            if path {
+                // an array inside a document
+                b.Emit(this.JsonLength(this.JsonExtract(col, keys, true)), reflect.TypeOf<int>())
+            } else if isSliceTy(x.Type) {
+                b.Emit("cardinality(" + x.Text + ")", reflect.TypeOf<int>())
+            } else {
+                b.Emit(this.JsonLength(x.Text), reflect.TypeOf<int>())
+            }
             return true
         }
         if name == "len" && isStrTy(expr.TypeOf(args[0])) {
@@ -442,6 +470,40 @@ func isPostgresCall(name string) bool {
 }
 
 // An array column's type ([]T of scalars, not a navigation).
+// JSON text e as a value of type t: numbers, booleans and times cast.
+func pgJsonCast(e string, t *reflect.TypeInfo) string {
+    var k = baseOf(t)
+    if k != nil && isIntKind(k.Kind) {
+        return "(" + e + ")::bigint"
+    }
+    if k != nil && (k.Kind == reflect.Kind.Float || k.Kind == reflect.Kind.Float32) {
+        return "(" + e + ")::double precision"
+    }
+    if k != nil && k.Kind == reflect.Kind.Bool {
+        return "(" + e + ")::boolean"
+    }
+    if k != nil && k.FullName == "time.Time" {
+        return "(" + e + ")::timestamptz"
+    }
+    return e
+}
+
+// A JSON array argument of jsonb_array_elements/jsonb_array_length: a
+// path into a document may hold JSON null (a nil slice), which these
+// functions reject, so it is NULL unless it is an array.
+func pgArrayOnly(arr string) string {
+    if strings.HasPrefix(arr, "(") && strings.Contains(arr, " #> '{") {
+        return "CASE jsonb_typeof(" + arr + ") WHEN 'array' THEN " + arr + " END"
+    }
+    return arr
+}
+
+// A slice that is not []byte (an array column, or a JSON array).
+func isAnySliceTy(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    return b != nil && b.Kind == reflect.Kind.Slice && b.Elem.Kind != reflect.Kind.Uint8
+}
+
 func isSliceTy(t *reflect.TypeInfo) bool {
     var b = baseOf(t)
     return b != nil && arrayKind(b) != ""

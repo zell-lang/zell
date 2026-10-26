@@ -59,9 +59,15 @@ struct SqliteDialect {
     }
 
     func TranslateCall(b *SqlBuilder, name string, args []*expr.Node, t *reflect.TypeInfo) bool! {
-        if name == "len" && isSliceTy(expr.TypeOf(args[0])) {
+        if name == "len" && isAnySliceTy(expr.TypeOf(args[0])) {
+            // arrays and documents are both JSON
             var x = b.Value(args[0])?
-            b.Emit("json_array_length(" + x.Text + ")", reflect.TypeOf<int>())
+            var (col, keys, path) = jsonPath(x.Text)
+            if path {
+                b.Emit(this.JsonLength(this.JsonExtract(col, keys, true)), reflect.TypeOf<int>())
+            } else {
+                b.Emit(this.JsonLength(x.Text), reflect.TypeOf<int>())
+            }
             return true
         }
         if name == "len" && isStrTy(expr.TypeOf(args[0])) {
@@ -93,12 +99,33 @@ struct SqliteDialect {
         if !ok {
             return false
         }
-        if jsonInner(t) {
+        if jsonNode(t) {
             b.Emit("(" + col + " #>> '{" + strings.Join(keys, ",") + "}')", t)
         } else {
             b.Emit("json_extract(" + col + ", '$." + strings.Join(keys, ".") + "')", t)
         }
         return true
+    }
+
+    // json_extract gives SQL values for scalars and JSON text for
+    // objects and arrays, NULL for JSON null.
+    func JsonExtract(col string, keys []string, asJson bool) string {
+        if len(keys) == 0 {
+            return col
+        }
+        return "json_extract(" + col + ", '$." + strings.Join(keys, ".") + "')"
+    }
+
+    func JsonEach(arr string, alias string) string {
+        return "json_each(" + arr + ") AS " + alias
+    }
+
+    func JsonElement(alias string, t *reflect.TypeInfo) string {
+        return alias + ".value"
+    }
+
+    func JsonLength(arr string) string {
+        return "json_array_length(" + arr + ")"
     }
 
     // Arrays are stored as JSON arrays.

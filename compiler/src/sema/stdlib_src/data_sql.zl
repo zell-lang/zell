@@ -56,7 +56,8 @@ func around2(a string, x sv, mid string, y sv, b string, t *reflect.TypeInfo) sv
 // What a parameter of the tree is bound to.
 @acyclic
 struct tbind {
-    // 0 unbound, 1 an entity row at alias, 2 a group
+    // 0 unbound, 1 an entity row at alias, 2 a group, 3 a value whose
+    // SQL text is alias
     kind  int
     em    *entModel
     alias string
@@ -101,6 +102,15 @@ struct tcx {
             this.binds = append(this.binds, tbind{})
         }
         this.binds[i] = tbind{kind: 2, em: em, alias: alias, keys: keys}
+    }
+
+    // Parameter i as a scalar value with SQL text (an element of a JSON
+    // array in data.Any(u.Items, (it) => ...)).
+    func bindValue(i int, text string) {
+        for len(this.binds) <= i {
+            this.binds = append(this.binds, tbind{})
+        }
+        this.binds[i] = tbind{kind: 3, em: nil, alias: text, keys: []}
     }
 
     func binding(i int) tbind {
@@ -284,6 +294,9 @@ func tr(cx *tcx, n *expr.Node) sv! {
         }
         if b.kind == 2 {
             return sv{t: t, kind: 4, em: b.em, alias: b.alias, keys: b.keys}
+        }
+        if b.kind == 3 {
+            return sv{s: b.alias, t: t}
         }
         return untranslatable("a lambda parameter outside a query")
     case expr.Node.Field(base, name, _, t, _):
@@ -518,6 +531,11 @@ func nilTest(cx *tcx, v sv, negated bool) sv! {
     if v.kind != 0 {
         return untranslatable(describe(v) + " cannot be compared with nil")
     }
+    var (col, keys, path) = jsonPath(v.s)
+    if path {
+        // a member of a document: nil when missing or JSON null
+        return sameSv("(" + cx.d.JsonExtract(col, keys, false) + " IS" + not + " NULL)", reflect.TypeOf<bool>())
+    }
     return around("(", v, " IS" + not + " NULL)", reflect.TypeOf<bool>())
 }
 
@@ -545,6 +563,20 @@ func convert(cx *tcx, x *expr.Node, t *reflect.TypeInfo) sv! {
 // Calls: string functions, collection aggregates, group aggregates, `len`,
 // `slices.Contains`, `math.Abs`.
 func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
+    if fname == "len" && isRowSliceTy(expr.TypeOf(args[0])) {
+        // a collection navigation or a JSON array of documents
+        var v = tr(cx, args[0])?
+        if v.kind == 2 {
+            return collOp(cx, v, "Count", nil)?
+        }
+        if v.kind == 0 {
+            var (arr, ok) = jsonArrayOf(cx, v)
+            if ok {
+                return scalarSv(cx.d.JsonLength(arr), reflect.TypeOf<int>())
+            }
+        }
+        return untranslatable("len of " + describe(v) + " is not supported")
+    }
     // the dialect first: its own functions and the ones whose SQL differs
     var b = SqlBuilder{cx: cx, out: sv{}, set: false}
     if cx.d.TranslateCall(&b, fname, args, t)? {
@@ -625,12 +657,18 @@ func call(cx *tcx, fname string, args []*expr.Node, t *reflect.TypeInfo) sv! {
         fname == "data.Max" ||
         fname == "data.Average" {
         var c = tr(cx, args[0])?
-        if c.kind != 2 {
-            return untranslatable(fname + " needs a collection navigation of the row (u.Orders), found " + describe(c))
-        }
         var lam *expr.Node = nil
         if len(args) > 1 {
             lam = args[1]
+        }
+        if c.kind == 0 {
+            var (arr, ok) = jsonArrayOf(cx, c)
+            if ok {
+                return jsonArrayOp(cx, arr, baseOf(c.t).Elem, fname[5..len(fname)], lam)?
+            }
+        }
+        if c.kind != 2 {
+            return untranslatable(fname + " needs a collection navigation of the row (u.Orders) or a @data.jsonb array (u.Items), found " + describe(c))
         }
         return collOp(cx, c, fname[5..len(fname)], lam)?
     }
@@ -719,6 +757,76 @@ func collOp(cx *tcx, v sv, m string, lam *expr.Node) sv! {
     }
     var agg = aggregate(cx.d, m, x, m == "Sum")
     return around("(SELECT ", agg, " FROM " + corr + ")", agg.t)
+}
+
+// A slice of structs, maps or pointers (a navigation or a document
+// array; *[]E too), not of scalars.
+func isRowSliceTy(t *reflect.TypeInfo) bool {
+    var b = baseOf(t)
+    if b == nil || b.Kind != reflect.Kind.Slice {
+        return false
+    }
+    var e = b.Elem
+    return e.Kind == reflect.Kind.Pointer || e.Kind == reflect.Kind.Map || (e.Kind == reflect.Kind.Struct && scalarKind(e) == "")
+}
+
+// The JSON value of v if it is a JSON array: a @data.jsonb []Item column
+// or a slice member of a document (u.Meta.Items).
+func jsonArrayOf(cx *tcx, v sv) (string, bool) {
+    var b = baseOf(v.t)
+    if b == nil || b.Kind != reflect.Kind.Slice || b.Elem.Kind == reflect.Kind.Uint8 {
+        return ("", false)
+    }
+    var (col, keys, path) = jsonPath(v.s)
+    if path {
+        return (cx.d.JsonExtract(col, keys, true), true)
+    }
+    if arrayKind(b) == "" {
+        return (v.s, true)
+    }
+    return ("", false)
+}
+
+// `data.Any(u.Items, (it) => it.Qty > 2)`, `All`, `Count`, `Sum`, `Min`,
+// `Max`, `Average` over the elements of JSON array arr (elements of type
+// elem): subqueries over the dialect's JsonEach (jsonb_array_elements,
+// json_each). A NULL array has no elements.
+func jsonArrayOp(cx *tcx, arr string, elem *reflect.TypeInfo, m string, lam *expr.Node) sv! {
+    cx.sub += 1
+    var alias = "e" + strconv.Itoa(cx.sub)
+    var from = cx.d.JsonEach(arr, alias)
+    var body *expr.Node = nil
+    if lam != nil {
+        switch *lam {
+        case expr.Node.Lambda(first, _, b, _):
+            cx.bindValue(first, cx.d.JsonElement(alias, elem))
+            body = b
+        }
+    }
+    if m == "Any" || m == "Count" {
+        var w = ""
+        if body != nil {
+            var p = trPred(cx, body)?
+            w = " WHERE " + p.s
+        }
+        if m == "Any" {
+            return scalarSv("EXISTS (SELECT 1 FROM " + from + w + ")", reflect.TypeOf<bool>())
+        }
+        return scalarSv("(SELECT COUNT(*) FROM " + from + w + ")", reflect.TypeOf<int>())
+    }
+    if body == nil {
+        return untranslatable("data." + m + " needs a lambda")
+    }
+    if m == "All" {
+        var p = trPred(cx, body)?
+        return scalarSv("NOT EXISTS (SELECT 1 FROM " + from + " WHERE NOT " + p.s + ")", reflect.TypeOf<bool>())
+    }
+    var x = trValue(cx, body)?
+    if m != "Min" && m != "Max" && !isNumTy(x.t) {
+        return untranslatable("data." + m + " needs a number, found " + describe(x))
+    }
+    var agg = aggregate(cx.d, m, x, m == "Sum")
+    return around("(SELECT ", agg, " FROM " + from + ")", agg.t)
 }
 
 // `g.Count()`, `g.Sum(sel)`, ... of a group (GroupBy).

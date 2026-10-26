@@ -1,0 +1,109 @@
+// test: a nullable @data.jsonb document (*Meta): SQL NULL when nil (not JSON null), u.Meta == nil is IS NULL, a path through a NULL document is NULL (so u.Meta.Plan != "pro" is not true for it); nil-able members inside a document (*Person, *time.Time, []string, *string) are JSON null; u.Meta.Owner.Name is a two-key path; u.Meta.Owner == nil holds when the member is missing or JSON null (#>> / json_extract IS NULL); round trip and change tracking of nil <-> document
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.nullable_documents
+
+import io
+
+struct Person {
+    Name string
+}
+
+struct Meta {
+    Owner   *Person
+    Expires *time.Time
+    Tags    []string
+    Note    *string
+    Plan    string
+}
+
+struct Doc {
+    Id    int
+    Title string
+    @data.jsonb Meta *Meta
+}
+
+struct Docs {
+    data.Context
+    Docs data.Set<Doc>
+}
+
+func at(t time.Time) *time.Time {
+    var x = t
+    return &x
+}
+
+func show(d *Doc) string {
+    if d.Meta == nil {
+        return d.Title + ":nil"
+    }
+    var m = d.Meta
+    var owner = "nil"
+    if m.Owner != nil {
+        owner = m.Owner.Name
+    }
+    var exp = "nil"
+    if m.Expires != nil {
+        exp = m.Expires.Format(time.RFC3339)
+    }
+    return fmt.Format("{0}:{1}/{2}/{3}/{4}/{5}", d.Title, m.Plan, owner, exp, m.Tags, m.Note == nil)
+}
+
+async func titles(q data.Query<Doc>) string! {
+    var out []string = []
+    for d in await q.OrderBy((d) => d.Id).ToList()? {
+        out = append(out, d.Title)
+    }
+    return strings.Join(out, ",")
+}
+
+async func main() void! {
+    var ctx = data.Open<Docs>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Docs>(data.Provider.Postgres, ctx.DB())
+    for s in pg.CreateScript() {
+        println(s)
+    }
+    for s in ctx.CreateScript() {
+        println(s)
+    }
+    await ctx.EnsureCreated()?
+    var exp = time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC())
+    var a = new Doc{Title: "a", Meta: new Meta{Owner: new Person{Name: "Ann"}, Expires: at(exp), Tags: ["x"], Note: nil, Plan: "pro"}}
+    var b = new Doc{Title: "b", Meta: new Meta{Owner: nil, Expires: nil, Tags: nil, Note: nil, Plan: "free"}}
+    var c = new Doc{Title: "c", Meta: nil}
+    ctx.Docs.AddRange([a, b, c])
+    _ = await ctx.SaveChanges()?
+    var stored = await ctx.Docs.OrderBy((d) => d.Id).Select((d) => (d.Title, data.Sql1<string>("coalesce(?, 'SQL NULL')", d.Meta))).ToList()?
+    for r in stored {
+        println(r.0, r.1)
+    }
+    for d in await ctx.Docs.AsNoTracking().OrderBy((d) => d.Id).ToList()? {
+        println(show(d))
+    }
+
+    var isNil = ctx.Docs.Where((d) => d.Meta == nil)
+    println(isNil.ToSql())
+    println(pg.Docs.Where((d) => d.Meta == nil).ToSql())
+    println("meta == nil", await titles(isNil)?)
+    var noOwner = ctx.Docs.Where((d) => d.Meta != nil && d.Meta.Owner == nil)
+    println(noOwner.ToSql())
+    println(pg.Docs.Where((d) => d.Meta != nil && d.Meta.Owner == nil).ToSql())
+    println("owner == nil", await titles(noOwner)?)
+    var ann = ctx.Docs.Where((d) => d.Meta.Owner.Name == "Ann")
+    println(ann.ToSql(), ann.Args())
+    println(pg.Docs.Where((d) => d.Meta.Owner.Name == "Ann").ToSql())
+    println("owner.name", await titles(ann)?)
+    println("plan != pro", await titles(ctx.Docs.Where((d) => d.Meta.Plan != "pro"))?)
+    println("expires != nil", await titles(ctx.Docs.Where((d) => d.Meta.Expires != nil))?)
+    println(pg.Docs.Where((d) => d.Meta.Expires != nil && *d.Meta.Expires > exp && d.Meta.Note == nil).ToSql())
+
+    // nil <-> document through change tracking
+    c.Meta = new Meta{Owner: new Person{Name: "Cid"}, Expires: nil, Tags: [], Note: nil, Plan: "team"}
+    b.Meta = nil
+    println(ctx.Entry(b).ChangedColumns(), ctx.Entry(c).ChangedColumns(), ctx.Entry(a).ChangedColumns())
+    _ = await ctx.SaveChanges()?
+    for d in await ctx.Docs.AsNoTracking().OrderBy((d) => d.Id).ToList()? {
+        println(show(d))
+    }
+    println("after", await titles(isNil)?, await titles(ctx.Docs.Where((d) => d.Meta.Owner != nil))?)
+}

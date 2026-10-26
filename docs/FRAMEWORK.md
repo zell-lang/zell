@@ -356,6 +356,31 @@ await ctx.SaveChanges()?        // change tracking: UPDATE только изме
 | `LISTEN`/`NOTIFY` | ошибка | ✓ | `await ctx.Notify("ch", "x")`, `var s = await ctx.Listen("ch")?; await s.C.Recv()`, `s.Close()` |
 | GIN-индексы | обычный индекс | `USING gin` | `@data.index(using: "gin")`, `Migrator.CreateIndexUsing` |
 
+#### Типы столбцов и NULL (2026-10-26)
+
+Поле со значением — `NOT NULL`; `*T` и `database.sql.Null<T>` —
+допускающий NULL столбец (`nil` ↔ SQL NULL, `x == nil` → `IS NULL`).
+
+| Поле | SQLite | PostgreSQL | nil | Запрос |
+|---|---|---|---|---|
+| `@data.jsonb Meta Meta` (структура, map) | `TEXT` (JSON) | `jsonb` | — (`NOT NULL`) | `u.Meta.Plan == "pro"`: `json_extract(c, '$.Plan')` / `c ->> 'Plan'` |
+| `@data.jsonb Meta *Meta` | `TEXT` | `jsonb` | SQL NULL (не JSON `null`) | `u.Meta == nil` → `IS NULL` |
+| `*T`, `[]T`, `*time.Time` внутри документа | JSON `null` | JSON `null` | `nil` ↔ `null` | `u.Meta.Owner == nil` → `json_extract(c, '$.Owner') IS NULL` / `(c #>> '{Owner}') IS NULL` |
+| `@data.jsonb Items []Item` | `TEXT` (JSON-массив) | `jsonb` | — (`nil` пишется как `[]`) | `data.Any(u.Items, (it) => it.Qty > 2)` → `EXISTS (SELECT 1 FROM json_each(c) AS e1 WHERE json_extract(e1.value, '$.Qty') > ?)` / `jsonb_array_elements(c) AS e1 WHERE ((e1 ->> 'Qty'))::bigint > $1`; `data.All/Count/Sum/Min/Max/Average`; `len(u.Items)` → `json_array_length` / `jsonb_array_length` |
+| `@data.jsonb Extra *[]Item` | `TEXT` | `jsonb` | SQL NULL ≠ `[]` | `u.Extra == nil`; `data.Any(*u.Extra, …)` (у NULL нет элементов), `len(*u.Extra)` — NULL |
+| `[]Item` внутри документа | JSON | JSON | `null` | `data.Any(u.Meta.Lines, …)`, `len(u.Meta.Lines)`: путь `#>` (в PostgreSQL — NULL, если там не массив) |
+| `[]Item` без `@data.jsonb` | — | — | — | навигация, если у `Item` есть ключ (`Id`, `ItemId`, `@key`); иначе ошибка компиляции «… mark it @data.jsonb …» |
+
+Правило `nil` для члена документа одно: член равен `nil`, если ключа нет
+или в нём JSON `null` (оба оператора извлечения текста — `json_extract`,
+`#>>` — дают тогда SQL NULL). Путь через NULL-документ даёт NULL
+(семантика SQL): `u.Meta.Plan != "pro"` для строки с `Meta == nil` не
+истинно, как и `u.Meta.Plan == "pro"`. Путь `u.Meta.Owner.Name` — один
+путь `#>> '{Owner,Name}'` / `'$.Owner.Name'`; листья приводятся к типу поля
+в PostgreSQL (`::bigint`, `::double precision`, `::boolean`,
+`::timestamptz`). `encoding.json` пишет `time.Time` как RFC 3339 с
+наносекундами, `time.Duration` — целым числом наносекунд (как Go).
+
 Ошибки «не поддерживается» — при выполнении запроса (провайдер
 известен только во время выполнения): `data: ... ILike is not supported
 by sqlite (a PostgreSQL function)`; ошибки компиляции — у неверных типов
@@ -380,6 +405,7 @@ INSERT/UPDATE/DELETE), а всё, что различается, спрашив�
 | `Name()` | `"sqlite"`, `"postgres"`: ключ реестра и имя в ошибках |
 | `Open(dsn)` (`Opener`) | пул соединений драйвера |
 | `BindArray(xs)` | значение столбца-массива (PostgreSQL — массив, SQLite — JSON) |
+| `JsonExtract(col, keys, asJson)`, `JsonEach(arr, alias)`, `JsonElement(alias, t)`, `JsonLength(arr)` | пути в документ (`#>`/`#>>`, `json_extract`), элементы JSON-массива (`jsonb_array_elements`, `json_each`) и его длина — для `nil`-проверок членов, `data.Any/All` и `len` |
 | `Quote(ident)`, `Placeholder(n)` | кавычки идентификаторов (DDL; запросы ядро пишет в ANSI-кавычках), `?` / `$n` |
 | `Paging(take, skip)` | `LIMIT/OFFSET` (MSSQL/Oracle: `OFFSET … FETCH`) |
 | `MaxParams()`, `MultiRowDefaultValues()` | пакетная вставка |

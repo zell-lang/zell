@@ -1,0 +1,120 @@
+// test: @data.jsonb []Item is a JSON array of objects (NOT NULL, a nil slice is stored as []) and *[]Item a nullable one (nil is SQL NULL, distinct from []); data.Any/All/Count/Sum over the elements (EXISTS over jsonb_array_elements / json_each, element paths with casts), len (jsonb_array_length / json_array_length), arrays inside a document (u.Meta.Lines: a path, NULL unless an array on PostgreSQL), nil members of elements; round trip and change tracking
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.jsonb_struct_arrays
+
+import io
+
+struct Person {
+    Name string
+}
+
+struct Item {
+    Sku   string
+    Qty   int
+    Price float
+    Owner *Person
+}
+
+struct Meta {
+    Lines []Item
+}
+
+struct Order {
+    Id    int
+    Name  string
+    @data.jsonb Items []Item
+    @data.jsonb Extra *[]Item
+    @data.jsonb Meta Meta
+}
+
+struct Shop {
+    data.Context
+    Orders data.Set<Order>
+}
+
+func items(xs []Item) *[]Item {
+    var p = xs
+    return &p
+}
+
+func show(o *Order) string {
+    var extra = "nil"
+    if o.Extra != nil {
+        extra = fmt.Format("{0}", len(*o.Extra))
+    }
+    var skus []string = []
+    for it in o.Items {
+        var owner = "-"
+        if it.Owner != nil {
+            owner = it.Owner.Name
+        }
+        skus = append(skus, it.Sku + "x" + fmt.Format("{0}", it.Qty) + "@" + owner)
+    }
+    return o.Name + " " + strings.Join(skus, ",") + " extra=" + extra + " meta=" + fmt.Format("{0}", len(o.Meta.Lines))
+}
+
+async func names(q data.Query<Order>) string! {
+    var out []string = []
+    for o in await q.OrderBy((o) => o.Id).ToList()? {
+        out = append(out, o.Name)
+    }
+    return strings.Join(out, ",")
+}
+
+async func main() void! {
+    var ctx = data.Open<Shop>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Shop>(data.Provider.Postgres, ctx.DB())
+    for s in pg.CreateScript() {
+        println(s)
+    }
+    for s in ctx.CreateScript() {
+        println(s)
+    }
+    await ctx.EnsureCreated()?
+    var a = new Order{Name: "a", Items: [Item{Sku: "pen", Qty: 3, Price: 1.5, Owner: new Person{Name: "Ann"}}, Item{Sku: "ink", Qty: 1, Price: 4.0, Owner: nil}], Extra: items([]), Meta: Meta{Lines: [Item{Sku: "box", Qty: 9, Price: 0.5, Owner: nil}]}}
+    var b = new Order{Name: "b", Items: [Item{Sku: "cup", Qty: 2, Price: 3.0, Owner: nil}], Extra: nil, Meta: Meta{Lines: nil}}
+    var c = new Order{Name: "c", Items: nil, Extra: items([Item{Sku: "mug", Qty: 5, Price: 2.0, Owner: nil}]), Meta: Meta{Lines: []}}
+    ctx.Orders.AddRange([a, b, c])
+    _ = await ctx.SaveChanges()?
+    var stored = await ctx.Orders.OrderBy((o) => o.Id).Select((o) => (o.Name, data.Sql1<string>("coalesce(?, 'SQL NULL')", o.Extra), data.Sql1<string>("?", o.Items))).ToList()?
+    for r in stored {
+        println(r.0, r.1, r.2)
+    }
+    for o in await ctx.Orders.AsNoTracking().OrderBy((o) => o.Id).ToList()? {
+        println(show(o))
+    }
+
+    var any = ctx.Orders.Where((o) => data.Any(o.Items, (it) => it.Qty > 2))
+    println(any.ToSql(), any.Args())
+    println(pg.Orders.Where((o) => data.Any(o.Items, (it) => it.Qty > 2)).ToSql())
+    println("any qty > 2", await names(any)?)
+    var all = ctx.Orders.Where((o) => data.All(o.Items, (it) => it.Price >= 1.5 && it.Sku != "x"))
+    println(all.ToSql())
+    println(pg.Orders.Where((o) => data.All(o.Items, (it) => it.Price >= 1.5 && it.Sku != "x")).ToSql())
+    println("all price >= 1.5", await names(all)?)
+    var owned = ctx.Orders.Where((o) => data.Any(o.Items, (it) => it.Owner != nil && it.Owner.Name == "Ann"))
+    println(pg.Orders.Where((o) => data.Any(o.Items, (it) => it.Owner != nil && it.Owner.Name == "Ann")).ToSql())
+    println("owner", await names(owned)?)
+    var long = ctx.Orders.Where((o) => len(o.Items) >= 2 || len(o.Meta.Lines) > 0)
+    println(long.ToSql())
+    println(pg.Orders.Where((o) => len(o.Items) >= 2 || len(o.Meta.Lines) > 0).ToSql())
+    println("len", await names(long)?)
+    println("nested any", await names(ctx.Orders.Where((o) => data.Any(o.Meta.Lines, (it) => it.Sku == "box")))?)
+    println(pg.Orders.Where((o) => data.Any(o.Meta.Lines, (it) => it.Sku == "box")).ToSql())
+    println("extra nil", await names(ctx.Orders.Where((o) => o.Extra == nil))?, "extra empty", await names(ctx.Orders.Where((o) => o.Extra != nil && len(*o.Extra) == 0))?)
+    println("all over null and empty", await names(ctx.Orders.Where((o) => data.All(*o.Extra, (it) => it.Qty > 4)))?)
+    var stats = ctx.Orders.OrderBy((o) => o.Id).Select((o) => (o.Name, data.Count(o.Items, (it) => it.Qty > 0), data.Sum(o.Items, (it) => it.Qty), data.Sum(o.Items, (it) => it.Price * float(it.Qty))))
+    println(pg.Orders.OrderBy((o) => o.Id).Select((o) => (o.Name, data.Count(o.Items, (it) => it.Qty > 0), data.Sum(o.Items, (it) => it.Qty))).ToSql())
+    println("stats", await stats.ToList()?)
+
+    // change tracking: an element changed in place, nil <-> []
+    a.Items[1].Qty = 7
+    b.Extra = items([])
+    c.Extra = nil
+    println(ctx.Entry(a).ChangedColumns(), ctx.Entry(b).ChangedColumns(), ctx.Entry(c).ChangedColumns())
+    _ = await ctx.SaveChanges()?
+    for o in await ctx.Orders.AsNoTracking().OrderBy((o) => o.Id).ToList()? {
+        println(show(o))
+    }
+}
