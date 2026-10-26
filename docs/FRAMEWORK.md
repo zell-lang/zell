@@ -370,6 +370,24 @@ await ctx.SaveChanges()?        // change tracking: UPDATE только изме
 | `@data.jsonb Extra *[]Item` | `TEXT` | `jsonb` | SQL NULL ≠ `[]` | `u.Extra == nil`; `data.Any(*u.Extra, …)` (у NULL нет элементов), `len(*u.Extra)` — NULL |
 | `[]Item` внутри документа | JSON | JSON | `null` | `data.Any(u.Meta.Lines, …)`, `len(u.Meta.Lines)`: путь `#>` (в PostgreSQL — NULL, если там не массив) |
 | `[]Item` без `@data.jsonb` | — | — | — | навигация, если у `Item` есть ключ (`Id`, `ItemId`, `@key`); иначе ошибка компиляции «… mark it @data.jsonb …» |
+| `[]T` скаляров (`[]string`, `[]int`…) | `TEXT` (JSON-массив) | `text[]`, `bigint[]`… | — (`NOT NULL`, `nil` пишется как пустой массив) | `len(u.Tags)` → `json_array_length` / `cardinality` |
+| `*[]T` скаляров | `TEXT` | `text[]`… | SQL NULL ≠ пустой массив | `u.Tags == nil` → `IS NULL`; `len(*u.Tags)` — NULL для NULL |
+| `Status` (enum без полей) | `TEXT` (имя варианта) | `text` | — | `u.State == Status.Active` (имя — параметр) |
+| `*Status` | `TEXT` | `text` | SQL NULL | `u.Review == nil`, `*u.Review == Status.Active`; родной `CREATE TYPE … AS ENUM` — через `@data.column(type: "mood")` (параметр текстом, тип выводит сервер) |
+| `@data.uuidColumn Id string` (`*string`) | `TEXT` | `uuid` | SQL NULL для `*string` | `u.Ref == x`, `data.In` (строковые функции в PostgreSQL требуют `::text`); значения — `uuid.New()` (строка) |
+| `time.Duration` (`*time.Duration`) | `INTEGER` (наносекунды) | `interval` (точность — микросекунды) | SQL NULL для указателя | `u.Ttl > limit`: параметр — наносекунды / `'N microseconds'` |
+| `math.big.Decimal` (`*…`) | `TEXT` | `numeric` | SQL NULL для указателя | `u.Price > x` |
+
+Правило массивов: `[]T` — всегда `NOT NULL`, `nil` и пустой срез
+неразличимы (в Zell `[] == nil`) и пишутся пустым массивом; если нужно
+различать «нет значения» и «пусто», поле — `*[]T` (`nil` — SQL NULL,
+указатель на пустой срез — пустой массив). Внутри документа срез —
+JSON-массив, а `nil` (или пустой срез) — JSON `null`. `interval` из
+PostgreSQL читается в стиле `IntervalStyle = postgres` (`1 day
+02:03:04.5`; месяц — 30 дней, год — 365.25 дня, как `extract(epoch)`).
+Тип `Option<T>` в стандартной библиотеке отсутствует (в DESIGN.md это
+только пример перечисления), поэтому столбцы `Option<T>` не
+поддерживаются: используйте `*T`.
 
 Правило `nil` для члена документа одно: член равен `nil`, если ключа нет
 или в нём JSON `null` (оба оператора извлечения текста — `json_extract`,

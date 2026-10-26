@@ -1,0 +1,98 @@
+// test: *[]T scalar arrays are nullable columns (text[]/bigint[] NULL on PostgreSQL, JSON array or NULL on SQLite): nil is NULL and distinct from an empty array, u.Tags == nil is IS NULL, len(*u.Tags) is NULL for NULL; plain []T stays NOT NULL and a nil slice is stored as an empty array; round trip and change tracking of nil <-> [] <-> [x]
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.nullable_arrays
+
+import io
+
+struct Post {
+    Id     int
+    Title  string
+    Labels []string
+    Tags   *[]string
+    Scores *[]int
+}
+
+struct Blog {
+    data.Context
+    Posts data.Set<Post>
+}
+
+func strs(xs []string) *[]string {
+    var p = xs
+    return &p
+}
+
+func ints(xs []int) *[]int {
+    var p = xs
+    return &p
+}
+
+func show(p *Post) string {
+    var tags = "nil"
+    if p.Tags != nil {
+        tags = fmt.Format("{0}", *p.Tags)
+    }
+    var scores = "nil"
+    if p.Scores != nil {
+        scores = fmt.Format("{0}", *p.Scores)
+    }
+    return fmt.Format("{0} labels={1} tags={2} scores={3}", p.Title, p.Labels, tags, scores)
+}
+
+async func titles(q data.Query<Post>) string! {
+    var out []string = []
+    for p in await q.OrderBy((p) => p.Id).ToList()? {
+        out = append(out, p.Title)
+    }
+    return strings.Join(out, ",")
+}
+
+async func main() void! {
+    var ctx = data.Open<Blog>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Blog>(data.Provider.Postgres, ctx.DB())
+    for s in pg.CreateScript() {
+        println(s)
+    }
+    for s in ctx.CreateScript() {
+        println(s)
+    }
+    await ctx.EnsureCreated()?
+    var a = new Post{Title: "a", Labels: ["x"], Tags: strs(["go", "zell"]), Scores: ints([1, 2])}
+    var b = new Post{Title: "b", Labels: nil, Tags: strs([]), Scores: nil}
+    var c = new Post{Title: "c", Labels: [], Tags: nil, Scores: ints([])}
+    ctx.Posts.AddRange([a, b, c])
+    _ = await ctx.SaveChanges()?
+    var stored = await ctx.Posts.OrderBy((p) => p.Id).Select((p) => (p.Title, data.Sql1<string>("?", p.Labels), data.Sql1<string>("coalesce(?, 'SQL NULL')", p.Tags), data.Sql1<string>("coalesce(?, 'SQL NULL')", p.Scores))).ToList()?
+    for r in stored {
+        println(r.0, r.1, r.2, r.3)
+    }
+    for p in await ctx.Posts.AsNoTracking().OrderBy((p) => p.Id).ToList()? {
+        println(show(p))
+    }
+    var none = ctx.Posts.Where((p) => p.Tags == nil)
+    println(none.ToSql())
+    println(pg.Posts.Where((p) => p.Tags == nil).ToSql())
+    println("tags == nil", await titles(none)?)
+    var empty = ctx.Posts.Where((p) => p.Tags != nil && len(*p.Tags) == 0)
+    println(empty.ToSql(), empty.Args())
+    println(pg.Posts.Where((p) => p.Tags != nil && len(*p.Tags) == 0).ToSql())
+    println("tags empty", await titles(empty)?, "scores nil", await titles(ctx.Posts.Where((p) => p.Scores == nil))?)
+    println("labels len 0", await titles(ctx.Posts.Where((p) => len(p.Labels) == 0))?)
+    for r in await ctx.Posts.OrderBy((p) => p.Id).Select((p) => (p.Title, data.Nullable(len(*p.Tags)))).ToList()? {
+        var n = "NULL"
+        if r.1 != nil {
+            n = fmt.Format("{0}", *r.1)
+        }
+        println("len", r.0, n)
+    }
+
+    a.Tags = nil
+    b.Tags = strs(["new"])
+    c.Scores = nil
+    println(ctx.Entry(a).ChangedColumns(), ctx.Entry(b).ChangedColumns(), ctx.Entry(c).ChangedColumns())
+    _ = await ctx.SaveChanges()?
+    for p in await ctx.Posts.AsNoTracking().OrderBy((p) => p.Id).ToList()? {
+        println(show(p))
+    }
+}

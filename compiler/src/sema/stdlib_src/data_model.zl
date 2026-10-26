@@ -515,7 +515,8 @@ func buildEntities(cm *ctxModel) void! {
 }
 
 // The column type of a field type: kind (int64, int32, int16, float,
-// float32, bool, string, bytes, time, decimal, json, enum), whether it is
+// float32, bool, string, bytes, time, decimal, duration, json, enum;
+// uuid for a @data.uuidColumn string), whether it is
 // nullable, and the value type; kind "" if t is not a column type.
 @acyclic
 struct colType {
@@ -565,6 +566,9 @@ func scalarKind(t *reflect.TypeInfo) string {
         if t.FullName == "math.big.Decimal" {
             return "decimal"
         }
+        if t.FullName == "time.Duration" {
+            return "duration"
+        }
         if t.FullName == "encoding.json.Value" {
             return "json"
         }
@@ -579,7 +583,7 @@ func columnType(t *reflect.TypeInfo) colType {
     }
     if t.Kind == reflect.Kind.Pointer {
         k = scalarKind(t.Elem)
-        if k != "" && k != "enum" {
+        if k != "" {
             return colType{kind: k, nullable: true, base: t.Elem}
         }
     }
@@ -599,7 +603,7 @@ func arrayKind(t *reflect.TypeInfo) string {
         return ""
     }
     var k = scalarKind(t.Elem)
-    if k == "" || k == "bytes" || k == "json" {
+    if k == "" || k == "bytes" || k == "json" || k == "duration" {
         return ""
     }
     return k + "[]"
@@ -679,10 +683,22 @@ func buildEntity(cm *ctxModel, t *reflect.TypeInfo) *entModel! {
         if f.Attribute<data.jsonb>() != nil {
             ct = colType{kind: "json", nullable: f.Type.Kind == reflect.Kind.Pointer, base: f.Type}
         } else if ct.kind == "" {
-            var ak = arrayKind(f.Type)
-            if ak != "" {
-                ct = colType{kind: ak, nullable: false, base: f.Type}
+            // []T: NOT NULL (nil is stored as an empty array); *[]T: NULL
+            // when nil, distinct from an empty array
+            var at = f.Type
+            if at.Kind == reflect.Kind.Pointer && at.Elem.Kind == reflect.Kind.Slice {
+                at = at.Elem
             }
+            var ak = arrayKind(at)
+            if ak != "" {
+                ct = colType{kind: ak, nullable: at != f.Type, base: at}
+            }
+        }
+        if f.Attribute<data.uuidColumn>() != nil {
+            if ct.kind != "string" {
+                return error("data: @uuidColumn on " + name + "." + f.Name + ": the field must be a string or *string")
+            }
+            ct.kind = "uuid"
         }
         if ct.kind != "" {
             var c = ColumnMeta{
@@ -1189,6 +1205,7 @@ func checkEntity<T>() {
             }
         } else if f.Type.Kind == reflect.Kind.Struct &&
             f.Type != reflect.TypeOf<time.Time>() &&
+            f.Type != reflect.TypeOf<time.Duration>() &&
             f.Type != reflect.TypeOf<math.big.Decimal>() &&
             f.Type != reflect.TypeOf<encoding.json.Value>() {
             var probe f.Type
@@ -1211,9 +1228,18 @@ func checkEntity<T>() {
             f.Type.Kind == reflect.Kind.String ||
             f.Type.Kind == reflect.Kind.Enum ||
             f.Type == reflect.TypeOf<time.Time>() ||
+            f.Type == reflect.TypeOf<time.Duration>() ||
             f.Type == reflect.TypeOf<math.big.Decimal>() ||
             f.Type == reflect.TypeOf<encoding.json.Value>() ||
             (f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind == reflect.Kind.Uint8) ||
+            (f.Type.Kind == reflect.Kind.Pointer &&
+                f.Type.Elem.Kind == reflect.Kind.Slice &&
+                (f.Type.Elem.Elem.Kind == reflect.Kind.Int ||
+                    f.Type.Elem.Elem.Kind == reflect.Kind.Int32 ||
+                    f.Type.Elem.Elem.Kind == reflect.Kind.Int16 ||
+                    f.Type.Elem.Elem.Kind == reflect.Kind.Float ||
+                    f.Type.Elem.Elem.Kind == reflect.Kind.Bool ||
+                    f.Type.Elem.Elem.Kind == reflect.Kind.String)) ||
             (f.Type.Kind == reflect.Kind.Pointer &&
                 (f.Type.Elem.Kind == reflect.Kind.Int ||
                     f.Type.Elem.Kind == reflect.Kind.Int8 ||
@@ -1227,9 +1253,14 @@ func checkEntity<T>() {
                     f.Type.Elem.Kind == reflect.Kind.Float32 ||
                     f.Type.Elem.Kind == reflect.Kind.Bool ||
                     f.Type.Elem.Kind == reflect.Kind.String ||
+                    f.Type.Elem.Kind == reflect.Kind.Enum ||
                     f.Type.Elem == reflect.TypeOf<time.Time>() ||
+                    f.Type.Elem == reflect.TypeOf<time.Duration>() ||
                     f.Type.Elem == reflect.TypeOf<math.big.Decimal>()))) {
             reflect.Error("data: field " + reflect.TypeOf<T>().Name + "." + f.Name + " of type " + f.Type.Name + " cannot be mapped to a column (use @ignore, or a navigation to an entity)")
+        }
+        if f.Attribute<data.uuidColumn>() != nil && f.Type.Kind != reflect.Kind.String && !(f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.String) {
+            reflect.Error("data: @uuidColumn on " + reflect.TypeOf<T>().Name + "." + f.Name + ": the field must be a string or *string")
         }
         if f.Attribute<maxLength>() != nil && f.Type.Kind != reflect.Kind.String && !(f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.String) {
             reflect.Error("data: @maxLength on " + reflect.TypeOf<T>().Name + "." + f.Name + ": only strings have a maximum length")
@@ -1333,6 +1364,8 @@ func scanEntity<T>(em *entModel, vals []any, off int, p *T) void! {
                     jsonInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
                 } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
                     arrayInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
+                } else if f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.Slice && f.Type.Elem.Elem.Kind != reflect.Kind.Uint8 {
+                    arrayPtrInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
                 } else {
                     database.sql.convertInto(f.Addr(p), vals[off + ci], em.meta.Columns[ci].Name)?
                 }
@@ -1359,8 +1392,12 @@ func valuesOf<T>(em *entModel, p *T) []any {
                     out = append(out, jsonArg(f.Get(p)))
                 } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
                     out = append(out, arrayArg(f.Get(p)))
+                } else if f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.Slice && f.Type.Elem.Elem.Kind != reflect.Kind.Uint8 {
+                    out = append(out, arrayPtrArg(f.Get(p)))
                 } else if f.Type.Kind == reflect.Kind.Enum {
                     out = append(out, fmt.Format("{0}", f.Get(p)))
+                } else if f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.Enum {
+                    out = append(out, enumPtrArg(f.Get(p)))
                 } else {
                     out = append(out, database.sql.argOf(f.Get(p)))
                 }
@@ -1389,8 +1426,14 @@ func columnValue<T>(em *entModel, p *T, i int) any {
                 if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
                     return arrayArg(f.Get(p))
                 }
+                if f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.Slice && f.Type.Elem.Elem.Kind != reflect.Kind.Uint8 {
+                    return arrayPtrArg(f.Get(p))
+                }
                 if f.Type.Kind == reflect.Kind.Enum {
                     return fmt.Format("{0}", f.Get(p))
+                }
+                if f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.Enum {
+                    return enumPtrArg(f.Get(p))
                 }
                 return database.sql.argOf(f.Get(p))
             }
@@ -1416,6 +1459,8 @@ func setColumn<T>(em *entModel, p *T, i int, v any) void! {
                     jsonInto(f.Addr(p), v, em.meta.Columns[i].Name)?
                 } else if f.Type.Kind == reflect.Kind.Slice && f.Type.Elem.Kind != reflect.Kind.Uint8 {
                     arrayInto(f.Addr(p), v, em.meta.Columns[i].Name)?
+                } else if f.Type.Kind == reflect.Kind.Pointer && f.Type.Elem.Kind == reflect.Kind.Slice && f.Type.Elem.Elem.Kind != reflect.Kind.Uint8 {
+                    arrayPtrInto(f.Addr(p), v, em.meta.Columns[i].Name)?
                 } else {
                     database.sql.convertInto(f.Addr(p), v, em.meta.Columns[i].Name)?
                 }
@@ -1480,6 +1525,34 @@ func arrayInto<E>(p *[]E, v any, col string) void! {
         return
     }
     return error("data: column " + col + ": expected an array")
+}
+
+// A *[]T field from its column: nil for NULL, else the array (also an
+// empty one).
+func arrayPtrInto<E>(p **[]E, v any, col string) void! {
+    if v == nil {
+        *p = nil
+        return
+    }
+    var xs []E = []
+    arrayInto(&xs, v, col)?
+    *p = &xs
+}
+
+// The driver value of a *[]T field: NULL for nil.
+func arrayPtrArg<E>(p *[]E) any {
+    if p == nil {
+        return nil
+    }
+    return arrayArg(*p)
+}
+
+// The driver value of a *E enum field: NULL for nil, else the name.
+func enumPtrArg<E>(p *E) any {
+    if p == nil {
+        return nil
+    }
+    return fmt.Format("{0}", *p)
 }
 
 // The driver value of an array field: []any (the dialect binds it:

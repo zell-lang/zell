@@ -1,0 +1,109 @@
+// test: @data.uuidColumn string fields are uuid columns on PostgreSQL (TEXT on SQLite), time.Duration is interval on PostgreSQL and INTEGER nanoseconds on SQLite, math.big.Decimal is numeric (TEXT on SQLite); all nullable through *T (NULL for nil); comparisons bind the values as parameters (a duration on SQLite as its nanoseconds); round trip and change tracking; a uuid key
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.uuid_duration
+
+import io
+import uuid
+
+struct Job {
+    @data.uuidColumn @data.key(generated: false) Id string
+    Name    string
+    @data.uuidColumn Parent *string
+    Timeout time.Duration
+    Grace   *time.Duration
+    Cost    math.big.Decimal
+    Budget  *math.big.Decimal
+}
+
+struct Jobs {
+    data.Context
+    Jobs data.Set<Job>
+}
+
+func ref(s string) *string {
+    var x = s
+    return &x
+}
+
+func dur(d time.Duration) *time.Duration {
+    var x = d
+    return &x
+}
+
+func dec(unscaled int, scale int) math.big.Decimal {
+    return math.big.NewDecimal(unscaled, scale)
+}
+
+func decp(unscaled int, scale int) *math.big.Decimal {
+    var x = math.big.NewDecimal(unscaled, scale)
+    return &x
+}
+
+func show(j *Job) string {
+    var p = "nil"
+    if j.Parent != nil {
+        p = *j.Parent
+    }
+    var g = "nil"
+    if j.Grace != nil {
+        g = fmt.Format("{0}", *j.Grace)
+    }
+    var b = "nil"
+    if j.Budget != nil {
+        b = j.Budget.String()
+    }
+    return fmt.Format("{0} parent={1} timeout={2} grace={3} cost={4} budget={5}", j.Name, p, j.Timeout, g, j.Cost.String(), b)
+}
+
+async func names(q data.Query<Job>) string! {
+    var out []string = []
+    for j in await q.OrderBy((j) => j.Name).ToList()? {
+        out = append(out, j.Name)
+    }
+    return strings.Join(out, ",")
+}
+
+async func main() void! {
+    var ctx = data.Open<Jobs>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Jobs>(data.Provider.Postgres, ctx.DB())
+    for s in pg.CreateScript() {
+        println(s)
+    }
+    for s in ctx.CreateScript() {
+        println(s)
+    }
+    await ctx.EnsureCreated()?
+    var root = "6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10"
+    var a = new Job{Id: root, Name: "a", Parent: nil, Timeout: time.Seconds(90), Grace: dur(time.Milliseconds(1500)), Cost: dec(1250, 2), Budget: nil}
+    var b = new Job{Id: "0b6e2a64-9d55-4c3a-8f0e-7a1b2c3d4e5f", Name: "b", Parent: ref(root), Timeout: time.Minutes(5), Grace: nil, Cost: dec(1, 2), Budget: nil}
+    var fresh = uuid.New()
+    var c = new Job{Id: fresh, Name: "c", Parent: ref(root), Timeout: time.Hours(26), Grace: dur(time.Seconds(0)), Cost: dec(100, 0), Budget: decp(25075, 2)}
+    ctx.Jobs.AddRange([a, b, c])
+    _ = await ctx.SaveChanges()?
+    println(uuid.IsValid(fresh), len(fresh))
+    println(await ctx.Jobs.OrderBy((j) => j.Name).Select((j) => (j.Name, data.Sql1<string>("coalesce(?, 'SQL NULL')", j.Parent), data.Sql1<int>("?", j.Timeout), data.Sql1<string>("coalesce(?, 'SQL NULL')", j.Grace))).ToList()?)
+    for j in await ctx.Jobs.AsNoTracking().OrderBy((j) => j.Name).ToList()? {
+        println(show(j))
+    }
+    var children = ctx.Jobs.Where((j) => j.Parent != nil && *j.Parent == root)
+    println(children.ToSql(), children.Args())
+    println(pg.Jobs.Where((j) => j.Parent != nil && *j.Parent == root).ToSql())
+    println("children", await names(children)?)
+    var limit = time.Minutes(2)
+    var slow = ctx.Jobs.Where((j) => j.Timeout > limit || j.Grace == nil)
+    println(slow.ToSql(), slow.Args())
+    println(pg.Jobs.Where((j) => j.Timeout > limit || j.Grace == nil).ToSql(), pg.Jobs.Where((j) => j.Timeout > limit).Args())
+    println("slow", await names(slow)?)
+    println("grace", await names(ctx.Jobs.Where((j) => *j.Grace < limit))?, "budget nil", await names(ctx.Jobs.Where((j) => j.Budget == nil))?)
+    println("by key", (await ctx.Jobs.Find(root)?).Name)
+
+    a.Grace = nil
+    b.Timeout = time.Seconds(1)
+    b.Parent = nil
+    println(ctx.Entry(a).ChangedColumns(), ctx.Entry(b).ChangedColumns(), ctx.Entry(c).ChangedColumns())
+    _ = await ctx.SaveChanges()?
+    for j in await ctx.Jobs.AsNoTracking().OrderBy((j) => j.Name).ToList()? {
+        println(show(j))
+    }
+}

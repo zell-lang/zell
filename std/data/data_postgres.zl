@@ -172,6 +172,12 @@ struct PostgresDialect {
         if t == "json" {
             return "jsonb"
         }
+        if t == "uuid" {
+            return "uuid"
+        }
+        if t == "duration" {
+            return "interval"
+        }
         if t == "string" && c.MaxLength > 0 {
             return "varchar(" + strconv.Itoa(c.MaxLength) + ")"
         }
@@ -217,6 +223,12 @@ struct PostgresDialect {
         }
         if t == "json" {
             return "'null'"
+        }
+        if t == "duration" {
+            return "'00:00:00'"
+        }
+        if t == "uuid" {
+            return "'00000000-0000-0000-0000-000000000000'"
         }
         return "''"
     }

@@ -1172,6 +1172,11 @@ func argValue(v any) any {
             return nil
         }
         return int(*p)
+    case *time.Duration p:
+        if p == nil {
+            return nil
+        }
+        return *p
     }
     var t = typeof(v)
     if t != nil && t.Kind == reflect.Kind.Enum {

@@ -1,0 +1,89 @@
+// test: a *Status enum field is a nullable text column holding the variant name (NULL for nil); u.Status == nil is IS NULL, *u.Status == Status.Active compares with the name as a parameter; an unknown name in the column is a scan error; round trip and change tracking
+// status: passing
+// run-flags: --leak-check
+namespace spec.data.enum_pointer
+
+import io
+
+enum Status {
+    Draft,
+    Active,
+    Closed,
+}
+
+struct Task {
+    Id     int
+    Title  string
+    State  Status
+    Review *Status
+}
+
+struct Board {
+    data.Context
+    Tasks data.Set<Task>
+}
+
+func st(s Status) *Status {
+    var x = s
+    return &x
+}
+
+func show(t *Task) string {
+    var r = "nil"
+    if t.Review != nil {
+        r = fmt.Format("{0}", *t.Review)
+    }
+    return fmt.Format("{0} {1} {2}", t.Title, t.State, r)
+}
+
+async func titles(q data.Query<Task>) string! {
+    var out []string = []
+    for t in await q.OrderBy((t) => t.Id).ToList()? {
+        out = append(out, t.Title)
+    }
+    return strings.Join(out, ",")
+}
+
+async func main() void! {
+    var ctx = data.Open<Board>(data.Provider.Sqlite, ":memory:")?
+    var pg = data.OpenDB<Board>(data.Provider.Postgres, ctx.DB())
+    for s in pg.CreateScript() {
+        println(s)
+    }
+    for s in ctx.CreateScript() {
+        println(s)
+    }
+    await ctx.EnsureCreated()?
+    var a = new Task{Title: "a", State: Status.Active, Review: st(Status.Closed)}
+    var b = new Task{Title: "b", State: Status.Draft, Review: nil}
+    var c = new Task{Title: "c", State: Status.Closed, Review: st(Status.Active)}
+    ctx.Tasks.AddRange([a, b, c])
+    _ = await ctx.SaveChanges()?
+    println(await ctx.Tasks.OrderBy((t) => t.Id).Select((t) => (t.Title, data.Sql1<string>("coalesce(?, 'SQL NULL')", t.Review))).ToList()?)
+    for t in await ctx.Tasks.AsNoTracking().OrderBy((t) => t.Id).ToList()? {
+        println(show(t))
+    }
+    var none = ctx.Tasks.Where((t) => t.Review == nil)
+    println(none.ToSql())
+    println("review == nil", await titles(none)?)
+    var active = ctx.Tasks.Where((t) => t.Review != nil && *t.Review == Status.Active)
+    println(active.ToSql(), active.Args())
+    println(pg.Tasks.Where((t) => t.Review != nil && *t.Review == Status.Active).ToSql())
+    println("review active", await titles(active)?)
+    var want = Status.Closed
+    println("review == captured", await titles(ctx.Tasks.Where((t) => *t.Review == want))?)
+
+    a.Review = nil
+    b.Review = st(Status.Draft)
+    println(ctx.Entry(a).ChangedColumns(), ctx.Entry(b).ChangedColumns(), ctx.Entry(c).ChangedColumns())
+    _ = await ctx.SaveChanges()?
+    for t in await ctx.Tasks.AsNoTracking().OrderBy((t) => t.Id).ToList()? {
+        println(show(t))
+    }
+    _ = await ctx.ExecuteSql("UPDATE tasks SET review = 'Lost' WHERE title = 'c'", [])?
+    try {
+        _ = await ctx.Tasks.AsNoTracking().Where((t) => t.Title == "c").Single()?
+    } catch err {
+        println(err.Message())
+    }
+}

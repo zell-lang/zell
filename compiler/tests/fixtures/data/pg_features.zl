@@ -11,6 +11,7 @@ import data
 import encoding.json
 import io
 import os
+import uuid
 
 struct Limits {
     Seats int
@@ -55,11 +56,34 @@ struct DocMeta {
     Plan    string
 }
 
+struct Line {
+    Sku   string
+    Qty   int
+    Owner *Person
+}
+
+enum Status {
+    Draft,
+    Active,
+    Closed,
+}
+
 // nullable and compound columns
 struct Doc {
     Id    int
     Title string
     @data.jsonb Meta *DocMeta
+    @data.jsonb Lines []Line
+    @data.jsonb Extra *[]Line
+    Labels *[]string
+    Review *Status
+    @data.column(type: "mood") Mood *Status
+    @data.uuidColumn Ref string
+    @data.uuidColumn Alt *string
+    Ttl   time.Duration
+    Grace *time.Duration
+    Price math.big.Decimal
+    Tip   *math.big.Decimal
 }
 
 struct Shop {
@@ -83,6 +107,11 @@ func at(t time.Time) *time.Time {
     return &x
 }
 
+func ptr<T>(v T) *T {
+    var x = v
+    return &x
+}
+
 async func names(q data.Query<User>) string! {
     var out []string = []
     for u in await q.OrderBy((u) => u.Id).ToList()? {
@@ -94,6 +123,8 @@ async func names(q data.Query<User>) string! {
 async func main() void! {
     var ctx = data.Open<Shop>(data.Provider.Postgres, os.Getenv("PGTEST_DSN"))?
     _ = await ctx.ExecuteSql("DROP TABLE IF EXISTS users, orders, categories, docs CASCADE", [])?
+    _ = await ctx.ExecuteSql("DROP TYPE IF EXISTS mood", [])?
+    _ = await ctx.ExecuteSql("CREATE TYPE mood AS ENUM ('Draft', 'Active', 'Closed')", [])?
     for s in ctx.CreateScript() {
         if strings.Contains(s, "gin") && !strings.Contains(s, "\"docs\"") {
             println(s)
@@ -198,9 +229,10 @@ async func main() void! {
         }
     }
     var exp = time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC())
-    var da = new Doc{Title: "a", Meta: new DocMeta{Owner: new Person{Name: "Ann"}, Expires: at(exp), Tags: ["x"], Plan: "pro"}}
-    var db = new Doc{Title: "b", Meta: new DocMeta{Owner: nil, Expires: nil, Tags: nil, Plan: "free"}}
-    var dc = new Doc{Title: "c", Meta: nil}
+    var root = "6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10"
+    var da = new Doc{Title: "a", Meta: new DocMeta{Owner: new Person{Name: "Ann"}, Expires: at(exp), Tags: ["x"], Plan: "pro"}, Lines: [Line{Sku: "pen", Qty: 3, Owner: new Person{Name: "Ann"}}, Line{Sku: "ink", Qty: 1, Owner: nil}], Extra: ptr<[]Line>([]), Labels: ptr<[]string>(["x", "y"]), Review: ptr(Status.Closed), Mood: ptr(Status.Active), Ref: root, Alt: nil, Ttl: time.Seconds(90), Grace: ptr(time.Milliseconds(1500)), Price: math.big.NewDecimal(1250, 2), Tip: nil}
+    var db = new Doc{Title: "b", Meta: new DocMeta{Owner: nil, Expires: nil, Tags: nil, Plan: "free"}, Lines: [Line{Sku: "cup", Qty: 2, Owner: nil}], Extra: nil, Labels: ptr<[]string>([]), Review: nil, Mood: nil, Ref: "0b6e2a64-9d55-4c3a-8f0e-7a1b2c3d4e5f", Alt: ptr(root), Ttl: time.Hours(26) + time.Seconds(1), Grace: nil, Price: math.big.NewDecimal(1, 2), Tip: ptr(math.big.NewDecimal(25075, 2))}
+    var dc = new Doc{Title: "c", Meta: nil, Lines: nil, Extra: ptr<[]Line>([Line{Sku: "mug", Qty: 5, Owner: nil}]), Labels: nil, Review: ptr(Status.Active), Mood: ptr(Status.Draft), Ref: uuid.New(), Alt: ptr(root), Ttl: time.Seconds(0) - time.Milliseconds(250), Grace: ptr(time.Seconds(0)), Price: math.big.NewDecimal(100, 0), Tip: nil}
     ctx.Docs.AddRange([da, db, dc])
     _ = await ctx.SaveChanges()?
     println("doc null", await ctx.Docs.OrderBy((d) => d.Id).Select((d) => (d.Title, data.Sql1<string>("coalesce(?::text, 'SQL NULL')", d.Meta))).ToList()?)
@@ -214,4 +246,60 @@ async func main() void! {
     _ = await ctx.SaveChanges()?
     println("doc swap", await docs(ctx.Docs.Where((d) => d.Meta == nil))?, await docs(ctx.Docs.Where((d) => d.Meta.Owner != nil))?)
 
+    // arrays of documents
+    println("lines raw", await ctx.Docs.OrderBy((d) => d.Id).Select((d) => (d.Title, data.Sql1<string>("?::text", d.Lines), data.Sql1<string>("coalesce(?::text, 'SQL NULL')", d.Extra))).ToList()?)
+    println("lines any", await docs(ctx.Docs.Where((d) => data.Any(d.Lines, (l) => l.Qty > 2)))?, "all", await docs(ctx.Docs.Where((d) => data.All(d.Lines, (l) => l.Qty >= 2)))?, "owner", await docs(ctx.Docs.Where((d) => data.Any(d.Lines, (l) => l.Owner != nil && l.Owner.Name == "Ann")))?)
+    for r in await ctx.Docs.OrderBy((d) => d.Id).Select((d) => (d.Title, len(d.Lines), data.Count(d.Lines, (l) => l.Qty > 0), data.Sum(d.Lines, (l) => l.Qty), data.Nullable(len(*d.Extra)))).ToList()? {
+        var n = "NULL"
+        if r.4 != nil {
+            n = fmt.Format("{0}", *r.4)
+        }
+        println("lines len", r.0, r.1, r.2, r.3, n)
+    }
+    println("nested len", await docs(ctx.Docs.Where((d) => len(d.Meta.Tags) > 0))?, "extra all", await docs(ctx.Docs.Where((d) => data.All(*d.Extra, (l) => l.Qty > 4)))?)
+    // nullable arrays, enums, uuid, interval, numeric
+    println("labels", await docs(ctx.Docs.Where((d) => d.Labels == nil))?, await docs(ctx.Docs.Where((d) => d.Labels != nil && len(*d.Labels) == 0))?, await docs(ctx.Docs.Where((d) => data.ArrayContains(*d.Labels, ["y"])))?)
+    println("enum", await docs(ctx.Docs.Where((d) => d.Review == nil))?, await docs(ctx.Docs.Where((d) => *d.Review == Status.Active))?, "pg enum", await docs(ctx.Docs.Where((d) => *d.Mood == Status.Draft || d.Mood == nil))?)
+    println("uuid", await docs(ctx.Docs.Where((d) => d.Ref == root || *d.Alt == root))?, await docs(ctx.Docs.Where((d) => d.Alt == nil))?, len(await ctx.Docs.Where((d) => d.Ref == "0b6e2a64-9d55-4c3a-8f0e-7a1b2c3d4e5f").ToList()?))
+    var limit = time.Minutes(1)
+    println("interval", await docs(ctx.Docs.Where((d) => d.Ttl > limit))?, await docs(ctx.Docs.Where((d) => d.Grace == nil))?, await docs(ctx.Docs.Where((d) => *d.Grace < limit))?)
+    println("numeric", await docs(ctx.Docs.Where((d) => d.Tip == nil))?, await ctx.Docs.Where((d) => d.Price > math.big.NewDecimal(1, 0)).Count()?)
+    for d in await ctx.Docs.AsNoTracking().OrderBy((d) => d.Id).ToList()? {
+        var e = "nil"
+        if d.Extra != nil {
+            e = fmt.Format("{0}", len(*d.Extra))
+        }
+        var lb = "nil"
+        if d.Labels != nil {
+            lb = fmt.Format("{0}", *d.Labels)
+        }
+        var rv = "nil"
+        if d.Review != nil {
+            rv = fmt.Format("{0}", *d.Review)
+        }
+        var md = "nil"
+        if d.Mood != nil {
+            md = fmt.Format("{0}", *d.Mood)
+        }
+        var gr = "nil"
+        if d.Grace != nil {
+            gr = fmt.Format("{0}", *d.Grace)
+        }
+        var tp = "nil"
+        if d.Tip != nil {
+            tp = d.Tip.String()
+        }
+        println("row", d.Title, len(d.Lines), e, lb, rv, md, uuid.IsValid(d.Ref), d.Alt == nil, d.Ttl, gr, d.Price.String(), tp)
+    }
+    da.Extra = nil
+    da.Labels = nil
+    da.Review = nil
+    da.Grace = nil
+    db.Lines[0].Qty = 8
+    db.Tip = nil
+    dc.Mood = ptr(Status.Closed)
+    dc.Ttl = time.Seconds(3)
+    println("changed", ctx.Entry(da).ChangedColumns(), ctx.Entry(db).ChangedColumns(), ctx.Entry(dc).ChangedColumns())
+    _ = await ctx.SaveChanges()?
+    println("after", await docs(ctx.Docs.Where((d) => d.Extra == nil && d.Labels == nil && d.Review == nil && d.Grace == nil))?, await docs(ctx.Docs.Where((d) => data.Any(d.Lines, (l) => l.Qty == 8)))?, await docs(ctx.Docs.Where((d) => *d.Mood == Status.Closed && d.Ttl == time.Seconds(3)))?)
 }

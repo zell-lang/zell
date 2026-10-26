@@ -1575,6 +1575,88 @@ func toTime(v any, col string) time.Time! {
     return convError(col, v, "time.Time")
 }
 
+// A time.Duration from an integer (nanoseconds, as SQLite stores it), a
+// PostgreSQL interval ("1 day 02:03:04.5", "-00:00:01", "3 mons"; a month
+// is 30 days, a year 365.25 days, as extract(epoch)) or a Go duration
+// string ("1h2m").
+func toDuration(v any, col string) time.Duration! {
+    switch v {
+        case time.Duration d:
+            return d
+        case int n:
+            return time.Nanoseconds(n)
+        case string s:
+            var d = try parseInterval(strings.Trim(s)) catch err {
+                var g = try time.ParseDuration(strings.Trim(s)) catch err2 {
+                    return convError(col, v, "time.Duration")
+                }
+                return g
+            }
+            return d
+        case []byte b:
+            return toDuration(strings.FromBytes(b), col)?
+    }
+    return convError(col, v, "time.Duration")
+}
+
+// A PostgreSQL interval in the default output style (IntervalStyle
+// postgres): [N year[s]] [N mon[s]] [N day[s]] [[-]HH:MM:SS[.f]].
+func parseInterval(s string) time.Duration! {
+    if s == "" {
+        return error("empty interval")
+    }
+    var ns = 0
+    var parts = strings.Fields(s)
+    var i = 0
+    for i < len(parts) {
+        var p = parts[i]
+        if strings.Contains(p, ":") {
+            var neg = strings.HasPrefix(p, "-")
+            var q = strings.TrimPrefix(strings.TrimPrefix(p, "-"), "+")
+            var hms = strings.Split(q, ":")
+            if len(hms) != 3 {
+                return error("bad interval time " + p)
+            }
+            var h = strconv.Atoi(hms[0])?
+            var m = strconv.Atoi(hms[1])?
+            var sec = hms[2]
+            var frac = 0
+            var dot = strings.Index(sec, ".")
+            if dot >= 0 {
+                var f = sec[dot + 1..len(sec)]
+                for len(f) < 9 {
+                    f = f + "0"
+                }
+                frac = strconv.Atoi(f[0..9])?
+                sec = sec[0..dot]
+            }
+            var t = ((h * 60 + m) * 60 + strconv.Atoi(sec)?) * 1000000000 + frac
+            if neg {
+                t = -t
+            }
+            ns += t
+            i += 1
+            continue
+        }
+        if i + 1 >= len(parts) {
+            return error("bad interval " + s)
+        }
+        var n = strconv.Atoi(p)?
+        var unit = parts[i + 1]
+        if strings.HasPrefix(unit, "year") {
+            ns += n * 31557600000000000
+        } else if strings.HasPrefix(unit, "mon") {
+            ns += n * 2592000000000000
+        } else if strings.HasPrefix(unit, "day") {
+            ns += n * 86400000000000
+        } else {
+            return error("bad interval unit " + unit)
+        }
+        i += 2
+    }
+    return time.Nanoseconds(ns)
+}
+
 func toDecimal(v any, col string) math.big.Decimal! {
     switch v {
         case string s:
@@ -1610,6 +1692,13 @@ func convertInto<F>(p *F, v any, col string) void! {
         }
         var text = toString(v, col)?
         *p = encoding.json.ParseValue(text)?("sql: column \"" + col + "\"")
+        return
+    }
+    if reflect.TypeOf<F>() == reflect.TypeOf<time.Duration>() {
+        if v == nil {
+            return convError(col, v, "time.Duration")
+        }
+        *p = toDuration(v, col)?
         return
     }
     if reflect.TypeOf<F>().Kind == reflect.Kind.Struct &&

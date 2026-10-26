@@ -112,6 +112,12 @@ struct concurrencyToken {}
 @attribute(targets: [reflect.Target.Field])
 struct jsonb {}
 
+// @uuidColumn on a string (or *string) field: a uuid column on PostgreSQL
+// (TEXT on SQLite); values are the text form (uuid.New()); compare them
+// with == and data.In (string functions need text on PostgreSQL).
+@attribute(targets: [reflect.Target.Field])
+struct uuidColumn {}
+
 // @ignore: not mapped.
 @attribute(targets: [reflect.Target.Field])
 struct ignore {}
@@ -487,6 +493,11 @@ func sameValue(a any, b any) bool {
             switch b {
                 case time.Time y:
                     return x.Equal(y)
+            }
+        case time.Duration x:
+            switch b {
+                case time.Duration y:
+                    return x.Nanoseconds() == y.Nanoseconds()
             }
         case []byte x:
             switch b {

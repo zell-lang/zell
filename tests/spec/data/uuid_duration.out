@@ -1,0 +1,35 @@
+CREATE TABLE "jobs" (
+    "id" uuid PRIMARY KEY,
+    "name" text NOT NULL,
+    "parent" uuid,
+    "timeout" interval NOT NULL,
+    "grace" interval,
+    "cost" numeric NOT NULL,
+    "budget" numeric
+)
+CREATE TABLE "jobs" (
+    "id" TEXT PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "parent" TEXT,
+    "timeout" INTEGER NOT NULL,
+    "grace" INTEGER,
+    "cost" TEXT NOT NULL,
+    "budget" TEXT
+)
+true 36
+[(a SQL NULL 90000000000 1500000000) (b 6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10 300000000000 SQL NULL) (c 6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10 93600000000000 0)]
+a parent=nil timeout=1m30s grace=1.5s cost=12.50 budget=nil
+b parent=6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10 timeout=5m0s grace=nil cost=0.01 budget=nil
+c parent=6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10 timeout=26h0m0s grace=0s cost=100 budget=250.75
+SELECT t0."id", t0."name", t0."parent", t0."timeout", t0."grace", t0."cost", t0."budget" FROM "jobs" AS t0 WHERE ((t0."parent" IS NOT NULL) AND (t0."parent" = ?)) [6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10]
+SELECT t0."id", t0."name", t0."parent", t0."timeout", t0."grace", t0."cost", t0."budget" FROM "jobs" AS t0 WHERE ((t0."parent" IS NOT NULL) AND (t0."parent" = $1))
+children b,c
+SELECT t0."id", t0."name", t0."parent", t0."timeout", t0."grace", t0."cost", t0."budget" FROM "jobs" AS t0 WHERE ((t0."timeout" > ?) OR (t0."grace" IS NULL)) [2m0s]
+SELECT t0."id", t0."name", t0."parent", t0."timeout", t0."grace", t0."cost", t0."budget" FROM "jobs" AS t0 WHERE ((t0."timeout" > $1) OR (t0."grace" IS NULL)) [2m0s]
+slow b,c
+grace a,c budget nil a,b
+by key a
+[grace] [parent timeout] []
+a parent=nil timeout=1m30s grace=nil cost=12.50 budget=nil
+b parent=nil timeout=1s grace=nil cost=0.01 budget=nil
+c parent=6f1c0b52-3c1e-4a6e-9a43-2d4f0c7e5b10 timeout=26h0m0s grace=0s cost=100 budget=250.75

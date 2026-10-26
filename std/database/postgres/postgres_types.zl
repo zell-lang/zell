@@ -719,6 +719,9 @@ func encodeText(v any) string! {
             return s
         case time.Time t:
             return formatTime(t)
+        case time.Duration d:
+            // an interval (microsecond precision)
+            return fmt.Format("{0} microseconds", d.Microseconds())
         case []any items:
             var b = strings.Builder{}
             b.Write("{")

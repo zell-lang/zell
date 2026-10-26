@@ -130,6 +130,10 @@ struct SqliteDialect {
 
     // Arrays are stored as JSON arrays.
     func BindArray(xs []any) any {
+        if len(xs) == 0 {
+            // an empty array, never JSON null (that is a nil *[]T: NULL)
+            return "[]"
+        }
         return encoding.json.Format(xs)
     }
 
@@ -163,7 +167,8 @@ struct SqliteDialect {
 
     func ColumnType(c Column) string {
         var t = c.Type
-        if t == "int64" || t == "int32" || t == "int16" {
+        if t == "int64" || t == "int32" || t == "int16" || t == "duration" {
+            // a time.Duration is its count of nanoseconds
             return "INTEGER"
         }
         if t == "float" || t == "float32" {
@@ -212,7 +217,7 @@ struct SqliteDialect {
         if t == "bytes" {
             return "X''"
         }
-        if t == "int64" || t == "int32" || t == "int16" || t == "float" || t == "float32" || t == "decimal" {
+        if t == "int64" || t == "int32" || t == "int16" || t == "float" || t == "float32" || t == "decimal" || t == "duration" {
             return "0"
         }
         if t == "time" {
@@ -220,6 +225,9 @@ struct SqliteDialect {
         }
         if t == "json" {
             return "'null'"
+        }
+        if t == "uuid" {
+            return "'00000000-0000-0000-0000-000000000000'"
         }
         return "''"
     }

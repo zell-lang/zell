@@ -338,6 +338,9 @@ struct stmt {
                     rtBindBlob(this.h, k, b)?
                 case time.Time t:
                     rtBindText(this.h, k, t.Format("2006-01-02 15:04:05.999999999-07:00"))?
+                case time.Duration d:
+                    // its count of nanoseconds
+                    rtBindInt(this.h, k, d.Nanoseconds())?
                 default:
                     return error(
                         "sqlite: unsupported argument " +
