@@ -27,7 +27,9 @@ impl<'a> Sema<'a> {
         let mut muted = false;
         for (i, s) in stmts.iter().enumerate() {
             let (n, folds) = (out.len(), self.refl.folds);
+            self.refl.unrolled_returns = false;
             self.stmt(s, &mut out);
+            let unrolled_returns = std::mem::take(&mut self.refl.unrolled_returns);
             if !muted && super::reflect_ct::maybe_dead_after(s, &out, n, self.refl.abstract_stmt) {
                 muted = true;
                 self.gen.mute += 1;
@@ -39,6 +41,15 @@ impl<'a> Sema<'a> {
             // taken) whose branch terminates: the rest of the list is dead
             // in this instantiation and is not checked, like a dropped
             // branch (DESIGN.md "Статическая рефлексия").
+            if unrolled_returns && matches!(s.kind, ast::StmtKind::For(..)) {
+                // An unrolled `reflect.Fields<T>()` loop that always
+                // returns: the rest is dead; the loop is marked as
+                // terminating for the missing-return check.
+                let msg = mk(ExprKind::Const(hir::ConstValue::Str("unreachable".to_string())), self.tt.string, s.span);
+                let end = mk(ExprKind::Builtin { op: Builtin::Panic, args: vec![msg] }, self.tt.void, s.span);
+                out.push(Stmt { kind: StmtKind::Expr(end), span: s.span });
+                break;
+            }
             if super::reflect_ct::dead_after(s, &out, n) {
                 break;
             }
@@ -1155,7 +1166,7 @@ pub(crate) fn terminates(stmts: &[Stmt], jumps: bool) -> bool {
 }
 
 /// True if a `break` targeting `label` appears in `stmts`.
-fn breaks_to(stmts: &[Stmt], label: hir::Label) -> bool {
+pub(crate) fn breaks_to(stmts: &[Stmt], label: hir::Label) -> bool {
     stmts.iter().any(|s| stmt_breaks_to(s, label))
 }
 

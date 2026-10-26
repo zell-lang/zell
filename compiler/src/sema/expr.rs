@@ -613,6 +613,12 @@ impl<'a> Sema<'a> {
         }
         match self.binop_for(op, lv.ty, rv.ty, span) {
             Some((hop, ty)) => {
+                // A folded string (`f.Name`) compared with a type name
+                // (`reflect.TypeOf<E>().Name + "Id"`) in an instantiation:
+                // a constant.
+                if let Some(eq) = self.ct_name_eq(hop, &lv, &rv) {
+                    return mk(ExprKind::Const(hir::ConstValue::Bool(eq)), ty, span);
+                }
                 // Comparisons of two constants (also those that compile-time
                 // reflection folded, `tag.name != ""`) are constants.
                 if let (ExprKind::Const(a), ExprKind::Const(b)) = (&lv.kind, &rv.kind) {

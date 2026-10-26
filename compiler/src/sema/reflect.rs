@@ -154,6 +154,11 @@ pub(crate) struct ReflState {
     /// Span of the last static `if` / type switch checked abstractly (its
     /// branches depend on a type parameter); see `Sema::stmt_list`.
     pub(crate) abstract_stmt: Option<Span>,
+    /// Set by an unrolled `reflect.Fields<T>()` loop one of whose copies
+    /// returns (or panics) unconditionally after folding, with no `break`
+    /// before it: the statements after the loop are dead in this
+    /// instantiation (`Sema::stmt_list` takes it).
+    pub(crate) unrolled_returns: bool,
     /// Static types named by `typeof`.
     full: Vec<TypeId>,
     /// Set while resolving an attribute name (builtin attribute names must
@@ -867,6 +872,7 @@ impl<'a> Sema<'a> {
         let idx = self.temp(int, span);
         let label = self.push_label(LabelKind::Loop);
         let mut copies = Vec::new();
+        let mut returns_now = false;
         for k in 0..nfields {
             self.push_scope();
             let f = self.declare_local(&var.name, fi_ptr, LocalKind::LoopVar, var.span);
@@ -892,10 +898,19 @@ impl<'a> Sema<'a> {
                 let kexpr = mk(ExprKind::Const(hir::ConstValue::Int(k as i128)), int, var.span);
                 mk(ExprKind::Index { base: Box::new(fields), index: Box::new(kexpr) }, fi_ptr, var.span)
             };
+            let returns = super::stmt::terminates(&b.stmts, false);
             let stmts = vec![Stmt { kind: StmtKind::Let { local: f, init: Some(init) }, span: var.span }, Stmt { kind: StmtKind::Block(b), span: body.span }];
             copies.push(hir::Block { stmts, span: body.span });
+            if returns {
+                // This copy always returns: the later fields are never
+                // reached, and neither is the code after the loop unless an
+                // earlier copy breaks out of it.
+                returns_now = !copies.iter().any(|c| super::stmt::breaks_to(&c.stmts, label));
+                break;
+            }
         }
         self.pop_label();
+        self.refl.unrolled_returns = returns_now;
         Some(self.unrolled_loop(label, idx, copies, span))
     }
 

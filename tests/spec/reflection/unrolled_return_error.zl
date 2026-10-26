@@ -1,0 +1,26 @@
+// error: Plain has no Id
+// status: passing
+namespace spec.reflection.unrolled_return_error
+
+import io
+
+struct WithId {
+    Id int
+}
+
+struct Plain {
+    A int
+}
+
+func requireKey<E>() int {
+    for g in reflect.Fields<E>() {
+        if g.Name == "Id" {
+            return g.Index
+        }
+    }
+    reflect.Error(reflect.TypeOf<E>().Name + " has no Id")
+}
+
+func main() {
+    println(requireKey<WithId>(), requireKey<Plain>())
+}

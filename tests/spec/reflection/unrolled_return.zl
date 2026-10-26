@@ -1,0 +1,45 @@
+// test: a copy of an unrolled reflect.Fields<T>() loop that always returns after folding ends the loop: later fields are not unrolled and the code after the loop is dead in that instantiation (reflect.Error there is raised only for types without the field); f.Name compared with reflect.TypeOf<E>().Name + "Id" folds
+// status: passing
+namespace spec.reflection.unrolled_return
+
+import io
+
+struct WithId {
+    Name string
+    Id   int
+}
+
+struct OwnId {
+    OwnIdId int
+}
+
+struct Plain {
+    A int
+    B string
+}
+
+func keyName<E>() string {
+    for g in reflect.Fields<E>() {
+        if g.Name == "Id" {
+            return "Id"
+        }
+        if g.Name == reflect.TypeOf<E>().Name + "Id" {
+            return g.Name
+        }
+    }
+    return "none"
+}
+
+func requireKey<E>() int {
+    for g in reflect.Fields<E>() {
+        if g.Name == "Id" {
+            return g.Index
+        }
+    }
+    reflect.Error("no key")
+}
+
+func main() {
+    println(keyName<WithId>(), keyName<OwnId>(), keyName<Plain>())
+    println(requireKey<WithId>())
+}

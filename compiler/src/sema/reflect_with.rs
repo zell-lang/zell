@@ -252,6 +252,28 @@ impl<'a> Sema<'a> {
     }
 
     /// The value of a compile-time string expression, if `e` is one.
+    /// `a == b` / `a != b` (`op`) of a constant string and a compile-time
+    /// type name expression (`reflect.TypeOf<E>().Name + "Id"`, see
+    /// [`Self::const_string`]) inside an instantiation: the folded result.
+    /// `None` when either side is not such a constant, both are plain
+    /// constants, or the enclosing function is checked abstractly.
+    pub(crate) fn ct_name_eq(&mut self, op: BinOp, l: &hir::Expr, r: &hir::Expr) -> Option<bool> {
+        if !matches!(op, BinOp::StrEq | BinOp::StrNe) || !self.refl.loaded_reflect() {
+            return None;
+        }
+        let plain = |e: &hir::Expr| matches!(e.kind, ExprKind::Const(_));
+        if plain(l) == plain(r) {
+            return None;
+        }
+        let owner = self.fns.iter().rev().find_map(|c| c.func.filter(|fid| !matches!(self.funcs[fid.0 as usize].kind, hir::FuncKind::Lambda { .. })));
+        if owner.is_some_and(|fid| self.gen.insts.get(&fid.0).is_some_and(|i| i.note.is_none())) {
+            return None;
+        }
+        let (a, b) = (self.const_string(l)?, self.const_string(r)?);
+        self.refl.folds += 1;
+        Some((a == b) != matches!(op, BinOp::StrNe))
+    }
+
     pub(crate) fn const_string(&self, e: &hir::Expr) -> Option<String> {
         match &e.kind {
             ExprKind::Const(ConstValue::Str(s)) => Some(s.clone()),
