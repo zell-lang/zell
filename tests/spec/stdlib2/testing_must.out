@@ -1,0 +1,20 @@
+    before
+    tests/spec/stdlib2/testing_must.zl:47: empty input
+      created at   tests/spec/stdlib2/testing_must.zl:14  parse
+      returned via tests/spec/stdlib2/testing_must.zl:20  point
+      returned via tests/spec/stdlib2/testing_must.zl:47  testMustFails
+--- FAIL: TestMustFails
+    tests/spec/stdlib2/testing_must.zl:52: disk full
+      created at   tests/spec/stdlib2/testing_must.zl:26  save
+      returned via tests/spec/stdlib2/testing_must.zl:52  testMustVoidFails
+--- FAIL: TestMustVoidFails
+    tests/spec/stdlib2/testing_must.zl:64: expected an error
+--- FAIL: TestMustFailFails
+    tests/spec/stdlib2/testing_must.zl:71: strconv.Atoi: parsing "oops": invalid syntax
+      created at   tests/spec/stdlib2/testing_must.zl:16  parse
+      returned via tests/spec/stdlib2/testing_must.zl:16  parse
+      returned via tests/spec/stdlib2/testing_must.zl:32  load
+      returned via tests/spec/stdlib2/testing_must.zl:71  testAsync
+--- FAIL: TestAsync
+FAIL
+FAIL	2 passed, 4 failed, 0 skipped

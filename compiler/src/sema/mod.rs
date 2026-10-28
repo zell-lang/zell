@@ -57,6 +57,7 @@ mod stmt;
 pub mod stdfs;
 mod stdsrc;
 mod suggest;
+mod testing;
 pub mod stdlib;
 pub mod units;
 // >>> data (docs/FRAMEWORK.md section 3)

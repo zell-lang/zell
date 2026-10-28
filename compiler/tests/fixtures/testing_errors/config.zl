@@ -1,0 +1,24 @@
+namespace config
+
+// Parses "key=value".
+func ParsePair(s string) (string, string)! {
+    var i = strings.Index(s, "=")
+    if i <= 0 {
+        return error("missing '=' in \"" + s + "\"")
+    }
+    return (s[..i], s[i + 1..])
+}
+
+// Parses a port number.
+func ParsePort(s string) int! {
+    var n = strconv.Atoi(s)?("port")
+    if n < 1 || n > 65535 {
+        return error("port out of range")
+    }
+    return n
+}
+
+async func LoadPort(s string) int! {
+    await task.Yield()
+    return ParsePort(s)?
+}

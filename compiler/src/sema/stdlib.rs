@@ -1410,16 +1410,38 @@ thread_local! {
     /// Source paths of the files being analysed (by file index), for
     /// `@embed` paths; set by the driver around analysis.
     static SOURCE_PATHS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Line-start offsets of the same files (`t.Must` call locations).
+    static SOURCE_LINES: std::cell::RefCell<Vec<Vec<u32>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Runs `f` with the source paths of the files being analysed known to
 /// `@embed` (relative embed paths resolve against their directories;
 /// without them, against the current directory).
-pub fn with_source_paths<R>(paths: Vec<String>, f: impl FnOnce() -> R) -> R {
+/// `lines` are the line-start offsets of each file (see
+/// [`source_location`]).
+pub fn with_source_paths<R>(paths: Vec<String>, lines: Vec<Vec<u32>>, f: impl FnOnce() -> R) -> R {
     let saved = SOURCE_PATHS.with(|p| std::mem::replace(&mut *p.borrow_mut(), paths));
+    let saved_lines = SOURCE_LINES.with(|p| std::mem::replace(&mut *p.borrow_mut(), lines));
     let r = f();
     SOURCE_PATHS.with(|p| *p.borrow_mut() = saved);
+    SOURCE_LINES.with(|p| *p.borrow_mut() = saved_lines);
     r
+}
+
+/// `path:line` of byte `offset` in source file `file`, the path relative
+/// to the current directory when it is under it (as error traces print
+/// it); `?` for an unknown file (analysis without paths, e.g. the LSP).
+pub(crate) fn source_location(file: usize, offset: u32) -> String {
+    let path = source_path(file);
+    if path.is_empty() {
+        return "?".into();
+    }
+    let line = SOURCE_LINES.with(|l| l.borrow().get(file).map_or(0, |starts| starts.partition_point(|&s| s <= offset).max(1)));
+    let shown = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| std::path::Path::new(&path).strip_prefix(&cwd).ok().map(|r| r.display().to_string()))
+        .unwrap_or(path);
+    format!("{shown}:{line}")
 }
 
 /// The path of source file `file` (empty if unknown).

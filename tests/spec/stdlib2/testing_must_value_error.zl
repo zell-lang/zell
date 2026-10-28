@@ -1,0 +1,12 @@
+// error: t.Must needs a fallible (T!) argument, found int
+// status: passing
+namespace spec.stdlib2.testing_must_value_error
+
+func testIt(t *testing.T) {
+    var n = t.Must(len("abc"))
+    testing.Equal(t, n, 3)
+}
+
+async func main() {
+    os.Exit(await testing.Main([testing.Case{Name: "TestIt", Run: testIt}]))
+}

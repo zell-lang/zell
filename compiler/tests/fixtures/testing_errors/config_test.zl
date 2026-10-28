@@ -1,0 +1,52 @@
+namespace config
+
+@test
+func TestPairOk(t *testing.T) void! {
+    var (k, v) = ParsePair("a=1")?
+    testing.Equal(t, k, "a")
+    testing.Equal(t, v, "1")
+}
+
+@test
+func TestPairPropagates(t *testing.T) void! {
+    var (k, _) = ParsePair("nokey")?
+    t.Log("not reached " + k)
+}
+
+@test
+func plainFallible() void! {
+    _ = ParsePort("80")?
+}
+
+@test
+async func TestAsyncPropagates(t *testing.T) void! {
+    var p = await LoadPort("99999")?
+    t.Log("not reached " + strconv.Itoa(p))
+}
+
+@test
+func TestMust(t *testing.T) {
+    testing.Equal(t, t.Must(ParsePort("8080")), 8080)
+    testing.Equal(t, t.MustFail(ParsePort("0")).Message(), "port out of range")
+}
+
+@test
+func TestMustFails(t *testing.T) {
+    _ = t.Must(ParsePort("x"))
+}
+
+@test
+async func TestAsyncMust(t *testing.T) {
+    testing.Equal(t, t.Must(await LoadPort("443")), 443)
+    _ = t.MustFail(await LoadPort("443"))
+}
+
+@test
+func plainFails() void! {
+    _ = ParsePort("-1")?
+}
+
+@test
+async func asyncPlainFallible() void! {
+    _ = await LoadPort("1")?
+}

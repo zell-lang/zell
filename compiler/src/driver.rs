@@ -80,8 +80,8 @@ pub fn check(files: &[SourceFile], diags: &mut Diagnostics) -> Option<Program> {
     if !apply_cfg(&mut asts, files, &crate::cfg::CfgEnv::current(), diags) {
         return None;
     }
-    let paths = files.iter().map(|f| f.path.clone()).collect();
-    let p = sema::stdlib::with_source_paths(paths, || sema::analyze(&asts, diags)).map(|p| with_sources(p, files));
+    let (paths, lines) = source_tables(files);
+    let p = sema::stdlib::with_source_paths(paths, lines, || sema::analyze(&asts, diags)).map(|p| with_sources(p, files));
     lint(p.as_ref(), files, &|_| true, diags);
     p
 }
@@ -94,6 +94,11 @@ pub fn lint(p: Option<&Program>, files: &[SourceFile], wanted: &dyn Fn(usize) ->
         let texts: Vec<&str> = files.iter().map(|f| f.text.as_str()).collect();
         sema::lint::check(p, &texts, wanted, diags);
     }
+}
+
+/// Paths and line-start tables of `files` (for `sema`).
+fn source_tables(files: &[SourceFile]) -> (Vec<String>, Vec<Vec<u32>>) {
+    files.iter().map(|f| (f.path.clone(), crate::hir::SourceInfo::new(&f.path, &f.text).line_starts)).unzip()
 }
 
 /// Records the source paths and line tables (error-trace sites).
@@ -125,8 +130,8 @@ pub fn check_with_policy(
     if diags.has_errors() {
         return None;
     }
-    let paths = files.iter().map(|f| f.path.clone()).collect();
-    let p = sema::stdlib::with_source_paths(paths, || sema::analyze_with_policy(&asts, diags, Some(policy))).map(|p| with_sources(p, files));
+    let (paths, lines) = source_tables(files);
+    let p = sema::stdlib::with_source_paths(paths, lines, || sema::analyze_with_policy(&asts, diags, Some(policy))).map(|p| with_sources(p, files));
     lint(p.as_ref(), files, lint_files, diags);
     p
 }

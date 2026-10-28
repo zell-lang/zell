@@ -353,6 +353,11 @@ impl<'a> Sema<'a> {
             Ok(e) => return e,
             Err(b) => b,
         };
+        // `t.Must(x)` / `t.MustFail(x)` on a `testing.T` (testing.rs).
+        let base = match self.testing_method_call(base, name, targs, args, span) {
+            Ok(e) => return e,
+            Err(b) => b,
+        };
         // `t.Cancel()` on a `Task<T>`: cancels that task and its descendants
         // (DESIGN.md «Отмена»); idempotent, a no-op on a completed task.
         if matches!(self.tt.get(base.ty), Type::Task(_)) && name.name == "Cancel" {
@@ -557,7 +562,7 @@ impl<'a> Sema<'a> {
         found.first().map(|(_, t)| *t)
     }
 
-    fn arity(&mut self, name: &str, args: &[ast::Expr], n: usize, span: Span) -> bool {
+    pub(crate) fn arity(&mut self, name: &str, args: &[ast::Expr], n: usize, span: Span) -> bool {
         if args.len() != n {
             if !args.iter().any(|a| a.is_recovered()) {
                 self.err(format!("wrong number of arguments in call to {name}: expected {n}, got {}", args.len()), span);

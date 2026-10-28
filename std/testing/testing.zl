@@ -25,6 +25,14 @@
 //
 // Assertions (testing.Equal(t, got, want) ...) report through t.Error and
 // keep going; the ...Fatal variants stop the test (testing.EqualFatal).
+//
+// Fallible code: a test may return `void!` and use `?` (a returned error
+// fails it with `error: <message>` and the trace); `t.Must(f())` gives the
+// value of a `T!` call or ends the test with `file:line: <message>`, and
+// `t.MustFail(f())` gives its error or ends the test with `file:line:
+// expected an error`. Must and MustFail are compiler intrinsics (the only
+// calls taking an unhandled `T!`), not methods declared here.
+//
 // Table tests are plain slices of structs:
 //
 //   @test func TestAbs(t *testing.T) {
@@ -45,8 +53,21 @@ struct Case {
     // An `async @test` (func(t *testing.T) Task<void>): awaited by the
     // child process that runs the test.
     RunAsync func(*T) Task<void>
+    // A test declared `void!` (`func TestX(t *testing.T) void!`, also
+    // async): an error it returns fails the test, logged as
+    // `error: <message>` with its error trace.
+    RunErr      func(*T) void!
+    RunAsyncErr func(*T) Task<void!>
+    // The same for a `void!` test without parameters.
+    PlainErr      func() void!
+    PlainAsyncErr func() Task<void!>
     // The test calls t.Parallel() (found by `zell test`).
     Parallel bool
+}
+
+// Whether c is a test (not a benchmark).
+func isTest(c Case) bool {
+    return c.Run != nil || c.RunAsync != nil || c.RunErr != nil || c.RunAsyncErr != nil || c.PlainErr != nil || c.PlainAsyncErr != nil
 }
 
 // The handle of a running test.
@@ -106,6 +127,25 @@ struct T {
     func Fatal(msg string) {
         this.failed = true
         this.Log(msg)
+        this.FailNow()
+    }
+
+    // t.Must(x) when x failed (lowered by the compiler, sema/testing.rs):
+    // logs `at: message` and the error trace, ends the test.
+    func mustError(err error, at string) {
+        this.failWith(at + ": ", err)
+    }
+
+    // Logs prefix + the message of err, then its error trace, and ends the
+    // test as failed (a `void!` test that returned err: prefix "error: ",
+    // as an uncaught error in main prints).
+    func failWith(prefix string, err error) {
+        this.failed = true
+        this.Log(prefix + err.Message())
+        var trace = errors.Trace(err)
+        if trace != "" {
+            this.Log(trace)
+        }
         this.FailNow()
     }
 
@@ -359,6 +399,16 @@ func NoError(t *T, err error) bool {
     return true
 }
 
+// t.MustFail(x) (lowered by the compiler, sema/testing.rs): the error of
+// r; if r succeeded, logs `at: expected an error` and ends the test.
+func mustFail<V>(t *T, r V!, at string) error {
+    try r catch err {
+        return err
+    }
+    t.Fatal(at + ": expected an error")
+    return nil
+}
+
 // Reports an error unless errors.Is(err, target).
 func ErrorIs(t *T, err error, target error) bool {
     if !errors.Is(err, target) {
@@ -578,7 +628,7 @@ func matches(filter string, name string) bool {
 }
 
 async func runChild(c Case, o options) int {
-    if c.Run == nil && c.RunAsync == nil {
+    if !isTest(c) {
         io.Eprintln("testing: " + c.Name + " is not a test")
         return 1
     }
@@ -589,13 +639,7 @@ async func runChild(c Case, o options) int {
         probeName: o.probeName,
         probe: o.probe,
     }
-    if c.RunAsync != nil {
-        var arun = c.RunAsync
-        await arun(t)
-    } else {
-        var run = c.Run
-        run(t)
-    }
+    await runCase(c, t)
     if t.failed {
         return 1
     }
@@ -704,12 +748,37 @@ async func runOne(self string, c Case, o options) outcome {
 // FailNow and Skip raise in-process, ends only this test.
 async func caseTask(c Case, t *T) void! {
     await task.Yield()
+    await runCase(c, t)
+}
+
+// Runs the function of test case c; an error from a `void!` test fails it.
+async func runCase(c Case, t *T) {
     if c.RunAsync != nil {
         var arun = c.RunAsync
         await arun(t)
-    } else {
+    } else if c.Run != nil {
         var run = c.Run
         run(t)
+    } else if c.RunAsyncErr != nil {
+        var arun = c.RunAsyncErr
+        try await arun(t) catch err {
+            t.failWith("error: ", err)
+        }
+    } else if c.RunErr != nil {
+        var run = c.RunErr
+        try run(t) catch err {
+            t.failWith("error: ", err)
+        }
+    } else if c.PlainAsyncErr != nil {
+        var arun = c.PlainAsyncErr
+        try await arun() catch err {
+            t.failWith("error: ", err)
+        }
+    } else {
+        var run = c.PlainErr
+        try run() catch err {
+            t.failWith("error: ", err)
+        }
     }
 }
 
@@ -811,10 +880,10 @@ async func Main(cases []Case) int {
         if !matches(o.filter, c.Name) {
             continue
         }
-        var isTest = c.Run != nil || c.RunAsync != nil
-        if isTest && !c.Parallel {
+        var test = isTest(c)
+        if test && !c.Parallel {
             tests = append(tests, c)
-        } else if isTest {
+        } else if test {
             parallel = append(parallel, c)
         } else if c.Bench != nil {
             benches = append(benches, c)

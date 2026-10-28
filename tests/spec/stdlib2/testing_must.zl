@@ -1,0 +1,84 @@
+// test: t.Must yields the value of a T! result or ends the test with the file:line of the call, the message and the trace; t.MustFail yields the error or ends the test with "expected an error"
+// status: passing
+// exit: 1
+// args: --no-time
+namespace spec.stdlib2.testing_must
+
+struct Point {
+    X int
+    Y int
+}
+
+func parse(s string) int! {
+    if s == "" {
+        return error("empty input")
+    }
+    return strconv.Atoi(s)?
+}
+
+func point(s string) *Point! {
+    var x = parse(s)?
+    return new Point{X: x, Y: x * 2}
+}
+
+func save(ok bool) void! {
+    if !ok {
+        return error("disk full")
+    }
+}
+
+async func load(s string) string! {
+    await task.Yield()
+    var n = parse(s)?
+    return strings.Repeat("x", n)
+}
+
+func testMustPasses(t *testing.T) {
+    var n = t.Must(parse("42"))
+    testing.Equal(t, n, 42)
+    var p = t.Must(point("3"))
+    testing.Equal(t, p.Y, 6)
+    t.Must(save(true))
+    testing.Equal(t, t.Must(parse("1")) + t.Must(parse("2")), 3)
+}
+
+func testMustFails(t *testing.T) {
+    t.Log("before")
+    var n = t.Must(point(""))
+    t.Log("not reached " + strconv.Itoa(n.X))
+}
+
+func testMustVoidFails(t *testing.T) {
+    t.Must(save(false))
+    t.Log("not reached")
+}
+
+func testMustFailPasses(t *testing.T) {
+    var err = t.MustFail(parse(""))
+    testing.Equal(t, err.Message(), "empty input")
+    testing.Equal(t, t.MustFail(save(false)).Message(), "disk full")
+    testing.Error(t, t.MustFail(point("x")))
+}
+
+func testMustFailFails(t *testing.T) {
+    _ = t.MustFail(parse("7"))
+    t.Log("not reached")
+}
+
+async func testAsync(t *testing.T) {
+    testing.Equal(t, t.Must(await load("3")), "xxx")
+    testing.Equal(t, t.MustFail(await load("")).Message(), "empty input")
+    t.Must(await load("oops"))
+}
+
+async func main() {
+    var cases = [
+        testing.Case{Name: "TestMustPasses", Run: testMustPasses},
+        testing.Case{Name: "TestMustFails", Run: testMustFails},
+        testing.Case{Name: "TestMustVoidFails", Run: testMustVoidFails},
+        testing.Case{Name: "TestMustFailPasses", Run: testMustFailPasses},
+        testing.Case{Name: "TestMustFailFails", Run: testMustFailFails},
+        testing.Case{Name: "TestAsync", RunAsync: testAsync},
+    ]
+    os.Exit(await testing.Main(cases))
+}

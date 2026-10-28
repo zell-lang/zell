@@ -238,3 +238,39 @@ fn syntax_error_in_test_file_is_reported() {
     assert!(stderr.contains("lib_test.zl:5"), "no diagnostic in:\n{stdout}{stderr}");
     assert!(!stdout.contains("no tests found"), "{stdout}");
 }
+
+/// `void!` tests (an error they return fails them with `error: <message>`
+/// and the trace) and `t.Must` / `t.MustFail` (`file:line` of the call) on
+/// `tests/fixtures/testing_errors`, sync and async.
+#[test]
+fn fallible_tests_and_must() {
+    let lib = repo().join("runtime/libzell_rt.a");
+    if !lib.is_file() {
+        let st = Command::new("make").arg("-C").arg(repo().join("runtime")).status().expect("cannot run make");
+        assert!(st.success(), "make -C runtime failed");
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_zell"))
+        .args(["test", "compiler/tests/fixtures/testing_errors", "-v"])
+        .current_dir(repo())
+        .env("ZELL_NO_BACKTRACE", "1")
+        .output()
+        .expect("cannot run zell");
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    let dir = "compiler/tests/fixtures/testing_errors";
+    for want in [
+        "--- PASS: TestPairOk (".to_string(),
+        "--- PASS: plainFallible (".to_string(),
+        "--- PASS: asyncPlainFallible (".to_string(),
+        "--- PASS: TestMust (".to_string(),
+        format!("    error: missing '=' in \"nokey\"\n      created at   {dir}/config.zl:7        ParsePair\n      returned via {dir}/config_test.zl:12  TestPairPropagates\n--- FAIL: TestPairPropagates ("),
+        format!("    error: port out of range\n      created at   {dir}/config.zl:16       ParsePort\n      returned via {dir}/config.zl:23       LoadPort\n      returned via {dir}/config_test.zl:23  TestAsyncPropagates\n--- FAIL: TestAsyncPropagates ("),
+        format!("    {dir}/config_test.zl:35: port: strconv.Atoi: parsing \"x\": invalid syntax\n"),
+        format!("    {dir}/config_test.zl:41: expected an error\n--- FAIL: TestAsyncMust ("),
+        "--- FAIL: plainFails (".to_string(),
+        "FAIL\t4 passed, 5 failed, 0 skipped (".to_string(),
+    ] {
+        assert!(stdout.contains(&want), "missing {want:?} in:\n{stdout}{stderr}");
+    }
+    assert!(!stdout.contains("not reached"), "{stdout}");
+}
