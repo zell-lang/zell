@@ -1,0 +1,37 @@
+// test: a fallible deferred await is handled in a deferred async closure
+// status: passing
+// run-flags: --leak-check
+// `defer await rows.Close()` with `Close() Task<void!>` does not compile
+// (the error must be handled); the handled form defers an async closure
+// that catches it. The closure captures `r` now, like any deferred call.
+namespace spec.async.defer_await_handled
+
+import io
+
+struct Rows {
+    fail bool
+
+    async func Close() void! {
+        await task.Yield()
+        if this.fail {
+            return error("close failed")
+        }
+        println("closed")
+    }
+}
+
+async func Query(fail bool) int! {
+    var r = &Rows{fail: fail}
+    defer await async func() {
+        try await r.Close() catch err {
+            println("close error:", err.Message())
+        }
+    }()
+    println("query")
+    return 1
+}
+
+async func main() void! {
+    println(await Query(false)?)
+    println(await Query(true)?)
+}

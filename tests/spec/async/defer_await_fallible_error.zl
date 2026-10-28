@@ -1,0 +1,14 @@
+// error: of a deferred await must be handled
+// status: passing
+namespace spec.async.defer_await_fallible_error
+
+import io
+
+async func Close() void! {
+    await task.Yield()
+}
+
+async func main() {
+    defer await Close()
+    println("body")
+}

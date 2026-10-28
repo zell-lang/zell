@@ -322,8 +322,22 @@ and the corpus picked an answer. Each is followed by the tests that encode it.
     `ch.Close()`. **`task.Mutex`**'s zero value is unlocked; `await mu.Lock()`,
     `mu.Unlock()`. **Async lambdas** are written `async func(...) T { ... }`.
     — `async/task_any`, `async/channel_send_recv`, `async/mutex_counter`, `async/async_lambda`
-36. **`defer await f()` is rejected** (keyword `defer requires a function call`).
-    — `async/defer_await_rejected`
+36. **`defer await f(args)`** (2026-10-29, replaces the old rejection) is legal
+    in async functions and async lambdas: receiver and arguments are evaluated
+    at the defer, the await runs at function exit, LIFO with plain defers, on
+    every exit path (end, `return`, `?`, a return out of a labeled loop); the
+    result is discarded. A fallible result (`Task<void!>`) must be handled in a
+    deferred async closure, `defer await async func() { try await
+    r.Close() catch err { ... } }()`. Rejected: in a sync function (`defer
+    await outside async function`), inside a loop or with more than 8 defers
+    (only the open-coded form exists), `defer await t` of a task value. Panic
+    unwinding skips deferred awaits (a destroyed frame cannot suspend) and runs
+    the plain defers; cancellation does not skip them (cooperative cancel: the
+    awaits inside see it by the usual rules).
+    — `async/defer_await_order`, `async/defer_await_early_exit`,
+    `async/defer_await_handled`, `async/defer_await_panic`,
+    `async/defer_await_cancel`, `async/defer_await_sync_error`,
+    `async/defer_await_fallible_error`, `async/defer_await_loop_error`
 36a. **More of `task`**: `Recv()` fails with `channel closed`; closing wakes
     every waiting receiver, values buffered before `Close` are still delivered;
     a capacity-0 channel hands values over one at a time. `task.WaitGroup`

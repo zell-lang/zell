@@ -1,0 +1,4 @@
+plain defer after
+panicked: true
+plain defer before
+done

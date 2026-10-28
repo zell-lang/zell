@@ -1,0 +1,62 @@
+// test: defer await runs on return, on ? error propagation and on a return out of a labeled loop
+// status: passing
+// run-flags: --leak-check
+namespace spec.async.defer_await_early_exit
+
+import io
+
+async func Release(what string) {
+    await task.Yield()
+    println("release", what)
+}
+
+func Check(n int) int! {
+    if n < 0 {
+        return error("negative")
+    }
+    return n
+}
+
+async func Early(n int) int {
+    defer await Release("early")
+    if n > 0 {
+        return n * 10
+    }
+    println("fell through")
+    return 0
+}
+
+async func Propagate(n int) int! {
+    defer await Release("propagate")
+    var v = Check(n)?
+    println("checked", v)
+    return v
+}
+
+async func Search(rows [][]int, want int) bool {
+    defer await Release("search")
+    outer: for r in rows {
+        for x in r {
+            if x == want {
+                break outer
+            }
+            if x < 0 {
+                return false
+            }
+        }
+    }
+    println("searched")
+    return true
+}
+
+async func main() {
+    println(await Early(2))
+    println(await Early(0))
+    try await Propagate(-1) catch err {
+        println("error:", err.Message())
+    }
+    println(-1)
+    println(try await Propagate(3) else 0)
+    println(await Search([[1, 2], [3]], 2))
+    println(await Search([[1, -1], [3]], 3))
+}

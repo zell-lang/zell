@@ -154,7 +154,7 @@ Next, in this order:
    registration + `workspace/configuration`, incremental analysis per
    namespace; go-to-definition on type aliases.
 5. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md`: generic/local type
-   aliases (20), async `Drop` (27, when a `Close() Task` appears), panics:
+   aliases (20), async `Drop` (27; superseded by `defer await` 2026-10-29, postponed), panics:
    inlined frames in backtraces (28; sync-frame unwinding done 2026-10-25,
    edace29), `Drop` for `database.sql.DB/Tx`; simplify the showcase
    repos to one package on the current syntax.

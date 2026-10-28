@@ -1,0 +1,18 @@
+// error: defer await outside async function
+// status: passing
+namespace spec.async.defer_await_sync_error
+
+import io
+
+async func Close() {
+    await task.Yield()
+}
+
+func Work() {
+    defer await Close()
+    println("body")
+}
+
+async func main() {
+    Work()
+}

@@ -1,0 +1,41 @@
+// test: panic unwinding runs the plain defers and skips the deferred awaits
+// status: passing
+// run-flags: --leak-check
+// A frame unwound by a panic cannot suspend: its `defer await` calls are
+// skipped (their receivers and arguments are released), its plain defers
+// run as usual. Both before the first suspension (the panic ends the task
+// of the caller: here a `task.Go` task) and after it.
+namespace spec.async.defer_await_panic
+
+import io
+
+async func Close(name string) {
+    await task.Yield()
+    println("close", name)
+}
+
+async func After(n int) int! {
+    await task.Yield()
+    defer println("plain defer after")
+    defer await Close("after")
+    var s = [1]
+    println(s[n])
+    return n
+}
+
+async func Before(n int) int {
+    defer println("plain defer before")
+    defer await Close("before")
+    var s = [1]
+    println(s[n])
+    return n
+}
+
+async func main() {
+    try await After(3) catch err {
+        println("panicked:", errors.Is(err, task.ErrPanic))
+    }
+    task.Go(async func() { _ = await Before(4) })
+    await task.Delay(50)
+    println("done")
+}

@@ -191,7 +191,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.fs_mut().no_invoke += 1;
         self.fs_mut().cold += 1;
         self.fs_mut().open_defers = open;
-        let r = self.run_defers();
+        let r = self.run_defers(true);
         if r.is_ok() {
             self.release_locals();
             if let Some((Some(c), _)) = self.fs().plain {

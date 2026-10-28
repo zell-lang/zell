@@ -1,0 +1,16 @@
+// error: defer await cannot be used inside a loop
+// status: passing
+namespace spec.async.defer_await_loop_error
+
+import io
+
+async func Close(i int) {
+    await task.Yield()
+    println("close", i)
+}
+
+async func main() {
+    for i in 0..3 {
+        defer await Close(i)
+    }
+}

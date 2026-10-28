@@ -947,6 +947,9 @@ impl<'a> Sema<'a> {
     /// `DeferArg` temporaries) when [`open_defers_ok`] holds for the body,
     /// else in a synthesized thunk closure capturing the temporaries.
     fn defer_stmt(&mut self, e: &ast::Expr, span: Span, out: &mut Vec<Stmt>) {
+        if let ast::ExprKind::Await(inner) = &expr::strip_parens(e).kind {
+            return self.defer_await(e, inner, span, out);
+        }
         let ast::ExprKind::Call { callee, args } = &expr::strip_parens(e).kind else {
             self.err("defer requires a function call", e.span);
             self.expr(e, None);
@@ -992,15 +995,7 @@ impl<'a> Sema<'a> {
         let ty = call.ty;
         let cspan = call.span;
         let kind = match call.kind {
-            ExprKind::Call { callee, args } => {
-                let callee = match callee {
-                    Callee::Value(v) => Callee::Value(Box::new(self.spill(*v, &mut caps, out, open))),
-                    Callee::Interface { recv, method } => Callee::Interface { recv: Box::new(self.spill(*recv, &mut caps, out, open)), method },
-                    c => c,
-                };
-                let args = args.into_iter().map(|a| self.spill(a, &mut caps, out, open)).collect();
-                ExprKind::Call { callee, args }
-            }
+            ExprKind::Call { callee, args } => self.spill_call(callee, args, &mut caps, out, open),
             ExprKind::Print(items) => ExprKind::Print(
                 items
                     .into_iter()
@@ -1042,6 +1037,70 @@ impl<'a> Sema<'a> {
         let captures = caps.iter().map(|(l, _)| hir::CaptureSource::Local(*l)).collect();
         let fty = self.tt.func(Vec::new(), self.tt.void);
         out.push(Stmt { kind: StmtKind::Defer(mk(ExprKind::Closure { func: fid, captures }, fty, span)), span });
+    }
+
+    /// The callee value or receiver and the arguments of a deferred call,
+    /// evaluated now (see [`spill`](Self::spill)).
+    fn spill_call(&mut self, callee: Callee, args: Vec<hir::Expr>, caps: &mut Vec<(LocalId, TypeId)>, out: &mut Vec<Stmt>, open: bool) -> ExprKind {
+        let callee = match callee {
+            Callee::Value(v) => Callee::Value(Box::new(self.spill(*v, caps, out, open))),
+            Callee::Interface { recv, method } => Callee::Interface { recv: Box::new(self.spill(*recv, caps, out, open)), method },
+            c => c,
+        };
+        let args = args.into_iter().map(|a| self.spill(a, caps, out, open)).collect();
+        ExprKind::Call { callee, args }
+    }
+
+    /// `defer await call` (async functions only): the receiver and the
+    /// arguments are evaluated now, as for `defer`; the await runs at
+    /// function exit, LIFO with the other defers, always open-coded (the
+    /// `Await` sits in the exit block of the coroutine). Skipped on panic
+    /// unwinding (DESIGN.md "Паника").
+    fn defer_await(&mut self, e: &ast::Expr, inner: &ast::Expr, span: Span, out: &mut Vec<Stmt>) {
+        let (is_async, name) = self.fns.last().map(|f| (f.is_async, f.name.clone())).unwrap_or_default();
+        if !is_async {
+            self.err_help(
+                format!("defer await outside async function: {name} is not declared async"),
+                e.span,
+                format!("declare it as `async func {name}(...)`, or defer a synchronous call"),
+            );
+            return;
+        }
+        if !matches!(expr::strip_parens(inner).kind, ast::ExprKind::Call { .. }) {
+            self.err("defer await requires a function call: defer await f(args)", inner.span);
+            self.expr(e, None);
+            return;
+        }
+        if !self.fcx().open_defers {
+            self.err(format!("defer await cannot be used inside a loop or with more than {} defers in one function", hir::MAX_OPEN_DEFERS), e.span);
+            return;
+        }
+        let aw = self.expr(e, None);
+        if self.tt.is_invalid(aw.ty) {
+            return;
+        }
+        if self.tt.is_fallible(aw.ty) {
+            let msg = format!(
+                "result of type {} of a deferred await must be handled: defer an async closure that handles the error (defer await async func() {{ try await f() catch err {{ ... }} }}())",
+                self.tn(aw.ty)
+            );
+            self.err(msg, aw.span);
+            return;
+        }
+        let (ty, aspan) = (aw.ty, aw.span);
+        let ExprKind::Await(task) = aw.kind else {
+            self.err("defer await requires a function call: defer await f(args)", inner.span);
+            return;
+        };
+        let (tty, tspan) = (task.ty, task.span);
+        let ExprKind::Call { callee, args } = task.kind else {
+            self.err("defer await requires a function call: defer await f(args)", inner.span);
+            return;
+        };
+        let mut caps = Vec::new();
+        let call = self.spill_call(callee, args, &mut caps, out, true);
+        let task = mk(call, tty, tspan);
+        out.push(Stmt { kind: StmtKind::Defer(mk(ExprKind::Await(Box::new(task)), ty, aspan)), span });
     }
 
     /// Stores a deferred argument in a temp; returns its upvalue reference
@@ -1111,9 +1170,6 @@ impl<'a> Sema<'a> {
 /// the whole build with `ZELL_NO_OPEN_DEFER=1`.
 pub(crate) fn open_defers_ok(stmts: &[ast::Stmt]) -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *OFF.get_or_init(|| std::env::var_os("ZELL_NO_OPEN_DEFER").is_some()) {
-        return false;
-    }
     // `n` counts the defers seen so far; false once one is in a loop or
     // the count exceeds the limit.
     fn count(stmts: &[ast::Stmt], in_loop: bool, n: &mut usize) -> bool {
@@ -1138,6 +1194,30 @@ pub(crate) fn open_defers_ok(stmts: &[ast::Stmt]) -> bool {
                 Some(ast::ElseBranch::Block(b)) => count(&b.stmts, in_loop, n),
                 None => true,
             }
+    }
+    // `defer await` exists only open-coded, so the switch spares it.
+    fn has_await(stmts: &[ast::Stmt]) -> bool {
+        stmts.iter().any(|s| match &s.kind {
+            ast::StmtKind::Defer(e) => matches!(expr::strip_parens(e).kind, ast::ExprKind::Await(_)),
+            ast::StmtKind::For(f) => has_await(&f.body.stmts),
+            ast::StmtKind::Labeled { stmt, .. } => has_await(std::slice::from_ref(&**stmt)),
+            ast::StmtKind::If(i) => if_await(i),
+            ast::StmtKind::Switch(sw) => sw.cases.iter().any(|c| has_await(&c.body)) || sw.default.as_ref().is_some_and(|d| has_await(d)),
+            ast::StmtKind::Block(b) => has_await(&b.stmts),
+            ast::StmtKind::TryBlock { body, handler, .. } => has_await(&body.stmts) || has_await(&handler.stmts),
+            _ => false,
+        })
+    }
+    fn if_await(i: &ast::IfStmt) -> bool {
+        has_await(&i.then.stmts)
+            || match i.else_.as_deref() {
+                Some(ast::ElseBranch::If(e)) => if_await(e),
+                Some(ast::ElseBranch::Block(b)) => has_await(&b.stmts),
+                None => false,
+            }
+    }
+    if *OFF.get_or_init(|| std::env::var_os("ZELL_NO_OPEN_DEFER").is_some()) && !has_await(stmts) {
+        return false;
     }
     let mut n = 0;
     count(stmts, false, &mut n)

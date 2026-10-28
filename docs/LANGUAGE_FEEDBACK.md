@@ -118,7 +118,7 @@ EBNF and `grammar/zell.bnf` first, then the lexer/parser/sema with spec tests
     interfaces with default methods are forced when the default's `this`
     is typed. `println(1)` no longer loads `reflect`.
 
-27. ⏳ **Ready for the spec (2026-10-25: `sql.Rows.Close()` already returns `Task<void!>`):** **Asynchronous destructors (`await using` analogue).** Synchronous
+27. ↪️ **Superseded by `defer await` (2026-10-29; async `Drop` postponed):** an async function writes `defer await x.Close()` (DESIGN.md "defer"; `Task<void!>` closes go through a deferred async closure that handles the error), which runs on every exit path but not on panic unwinding. The async-destructor design below stays on hold. **Asynchronous destructors (`await using` analogue).** Synchronous
     `using` is already covered by `Drop` (DESIGN.md "Деструкторы"): no
     `defer f.Close()` is needed, and the examples should stop writing it.
     Proposed design when a `Close() Task<…>` first appears in the stdlib:

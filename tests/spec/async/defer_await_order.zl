@@ -1,0 +1,48 @@
+// test: defer await runs at function exit, LIFO with plain defers; arguments are evaluated at the defer
+// status: passing
+// run-flags: --leak-check
+// `defer await f(args)` in an async function: the receiver and the
+// arguments are evaluated when the defer statement runs, the await happens
+// at function exit, last deferred first, interleaved with ordinary defers;
+// the awaited result is discarded.
+namespace spec.async.defer_await_order
+
+import io
+
+interface Shutter {
+    func Close(tag string) Task<int>
+}
+
+struct Conn {
+    name string
+
+    async func Close(tag string) int {
+        await task.Yield()
+        println("close", this.name, tag)
+        return 7
+    }
+}
+
+async func Flush(n int) {
+    await task.Yield()
+    println("flush", n)
+}
+
+async func Run() {
+    var n = 1
+    defer println("sync first")
+    defer await Flush(n)
+    n = 2
+    var c = &Conn{name: "a"}
+    defer await c.Close("method")
+    c = &Conn{name: "b"}
+    var i Shutter = c
+    defer await i.Close("iface")
+    defer println("sync last", n)
+    println("body", n)
+}
+
+async func main() {
+    await Run()
+    println("after")
+}

@@ -1,0 +1,27 @@
+// test: deferred awaits still run when the task is cancelled
+// status: passing
+// run-flags: --leak-check
+// Cancellation is cooperative (DESIGN.md "Отмена"): the cancelled Delay
+// wakes up, the body returns, and the deferred await runs; awaits inside
+// it see the cancellation by the usual rules.
+namespace spec.async.defer_await_cancel
+
+import io
+
+async func Close(name string) {
+    await task.Yield()
+    println("close", name, task.IsCancelled())
+}
+
+async func main() {
+    var c = task.NewCancel()
+    var t = task.SpawnWith(c.Context, async func() int {
+        defer await Close("worker")
+        await task.Delay(10000)
+        println("woke, cancelled:", task.IsCancelled())
+        return 1
+    })
+    await task.Delay(10)
+    c.Cancel()
+    println(await t)
+}

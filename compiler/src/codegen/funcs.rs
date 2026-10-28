@@ -136,7 +136,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // A deferred call that panics unwinds the rest (its landing pads);
         // the release of the locals does not (a `Drop` panicking there
         // must not release them again).
-        self.run_defers()?;
+        self.run_defers(false)?;
         self.without_invokes(|cg| cg.release_locals());
         if self.fs().plain.is_some() {
             self.without_invokes(|cg| cg.plain_async_return());
@@ -158,7 +158,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             if full {
                 self.release_temp_slots();
                 self.fs_mut().open_defers = open;
-                self.run_defers()?;
+                self.run_defers(true)?;
                 self.release_locals();
             }
             self.coro_unwind_exit();
@@ -287,13 +287,17 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// Runs the deferred calls, last first: the open-coded ones (a function
     /// has either kind, never both) each under its armed flag, then the
-    /// heap array.
-    pub(crate) fn run_defers(&mut self) -> R<()> {
+    /// heap array. `unwinding` (a panic's unwind path) skips the deferred
+    /// awaits (`defer await`): a frame being destroyed cannot suspend.
+    pub(crate) fn run_defers(&mut self, unwinding: bool) -> R<()> {
         let open = std::mem::take(&mut self.fs_mut().open_defers);
         for (i, (armed, call)) in open.iter().enumerate().rev() {
             // SAFETY: the pointer was taken from `fs().hir` (a `&'a
             // hir::Function`) by `emit_defer` in this same function body.
             let call: &hir::Expr = unsafe { &**call };
+            if unwinding && matches!(call.kind, hir::ExprKind::Await(_)) {
+                continue;
+            }
             let run = self.block(&format!("defer{i}.run"));
             let next = self.block(&format!("defer{i}.next"));
             let a = self.b.build_load(self.ctx.bool_type(), *armed, "armed").unwrap().into_int_value();
