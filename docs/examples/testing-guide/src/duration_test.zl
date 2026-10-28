@@ -13,6 +13,7 @@ struct Good {
 
 // Table-driven: one row per case, one subtest per row. A failing row is
 // reported by name (TestParse/1h30m) and the other rows still run.
+// t.Must gives the value of Parse, or ends the subtest with the error.
 @test func TestParse(t *testing.T) {
     var cases = [
         Good{In: "45s", Secs: 45},
@@ -23,32 +24,20 @@ struct Good {
     ]
     for c in cases {
         t.Run(c.In, func(t *testing.T) {
-            testing.Equal(t, mustParse(t, c.In), c.Secs)
+            testing.Equal(t, t.Must(Parse(c.In)), c.Secs)
         })
     }
 }
 
-// mustParse is a test helper: it ends the test when parsing fails, so
-// the test body reads as if Parse could not fail.
-func mustParse(t *testing.T, s string) int {
-    var n = try Parse(s) catch err {
-        t.Fatal("Parse(" + strconv.Quote(s) + "): " + err.Message())
-        return 0
-    }
-    return n
-}
-
-// parseError runs Parse on bad input and returns its ParseError. Any
-// other outcome (success, or a different error type) fails the test.
+// parseError runs Parse on bad input and returns its ParseError.
+// t.MustFail ends the test if Parse succeeds (with the file:line of the
+// call); a different error type fails it too.
 func parseError(t *testing.T, s string) ParseError {
     var pe ParseError
-    try Parse(s) catch err {
-        if !errors.As(err, &pe) {
-            t.Fatal("not a ParseError: " + err.Message())
-        }
-        return pe
+    var err = t.MustFail(Parse(s))
+    if !errors.As(err, &pe) {
+        t.Fatal("not a ParseError: " + err.Message())
     }
-    t.Fatal("Parse(" + strconv.Quote(s) + ") succeeded")
     return pe
 }
 
@@ -77,10 +66,11 @@ struct Bad {
 }
 
 // A property instead of examples: formatting and parsing back gives the
-// same number, for every duration in a range.
-@test func TestRoundTrip(t *testing.T) {
+// same number, for every duration in a range. The test returns `void!`,
+// so `?` works in it: an error from Parse fails the test with its trace.
+@test func TestRoundTrip(t *testing.T) void! {
     for secs in 0..10000 {
-        if mustParse(t, Format(secs)) != secs {
+        if Parse(Format(secs))? != secs {
             t.Fatal("round trip failed for " + strconv.Itoa(secs))
         }
     }

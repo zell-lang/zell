@@ -38,14 +38,13 @@ func Parse(s string) int! {
 }
 
 @test func TestParse(t *testing.T) {
-    var n = try Parse("42") catch err {
-        t.Fatal("unexpected error: " + err.Message())
-        return
-    }
-    testing.Equal(t, n, 42)
-    try Parse("x") catch err {
-        testing.Contains(t, err.Message(), "parse")
-    }
+    testing.Equal(t, t.Must(Parse("42")), 42)
+    testing.Contains(t, t.MustFail(Parse("x")).Message(), "parse")
+}
+
+@test func TestParseSum(t *testing.T) void! {
+    var sum = Parse("2")? + Parse("3")?
+    testing.Equal(t, sum, 5)
 }
 
 @test func plainTestsNeedNoHandle() {
@@ -54,6 +53,31 @@ func Parse(s string) int! {
     }
 }
 ```
+
+Code that can fail is tested without `try ... catch` boilerplate:
+
+- `t.Must(f())` returns the value of a `T!` call (`t.Must(save())` with a
+  `void!` result is a statement). If the call fails, the test stops, and
+  its log has the location of the `Must`, the message and the error
+  trace:
+
+  ```text
+      parse_test.zl:12: parse: strconv.Atoi: parsing "x": invalid syntax
+        created at   parse.zl:4        Parse
+        ...
+  ```
+
+- `t.MustFail(f())` returns the error of a call that must fail; if it
+  succeeds, the test stops with `parse_test.zl:13: expected an error`.
+- A test declared `void!` (`func TestX(t *testing.T) void!`, also without
+  parameters or `async`) can use `?`: an error it returns fails the test
+  and is logged as `error: <message>` with its trace, like an uncaught
+  error in `main`.
+
+`t.Must` and `t.MustFail` are the only calls that accept an unhandled
+`T!` argument; anything else still has to handle it with `?` or `try`.
+Their argument may be an `await` in an async test:
+`t.Must(await Fetch())`.
 
 Messages: `Equal(t, got, want)` reports `got X, want Y`;
 `EqualMsg(t, got, want, msg)` is the same with context and reports
@@ -129,10 +153,17 @@ async func fetchAnswer() int {
     return 42
 }
 
+async func fetchPort(s string) int! {
+    await task.Delay(1)
+    return strings.ToInt(s)?("port")
+}
+
 @test
 async func TestFetch(t *testing.T) {
     var n = await fetchAnswer()
     testing.Equal(t, n, 42)
+    testing.Equal(t, t.Must(await fetchPort("8080")), 8080)
+    _ = t.MustFail(await fetchPort("http"))
 }
 ```
 

@@ -11,7 +11,7 @@ benchmark.
 What it shows:
 
 - table-driven tests with a subtest per row (`t.Run`);
-- test helpers that end the test on failure (`mustParse`, `parseError`);
+- `t.Must` / `t.MustFail` for `T!` calls, and a `void!` test that uses `?`;
 - testing a `T!` boundary: the error's type and fields (`errors.As`),
   identity through wrapping (`testing.ErrorIs`), its context, and where
   the code stopped;
@@ -239,13 +239,16 @@ for each row: the row's name appears in the output
 (`TestParse/1h30m`), a failing row does not stop the others, and
 `--filter` selects tests by a regular expression over their names.
 
-**Helpers.** `mustParse` turns "parse or fail the test" into one call,
-so the table loop stays one line. `parseError` is the other side: it
-insists that `Parse` fails, and that the error is a `ParseError`
-(`errors.As` also finds it inside wrappers), and returns it for the test
-to check its fields. A test of a `T!` function is mostly this: decide
-what you check (success, the error's type, its fields, its identity,
-its message) and write the helper once.
+**`T!` in tests.** `t.Must(Parse(c.In))` gives the parsed value, or
+ends the subtest with the `file:line` of the call, the error and its
+trace, so the table loop stays one line. `t.MustFail(Parse(s))` is the
+other side: it gives the error, and ends the test if `Parse` succeeded.
+`parseError` adds the check that the error is a `ParseError`
+(`errors.As` also finds it inside wrappers) and returns it for the test
+to check its fields. A test declared `void!` (`TestRoundTrip`) uses `?`
+directly: an error it returns fails the test like an uncaught error in
+`main`. A test of a `T!` function is mostly this: decide what you check
+(success, the error's type, its fields, its identity, its message).
 
 **A property.** `TestRoundTrip` checks that `Parse(Format(n)) == n` for
 every `n` below 10 000, which catches what a handful of hand-picked
@@ -279,6 +282,7 @@ struct Good {
 
 // Table-driven: one row per case, one subtest per row. A failing row is
 // reported by name (TestParse/1h30m) and the other rows still run.
+// t.Must gives the value of Parse, or ends the subtest with the error.
 @test func TestParse(t *testing.T) {
     var cases = [
         Good{In: "45s", Secs: 45},
@@ -289,32 +293,20 @@ struct Good {
     ]
     for c in cases {
         t.Run(c.In, func(t *testing.T) {
-            testing.Equal(t, mustParse(t, c.In), c.Secs)
+            testing.Equal(t, t.Must(Parse(c.In)), c.Secs)
         })
     }
 }
 
-// mustParse is a test helper: it ends the test when parsing fails, so
-// the test body reads as if Parse could not fail.
-func mustParse(t *testing.T, s string) int {
-    var n = try Parse(s) catch err {
-        t.Fatal("Parse(" + strconv.Quote(s) + "): " + err.Message())
-        return 0
-    }
-    return n
-}
-
-// parseError runs Parse on bad input and returns its ParseError. Any
-// other outcome (success, or a different error type) fails the test.
+// parseError runs Parse on bad input and returns its ParseError.
+// t.MustFail ends the test if Parse succeeds (with the file:line of the
+// call); a different error type fails it too.
 func parseError(t *testing.T, s string) ParseError {
     var pe ParseError
-    try Parse(s) catch err {
-        if !errors.As(err, &pe) {
-            t.Fatal("not a ParseError: " + err.Message())
-        }
-        return pe
+    var err = t.MustFail(Parse(s))
+    if !errors.As(err, &pe) {
+        t.Fatal("not a ParseError: " + err.Message())
     }
-    t.Fatal("Parse(" + strconv.Quote(s) + ") succeeded")
     return pe
 }
 
@@ -343,10 +335,11 @@ struct Bad {
 }
 
 // A property instead of examples: formatting and parsing back gives the
-// same number, for every duration in a range.
-@test func TestRoundTrip(t *testing.T) {
+// same number, for every duration in a range. The test returns `void!`,
+// so `?` works in it: an error from Parse fails the test with its trace.
+@test func TestRoundTrip(t *testing.T) void! {
     for secs in 0..10000 {
-        if mustParse(t, Format(secs)) != secs {
+        if Parse(Format(secs))? != secs {
             t.Fatal("round trip failed for " + strconv.Itoa(secs))
         }
     }
@@ -435,10 +428,7 @@ func fake() Fake {
 // An async test: the runner awaits it.
 @test async func TestTotal(t *testing.T) {
     var f = fake()
-    var total = try await Total(f, ["a", "b", "a"]) catch err {
-        t.Fatal(err.Message())
-        return
-    }
+    var total = t.Must(await Total(f, ["a", "b", "a"]))
     testing.Equal(t, total, 150)
     testing.Equal(t, *f.calls, 3)
 }
@@ -448,24 +438,17 @@ func fake() Fake {
 // stopped at the first failure.
 @test async func TestTotalStopsAtTheFirstError(t *testing.T) {
     var f = fake()
-    try await Total(f, ["a", "missing", "b"]) catch err {
-        testing.ErrorIs(t, err, ErrUnknownStep)
-        testing.Equal(t, err.Message(), "step missing: unknown step")
-        testing.Equal(t, *f.calls, 2)
-        return
-    }
-    t.Fatal("Total succeeded")
+    var err = t.MustFail(await Total(f, ["a", "missing", "b"]))
+    testing.ErrorIs(t, err, ErrUnknownStep)
+    testing.Equal(t, err.Message(), "step missing: unknown step")
+    testing.Equal(t, *f.calls, 2)
 }
 
 @test async func TestTotalReportsTheFailingLayer(t *testing.T) {
     var f = fake()
-    try await Total(f, ["flaky"]) catch err {
-        testing.Contains(t, err.Message(), "connection reset")
-    }
-    try await Total(f, ["bad"]) catch err {
-        // The duration's own error, wrapped with the step's name.
-        testing.Contains(t, err.Message(), "step bad: duration \"1x\": unknown unit")
-    }
+    testing.Contains(t, t.MustFail(await Total(f, ["flaky"])).Message(), "connection reset")
+    // The duration's own error, wrapped with the step's name.
+    testing.Contains(t, t.MustFail(await Total(f, ["bad"])).Message(), "step bad: duration \"1x\": unknown unit")
 }
 
 // The real Memory source, through the interface like main uses it.

@@ -30,10 +30,7 @@ func fake() Fake {
 // An async test: the runner awaits it.
 @test async func TestTotal(t *testing.T) {
     var f = fake()
-    var total = try await Total(f, ["a", "b", "a"]) catch err {
-        t.Fatal(err.Message())
-        return
-    }
+    var total = t.Must(await Total(f, ["a", "b", "a"]))
     testing.Equal(t, total, 150)
     testing.Equal(t, *f.calls, 3)
 }
@@ -43,24 +40,17 @@ func fake() Fake {
 // stopped at the first failure.
 @test async func TestTotalStopsAtTheFirstError(t *testing.T) {
     var f = fake()
-    try await Total(f, ["a", "missing", "b"]) catch err {
-        testing.ErrorIs(t, err, ErrUnknownStep)
-        testing.Equal(t, err.Message(), "step missing: unknown step")
-        testing.Equal(t, *f.calls, 2)
-        return
-    }
-    t.Fatal("Total succeeded")
+    var err = t.MustFail(await Total(f, ["a", "missing", "b"]))
+    testing.ErrorIs(t, err, ErrUnknownStep)
+    testing.Equal(t, err.Message(), "step missing: unknown step")
+    testing.Equal(t, *f.calls, 2)
 }
 
 @test async func TestTotalReportsTheFailingLayer(t *testing.T) {
     var f = fake()
-    try await Total(f, ["flaky"]) catch err {
-        testing.Contains(t, err.Message(), "connection reset")
-    }
-    try await Total(f, ["bad"]) catch err {
-        // The duration's own error, wrapped with the step's name.
-        testing.Contains(t, err.Message(), "step bad: duration \"1x\": unknown unit")
-    }
+    testing.Contains(t, t.MustFail(await Total(f, ["flaky"])).Message(), "connection reset")
+    // The duration's own error, wrapped with the step's name.
+    testing.Contains(t, t.MustFail(await Total(f, ["bad"])).Message(), "step bad: duration \"1x\": unknown unit")
 }
 
 // The real Memory source, through the interface like main uses it.
