@@ -14,7 +14,10 @@ struct Session {
 
 async func main() void! {
     var srv = startServer()?
+    defer srv.stop()
     var c = await redis.Connect("redis://" + srv.addr + "/0")?
+    // closed on every way out, `?` included, before the server stops
+    defer await c.Close()
 
     // strings, counters, a missing key
     await c.Set("greeting", "hello")?
@@ -60,8 +63,6 @@ async func main() void! {
     try await c.Incr("greeting") catch err {
         println("server said:", redis.ErrorCode(err))
     }
-    await c.Close()
-    srv.stop()
 }
 
 // ---- a tiny RESP server (not part of the client) -----------------------------------
