@@ -28,7 +28,8 @@ impl<'a> Sema<'a> {
             // `x.` being typed (recovered with an empty name): check the
             // base for its references and types, report nothing more.
             K::Field { base, name } if name.name.is_empty() => {
-                let _ = self.expr(base, None);
+                let b = self.expr(base, None);
+                self.ide_member_recv(name.span, b.ty);
                 self.invalid(span)
             }
             K::Ident(_) | K::Field { .. } => match Self::flatten_path(e) {
@@ -274,6 +275,7 @@ impl<'a> Sema<'a> {
         if self.tt.is_invalid(base.ty) {
             return self.invalid(name.span);
         }
+        self.ide_member_recv(name.span, base.ty);
         // `f.Name` of an unrolled `reflect.Fields<T>()` variable is a constant.
         if let ExprKind::Local(l) = base.kind {
             if let Some(e) = self.ct_field_const(l, name) {

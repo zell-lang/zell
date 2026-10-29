@@ -96,6 +96,9 @@ pub(crate) struct Fragment {
     /// Keys of the symbols of other fragments it refers to.
     pub ext: Vec<SKey>,
     pub refs: Vec<FRef>,
+    /// Receivers of member accesses: (index into `paths`, name span, type
+    /// in [`Fragment::mini`]); see `SymbolIndex::member_recvs`.
+    pub recvs: Vec<(u32, Span, TypeId)>,
     /// Per own file.
     pub file_infos: Vec<Option<FFileInfo>>,
     /// Member lists of the namespaces of the unit's files.
@@ -170,6 +173,7 @@ pub(crate) fn split(run: &RunOutput, files: &[RunFile], wanted: &dyn Fn(usize) -
             symbols: Vec::new(),
             ext: Vec::new(),
             refs: Vec::new(),
+            recvs: Vec::new(),
             file_infos: Vec::new(),
             ns_members: Vec::new(),
             diags: Vec::new(),
@@ -265,6 +269,14 @@ pub(crate) fn split(run: &RunOutput, files: &[RunFile], wanted: &dyn Fn(usize) -
         let Some(sym) = sref(u, r.symbol) else { continue };
         let file = path_idx[&(u, r.file)];
         out.get_mut(&u).unwrap().refs.push(FRef { file, span: r.span, sym });
+    }
+    for r in &idx.member_recvs {
+        let Some(u) = unit_of(r.file) else { continue };
+        let file = path_idx[&(u, r.file)];
+        let frag = out.get_mut(&u).unwrap();
+        let copier = copiers.entry(u).or_insert_with(|| Copier::new(&run.program, &keys, params, false));
+        let ty = copier.ty(&mut frag.mini, r.ty);
+        frag.recvs.push((file, r.name_span, ty));
     }
     for fi in 0..files.len() {
         let Some(u) = unit_of(fi) else { continue };

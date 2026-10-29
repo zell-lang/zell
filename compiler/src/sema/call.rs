@@ -344,6 +344,7 @@ impl<'a> Sema<'a> {
             self.check_args_loose(args);
             return self.invalid(span);
         }
+        self.ide_member_recv(name.span, base.ty);
         let base = match self.reflect_method_call(base, name, targs, args, span) {
             Ok(e) => return e,
             Err(b) => b,

@@ -9,7 +9,7 @@ use super::{complete_fixes, Analysis};
 use crate::ast;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::hir::Program;
-use crate::sema::index::{self, FileInfo, ImportInfo, Location, Reference, SymKey, Symbol, SymbolId, SymbolIndex, SymbolKind};
+use crate::sema::index::{self, FileInfo, ImportInfo, Location, MemberRecv, Reference, SymKey, Symbol, SymbolId, SymbolIndex, SymbolKind};
 use crate::span::{SourceFile, Span};
 use crate::types::TypeId;
 use std::collections::{HashMap, HashSet};
@@ -58,6 +58,7 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
         }
     }
     let mut by_key: HashMap<SymKey, SymbolId> = std.by_key.clone();
+    let mut recvs: Vec<MemberRecv> = Vec::new();
     let mut refs: Vec<Reference> = Vec::with_capacity(units.iter().map(|u| u.frag.refs.len()).sum::<usize>() + files.len());
     // (A file belongs to one unit and its run de-duplicated its references.)
     let push_ref = |refs: &mut Vec<Reference>, file: usize, span: Span, symbol: SymbolId| {
@@ -221,6 +222,11 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
                 push_ref(&mut refs, u.files[r.file as usize], r.span, id);
             }
         }
+        for &(file, name_span, ty) in &frag.recvs {
+            if let Some(&ty) = u.map.types.get(ty.0 as usize) {
+                recvs.push(MemberRecv { file: u.files[file as usize], name_span, ty });
+            }
+        }
         for (i, info) in frag.file_infos.iter().enumerate() {
             let Some(info) = info else { continue };
             let imports = info
@@ -313,7 +319,8 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
     }
     diagnostics.extend(sema);
     let ok = !diagnostics.iter().any(|d| d.severity == Severity::Error);
-    let index = SymbolIndex::from_parts(symbols, refs, infos, ns_members);
+    let mut index = SymbolIndex::from_parts(symbols, refs, infos, ns_members);
+    index.set_member_recvs(recvs);
     let mut all_files: Vec<Arc<SourceFile>> = files.iter().map(|f| f.source.clone()).collect();
     all_files.extend(std_files.iter().cloned());
     let mut read_only: Vec<bool> = files.iter().map(|f| f.read_only).collect();

@@ -138,6 +138,21 @@ pub struct SymbolIndex {
     pub ns_members: HashMap<String, Vec<(String, SymbolId)>>,
     by_key: HashMap<SymKey, SymbolId>,
     refs_by_symbol: HashMap<SymbolId, Vec<usize>>,
+    /// Receivers of member accesses, sorted by (file, name start): the
+    /// type of `x` in `x.name`, `x.name(...)` and `x.` being typed (empty
+    /// name right after the dot). Member completion lists the members of
+    /// this type ([`SymbolIndex::member_receiver`]).
+    pub member_recvs: Vec<MemberRecv>,
+}
+
+/// The receiver type of one member access (`base.name`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemberRecv {
+    pub file: usize,
+    /// Span of the member name (empty for `x.` being typed).
+    pub name_span: Span,
+    /// Type of `base` (before auto-deref).
+    pub ty: TypeId,
 }
 
 impl SymbolIndex {
@@ -147,6 +162,20 @@ impl SymbolIndex {
 
     pub fn lookup(&self, key: &SymKey) -> Option<SymbolId> {
         self.by_key.get(key).copied()
+    }
+
+    /// The receiver type of the member access whose name starts at `start`
+    /// in `file` (see [`SymbolIndex::member_recvs`]).
+    pub fn member_receiver(&self, file: usize, start: u32) -> Option<TypeId> {
+        let i = self.member_recvs.partition_point(|r| (r.file, r.name_span.start) < (file, start));
+        self.member_recvs.get(i).filter(|r| r.file == file && r.name_span.start == start).map(|r| r.ty)
+    }
+
+    /// Sets [`SymbolIndex::member_recvs`] (sorted, first record per name).
+    pub(crate) fn set_member_recvs(&mut self, mut v: Vec<MemberRecv>) {
+        v.sort_by_key(|r| (r.file, r.name_span.start));
+        v.dedup_by_key(|r| (r.file, r.name_span.start));
+        self.member_recvs = v;
     }
 
     /// References to `id` (not including the declaration itself).
@@ -222,7 +251,7 @@ impl SymbolIndex {
         for (i, r) in references.iter().enumerate() {
             refs_by_symbol.entry(r.symbol).or_default().push(i);
         }
-        SymbolIndex { symbols, references, files, ns_members, by_key, refs_by_symbol }
+        SymbolIndex { symbols, references, files, ns_members, by_key, refs_by_symbol, member_recvs: Vec::new() }
     }
 
     fn add(&mut self, mut s: Symbol) -> SymbolId {
@@ -282,6 +311,7 @@ pub(crate) struct RawDef {
 pub(crate) struct Recorder {
     defs: Vec<RawDef>,
     refs: Vec<(usize, Span, SymKey)>,
+    recvs: Vec<MemberRecv>,
     ns_defined: HashSet<String>,
     /// Local constants by scope position (fn depth, scope, entry).
     local_consts: HashMap<(usize, usize, usize), SymKey>,
@@ -333,6 +363,18 @@ impl<'a> Sema<'a> {
             if span != Span::DUMMY {
                 r.refs.push((file, span, key));
             }
+        }
+    }
+
+    /// Records the receiver type of the member access `base.name` (`name`
+    /// may be empty: `x.` being typed), for member completion.
+    pub(crate) fn ide_member_recv(&mut self, name: Span, ty: TypeId) {
+        let file = self.cur_file;
+        if self.ide_in_std() || name == Span::DUMMY || self.tt.is_invalid(ty) {
+            return;
+        }
+        if let Some(r) = &mut self.ide {
+            r.recvs.push(MemberRecv { file, name_span: name, ty });
         }
     }
 
@@ -860,6 +902,7 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
             idx.symbols[id.0 as usize].container = c;
         }
     }
+    idx.set_member_recvs(rec.recvs);
     let mut seen = HashSet::new();
     for (file, span, key) in rec.refs {
         let Some(sym) = ensure(&mut idx, &key).or_else(|| idx.lookup(&key)) else { continue };

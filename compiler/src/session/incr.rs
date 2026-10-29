@@ -388,6 +388,7 @@ fn empty_fragment(files: &[(&str, &FileState)], u: &Unit) -> Fragment {
         symbols: Vec::new(),
         ext: Vec::new(),
         refs: Vec::new(),
+        recvs: Vec::new(),
         file_infos: vec![None; u.files.len()],
         ns_members: Vec::new(),
         diags: Vec::new(),
