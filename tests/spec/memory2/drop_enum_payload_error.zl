@@ -16,5 +16,5 @@ enum Slot {
 
 func main() {
     var s = Slot.Empty
-    println(s)
+    _ = s
 }

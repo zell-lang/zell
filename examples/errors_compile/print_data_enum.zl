@@ -1,0 +1,13 @@
+// error: value of type Expr cannot be printed
+namespace app
+
+import io
+
+enum Expr {
+    Num(n int)
+    Neg(e *Expr)
+}
+
+func main() {
+    println(Expr.Num(1))
+}

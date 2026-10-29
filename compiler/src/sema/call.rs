@@ -715,7 +715,9 @@ impl<'a> Sema<'a> {
     /// Whether values of `t` can be printed by `println` / formatted.
     fn printable(&self, t: TypeId) -> bool {
         match self.tt.get(t) {
-            Type::Int(_) | Type::Float32 | Type::Float64 | Type::Bool | Type::Char | Type::String | Type::Error | Type::Enum(_) | Type::Any | Type::Invalid => true,
+            Type::Int(_) | Type::Float32 | Type::Float64 | Type::Bool | Type::Char | Type::String | Type::Error | Type::Any | Type::Invalid => true,
+            // An enum with data prints only through its String() method.
+            Type::Enum(d) => self.enums[d.0 as usize].is_plain || self.has_stringer(t),
             // Checked again with the concrete type in each instantiation.
             Type::Param(_) => true,
             Type::Slice(e) | Type::Array(e, _) => self.printable(*e),

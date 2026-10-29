@@ -2694,8 +2694,9 @@ func Handle(words []string) int {
 (nil-указатель печатается `nil`, метод не вызывается); так же печатаются
 элементы срезов, массивов, кортежей и значение в `any`. Значение типа
 `error` печатает `Message()`, даже если у динамического типа есть
-`String()`. Map и прочие структуры по-прежнему не печатаются (`value of
-type T cannot be printed`).
+`String()`. Map, прочие структуры и enum с данными без `String()` не
+печатаются (`value of type T cannot be printed`; простое enum печатает имя
+варианта).
 
 Уровень 2 (`docs/STDLIB.md`; Zell в `compiler/src/sema/stdlib_src/`, C —
 `runtime/ABI.md` §21): `regex` (синтаксис RE2, ленивый DFA + Pike VM,

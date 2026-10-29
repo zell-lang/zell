@@ -154,6 +154,7 @@ const ERROR_KEYWORDS: &[(&str, &str)] = &[
     ("interior_pointer_escape.zl", "cannot keep interior pointer variable `p`"),
     ("log_template_args.zl", "the template has 2 placeholders ({UserId}, {Amount}) but 3 arguments are given"),
     ("missing_return.zl", "missing return"),
+    ("print_data_enum.zl", "value of type Expr cannot be printed"),
     ("question_outside_fallible.zl", "? outside of fallible function"),
     ("std_namespace_declared.zl", "namespace `io` belongs to the standard library"),
     ("type_mismatch.zl", "cannot assign string to int"),
