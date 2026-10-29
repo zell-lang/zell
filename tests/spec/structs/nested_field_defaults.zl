@@ -1,0 +1,20 @@
+// test: an omitted field of struct type gets that struct's field defaults (recursively)
+// status: passing
+namespace spec.structs.nested_field_defaults
+import io
+struct L { N int = 5; S string = "s" }
+struct M { A L; B int = 2 }
+struct C { In L; Mid M; Base int }
+struct E { L }
+func main() {
+    var c = C{}
+    println(c.In.N, c.In.S, c.Mid.A.N, c.Mid.B)
+    var d C
+    println(d.In.N, d.Mid.B)
+    var e = C{In: L{N: 7}}
+    println(e.In.N, e.In.S, e.Mid.A.N)
+    var em = E{}
+    println(em.N)
+    var p = new C
+    println(p.In.N)
+}

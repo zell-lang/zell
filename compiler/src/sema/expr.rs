@@ -936,13 +936,31 @@ impl<'a> Sema<'a> {
     }
 
     /// Field defaults of struct `sid` as literal field inits (scalar
-    /// constants; slice defaults exist only for attribute arguments).
+    /// constants; slice defaults exist only for attribute arguments). A
+    /// field of struct type without a default gets that struct's defaults
+    /// in turn (`struct C { In L }` fills `C{}.In` from `L`).
     pub(crate) fn struct_defaults(&self, sid: u32, span: Span) -> Vec<(u32, hir::Expr)> {
+        self.struct_defaults_at(sid, span, 0)
+    }
+
+    fn struct_defaults_at(&self, sid: u32, span: Span, depth: u32) -> Vec<(u32, hir::Expr)> {
         let mut out = Vec::new();
+        // Recursive value types are reported in resolve; do not loop here.
+        if depth > 64 {
+            return out;
+        }
         for (i, f) in self.structs[sid as usize].fields.iter().enumerate() {
             match &f.default {
-                Some(hir::ConstValue::List(_)) | None => {}
+                Some(hir::ConstValue::List(_)) => {}
                 Some(v) => out.push((i as u32, mk(ExprKind::Const(v.clone()), f.ty, span))),
+                None => {
+                    if let Type::Struct(d) = *self.tt.get(f.ty) {
+                        let fields = self.struct_defaults_at(d.0, span, depth + 1);
+                        if !fields.is_empty() {
+                            out.push((i as u32, mk(ExprKind::StructLit { struct_id: d.0, fields }, f.ty, span)));
+                        }
+                    }
+                }
             }
         }
         out
