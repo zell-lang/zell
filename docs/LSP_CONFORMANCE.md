@@ -120,6 +120,8 @@ Summary: **69 ok, 1 partial, 5 missing, 8 n.a.** (83 rows).
 |---|---|---|---|
 | 20k-line file: analysis + full semantic tokens < 1 s | ok | `robustness_large_files_edit_storms_and_broken_syntax` (~0.1 s for tokens in a debug build) | — |
 | 200 rapid `didChange`: no backlog (`zell/analyzerStatus`) | ok | same test (< 20 analyses started, 0 queued) | — |
+| Incremental analysis: an edit re-checks only the namespaces it reaches, results equal a full analysis | ok | `compiler/tests/incremental.rs` (random edits over `examples/`, `tests/spec/`, a generated project; `scripted_edits_equal_full_analysis`), `session::tests::edits_reanalyse_only_the_units_they_reach` | Per-namespace units keyed by text + dependency export signatures; whole-program checks (lints and unused imports only without errors, `main`) at assembly; see docs/TOOLING.md "Performance". |
+| 232k-line workspace (50 namespaces): body edit < 100 ms to diagnostics | ok | `lsp/tests/server/bench.rs`, `compiler/tests/incremental_bench.rs` (ignored; release) | ~70 ms (was ~158 ms); a signature edit with 25 dependent namespaces ~270 ms (was ~620 ms). |
 | Syntax error at every nesting level: no panic, positioned diagnostics, queries answer | ok | same test, `queries_work_in_a_file_with_syntax_errors` | — |
 | Every example under every query | ok | `every_example_survives_all_queries` | — |
 | A long request does not block others (worker pool over an `Arc` snapshot) | ok | `a_long_request_does_not_block_a_hover`; the server suite in `--release` with 32 test threads | — |
@@ -133,9 +135,16 @@ Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
    with `isIncomplete`, call/statement snippets with `snippetSupport`,
    auto-import items. Left: snippets for generic type arguments,
    postfix completions, ranking by expected type.
-2. **Incremental analysis** (L): every edit re-analyses the whole project
-   (debounced and cancellable, fine at today's sizes); per-namespace
-   invalidation is needed for large workspaces.
+2. ~~**Incremental analysis**~~ — done 2026-10-29 (`compiler/src/session/`):
+   per-namespace units; an edit re-parses its file, a body edit re-checks
+   its namespace, a declaration change also its reverse dependencies, in
+   one run with their dependencies as declarations only; std is indexed
+   once per process. Numbers in docs/TOOLING.md "Performance". Left:
+   assembling the `Analysis` is linear in the project (~30 ms at 232k
+   lines: every unit's symbols and references are copied into one index),
+   and a unit run re-registers the declarations of its whole dependency
+   closure (~35 ms for 49 namespaces); caching the declaration phase per
+   namespace, or a sharded index, would remove both.
 3. ~~**Handlers off the main thread**~~ — done 2026-10-29
    (`lsp/src/snapshot.rs`): analysis requests run on a 2–4 thread pool
    against an `Arc` snapshot, cancellable while running, `ContentModified`
