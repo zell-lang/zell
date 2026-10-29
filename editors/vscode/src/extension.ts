@@ -5,8 +5,10 @@
 // toolchain archive layout `bin/zell-lsp`), `zell lsp`; with none of them
 // an error explains what to install or set. A status bar item shows the
 // analyzer state (`zell/analyzerStatus`). The `zell.*`
-// settings are sent to the server (initialization options and
-// workspace/didChangeConfiguration), which reads `zell.inlayHints.*`.
+// settings reach the server as initialization options, pulled with
+// workspace/configuration and on workspace/didChangeConfiguration; it reads
+// `zell.inlayHints.*`. `}` and Enter format the enclosing block
+// (textDocument/onTypeFormatting, `editor.formatOnType` on by default).
 //
 // Code lens commands sent by the server are executed here:
 // `zell.runTest` / `zell.debugTest` (file URI, test name: `zell test
@@ -128,11 +130,10 @@ function createClient(exe: Executable): LanguageClient {
       { scheme: "untitled", language: "zell" },
     ],
     outputChannel: output,
+    // The server also pulls the `zell` section (workspace/configuration)
+    // and registers its own file watchers (`**/*.zl`, `zell.toml`,
+    // `zell.lock`) through client/registerCapability.
     initializationOptions: serverSettings(),
-    synchronize: {
-      // Created/changed/deleted .zl files -> workspace/didChangeWatchedFiles.
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.zl"),
-    },
   };
   return new LanguageClient("zell", "Zell Language Server", serverOptions, clientOptions);
 }

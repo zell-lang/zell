@@ -138,7 +138,8 @@
     "configurationDefaults": {
       "[zell]": {
         "editor.defaultFormatter": "zell.zell",
-        "editor.formatOnSave": true
+        "editor.formatOnSave": true,
+        "editor.formatOnType": true
       }
     },
     "menus": {
