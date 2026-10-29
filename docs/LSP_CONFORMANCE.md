@@ -9,7 +9,7 @@ to a server). Evidence is a test in `lsp/tests/server.rs`,
 (`server::<name>`), or a source location. Method table and design notes:
 `docs/TOOLING.md` "LSP-сервер".
 
-Summary: **67 ok, 1 partial, 5 missing, 8 n.a.** (81 rows).
+Summary: **69 ok, 1 partial, 5 missing, 8 n.a.** (83 rows).
 
 ## Lifecycle and base protocol
 
@@ -20,7 +20,8 @@ Summary: **67 ok, 1 partial, 5 missing, 8 n.a.** (81 rows).
 | Requests before `initialize` → `ServerNotInitialized` (−32002) | ok | `lifecycle_follows_the_specification` | — |
 | `shutdown`; later requests → `InvalidRequest` | ok | `lifecycle_follows_the_specification` | — |
 | `exit` without `shutdown` → exit code 1 | ok | `lifecycle_follows_the_specification` (`run` returns an error, `main.rs` exits 1) | — |
-| `$/cancelRequest` | ok | `cancel_request_answers_a_waiting_request`, `errors_use_the_protocol_codes` (unknown / answered ids ignored) | Handlers run synchronously on the main thread, so only requests waiting for an analysis can be cancelled; a running handler always answers. |
+| `$/cancelRequest` | ok | `cancel_request_answers_a_waiting_request`, `cancelling_a_running_references_request`, `errors_use_the_protocol_codes` (unknown / answered ids ignored) | — (waiting, parked and running requests; long loops check the flag) |
+| `ContentModified` (−32801) | ok | `an_edit_makes_an_in_flight_request_content_modified`, `every_request_is_answered_once_under_concurrent_edits` | — (an edit stops in-flight requests on that document; project-wide ones on any edit) |
 | Unknown method → `MethodNotFound` | ok | `errors_use_the_protocol_codes` | — |
 | Malformed params → `InvalidParams` | ok | `errors_use_the_protocol_codes` | — |
 | Handler panic → `InternalError`, server keeps running | ok | `handlers.rs` `call` (`catch_unwind`) | No test (no known panicking input). |
@@ -121,6 +122,7 @@ Summary: **67 ok, 1 partial, 5 missing, 8 n.a.** (81 rows).
 | 200 rapid `didChange`: no backlog (`zell/analyzerStatus`) | ok | same test (< 20 analyses started, 0 queued) | — |
 | Syntax error at every nesting level: no panic, positioned diagnostics, queries answer | ok | same test, `queries_work_in_a_file_with_syntax_errors` | — |
 | Every example under every query | ok | `every_example_survives_all_queries` | — |
+| A long request does not block others (worker pool over an `Arc` snapshot) | ok | `a_long_request_does_not_block_a_hover`; the server suite in `--release` with 32 test threads | — |
 
 ## Still missing for a gopls / rust-analyzer level server
 
@@ -134,9 +136,12 @@ Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
 2. **Incremental analysis** (L): every edit re-analyses the whole project
    (debounced and cancellable, fine at today's sizes); per-namespace
    invalidation is needed for large workspaces.
-3. **Handlers off the main thread** (M): long requests (references and
-   workspace symbols on a big project) block other requests and cannot be
-   cancelled once running.
+3. ~~**Handlers off the main thread**~~ — done 2026-10-29
+   (`lsp/src/snapshot.rs`): analysis requests run on a 2–4 thread pool
+   against an `Arc` snapshot, cancellable while running, `ContentModified`
+   on edits; the split is in docs/TOOLING.md. Left: answering position-free
+   requests (workspace symbols) from the previous analysis while a new
+   one runs, which needs both analyses in memory.
 4. ~~**Dynamic registration + workspace folders + `workspace/configuration`**~~
    — done 2026-10-29 (`lsp/src/workspace.rs`).
 5. ~~**Refresh requests**~~ — done 2026-10-29 (`lsp/src/workspace.rs`).

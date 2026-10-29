@@ -110,7 +110,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 |-------|-----------|-----|
 | `textDocument/didOpen`, `didChange`, `didSave`, `didClose` | `textDocumentSync`: `change: Incremental` (2), `save.includeText` | `lib.rs`, `sync.rs` |
 | `initialize`, `shutdown`, `exit` | `positionEncoding`: первая из `utf-8`/`utf-16`/`utf-32` в `general.positionEncodings` клиента, иначе `utf-16` | `lib.rs`, `encoding.rs` |
-| `$/cancelRequest` | — | `lib.rs` |
+| `$/cancelRequest` | — | `lib.rs`, `snapshot.rs` |
 | `textDocument/publishDiagnostics` (push) | — | `lib.rs` |
 | `textDocument/diagnostic`, `workspace/diagnostic` (pull) | `diagnosticProvider { identifier: "zell", interFileDependencies, workspaceDiagnostics }` | `handlers.rs` |
 | `textDocument/definition`, `declaration` (= definition) | `definitionProvider`, `declarationProvider` | `handlers.rs` |
@@ -169,6 +169,44 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
   (−32800). Форматирование, folding и selection range нужны только текст
   и синтаксис — отвечают сразу. `initializationOptions.debug.analysisDelayMs`
   искусственно замедляет анализ (для тестов).
+- **Параллельные запросы** (`lsp/src/snapshot.rs`). Главный цикл владеет
+  изменяемым состоянием (сессия, тексты документов, анализ в полёте) и
+  только читает сообщения, запускает анализ и раздаёт работу; запросы,
+  которым нужен анализ, выполняются в пуле из 2–4 потоков над снимком
+  `Snap`: `Arc<Analysis>` (неизменяемый, `Send + Sync`) и таблицы URI и
+  версий документов за `Arc` (copy-on-write в главном цикле), так что
+  снимок — несколько счётчиков ссылок, без копий. Разделение:
+  - *в пуле*: hover, definition/declaration/typeDefinition/implementation,
+    references, documentHighlight, documentSymbol, workspace/symbol,
+    prepareRename/rename, semanticTokens (full, delta, range), completion
+    и resolve, signatureHelp, inlayHint и resolve, codeAction и resolve,
+    codeLens и resolve, documentLink, callHierarchy (prepare, incoming,
+    outgoing), textDocument/diagnostic, workspace/diagnostic;
+  - *в главном потоке* (последний текст, без анализа или с изменением
+    состояния): formatting, rangeFormatting, onTypeFormatting,
+    foldingRange, selectionRange, workspace/willRenameFiles,
+    `zell/analyzerStatus`, `zell/documentText`, shutdown; все уведомления.
+
+  Запрос, пришедший при устаревшем анализе, ждёт новый (как и раньше), а
+  не отвечает по старому снимку: позиции в запросе — в последнем тексте,
+  поэтому completion/hover/signatureHelp никогда не считаются по чужому
+  смещению; это же правило для запросов без позиции (workspace/symbol,
+  resolve), потому что старый анализ освобождается при старте нового.
+  В пуле у запроса флаг состояния: `$/cancelRequest` — ответ
+  `RequestCancelled` (−32800), правка его документа — `ContentModified`
+  (−32801); правка любого файла проекта останавливает запросы с
+  результатом на весь проект (references, rename, workspace/symbol,
+  incoming/outgoing calls, codeLens/resolve). Поток проверяет флаг перед
+  стартом, в длинных циклах (ссылки, символы, отчёт workspace/diagnostic,
+  правки rename) и перед ответом, так что на запрос всегда отвечает
+  ровно один раз его поток. Запросы по другим документам отвечают по
+  своему снимку. Порядок: уведомления, отправленные до раздачи запроса
+  (`publishDiagnostics` нового анализа), приходят клиенту раньше ответа;
+  ответы разных запросов из пула могут прийти в любом порядке.
+  Кодировка позиций (thread-local) передаётся в снимке.
+  `initializationOptions.debug.requestDelayMs` (`{"метод": мс}`)
+  замедляет обработчики для тестов; `zell/analyzerStatus` показывает
+  `running` — запросы в пуле.
 - **Диагностики**: push или pull, не оба: `initializationOptions.diagnostics.mode`
   = `auto` (по умолчанию: pull, если клиент объявил
   `textDocument.diagnostic`, иначе push), `push` (pull не объявляется) или
