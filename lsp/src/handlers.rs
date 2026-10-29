@@ -1,9 +1,12 @@
-//! Request handlers. Each runs on the main thread against the latest
-//! analysis (requests that arrive while it is stale wait in the queue,
-//! see the crate docs), or against the current text for the text-only
-//! ones, and returns its result or an error.
+//! Request handlers. Those that need the analysis run on the worker pool
+//! against a [`Snap`] (see [`crate::snapshot`]); requests that arrive
+//! while the analysis is stale wait in the queue first (see the crate
+//! docs). The text-only ones (formatting, folding, selection ranges),
+//! `workspace/willRenameFiles` and the server's own requests run on the
+//! main thread against the current text.
 
-use crate::{assist, features, files, hierarchy, lens, nav, path_of, range, Server};
+use crate::snapshot::{Answer, Done, Snap};
+use crate::{assist, features, files, hierarchy, lens, nav, path_of, range, Running, Server};
 use lsp_server::{Request, RequestId};
 use lsp_types::request::Request as _;
 use lsp_types::*;
@@ -19,65 +22,82 @@ type Reply<T> = Result<T, (i32, String)>;
 
 const REQUEST_FAILED: i32 = -32803;
 
+/// Requests whose result spans the project: any edit invalidates them
+/// (`ContentModified`), not only an edit of their document.
+const PROJECT_WIDE: &[&str] = &[
+    request::References::METHOD,
+    request::Rename::METHOD,
+    request::WorkspaceSymbolRequest::METHOD,
+    request::CallHierarchyIncomingCalls::METHOD,
+    request::CallHierarchyOutgoingCalls::METHOD,
+    request::CodeLensResolve::METHOD,
+];
+
 impl Server {
-    /// Runs the handler of `req` and sends its response.
+    /// Runs the handler of `req`: on the pool, or here for the main-thread
+    /// ones, which reply at once.
     pub(crate) fn dispatch(&mut self, req: Request) {
         macro_rules! route {
-            ($($R:ty => $f:expr),* $(,)?) => {
+            ($how:ident: $($R:ty => $f:expr),* $(,)?) => {
                 match req.method.as_str() {
-                    $(<$R>::METHOD => return self.call::<$R>(req, $f),)*
+                    $(<$R>::METHOD => return self.$how::<$R>(req, $f),)*
                     _ => {}
                 }
             };
         }
-        route! {
-            request::HoverRequest => Self::hover,
-            request::GotoDefinition => Self::definition,
-            request::GotoDeclaration => Self::definition,
-            request::GotoTypeDefinition => Self::type_definition,
-            request::GotoImplementation => Self::implementation,
-            request::References => Self::references,
-            request::DocumentSymbolRequest => Self::document_symbols,
-            request::PrepareRenameRequest => Self::prepare_rename,
-            request::Rename => Self::rename,
-            request::SemanticTokensFullRequest => Self::semantic_tokens,
-            request::SemanticTokensFullDeltaRequest => Self::semantic_tokens_delta,
-            request::SemanticTokensRangeRequest => Self::semantic_tokens_range,
+        route! { spawn:
+            request::HoverRequest => Snap::hover,
+            request::GotoDefinition => Snap::definition,
+            request::GotoDeclaration => Snap::definition,
+            request::GotoTypeDefinition => Snap::type_definition,
+            request::GotoImplementation => Snap::implementation,
+            request::References => Snap::references,
+            request::DocumentSymbolRequest => Snap::document_symbols,
+            request::PrepareRenameRequest => Snap::prepare_rename,
+            request::Rename => Snap::rename,
+            request::SemanticTokensFullRequest => Snap::semantic_tokens,
+            request::SemanticTokensFullDeltaRequest => Snap::semantic_tokens_delta,
+            request::SemanticTokensRangeRequest => Snap::semantic_tokens_range,
+            request::Completion => Snap::completion,
+            request::ResolveCompletionItem => Snap::resolve_completion,
+            request::SignatureHelpRequest => Snap::signature_help,
+            request::InlayHintRequest => Snap::inlay_hints,
+            request::InlayHintResolveRequest => Snap::resolve_inlay_hint,
+            request::CodeActionRequest => Snap::code_actions,
+            request::CodeActionResolveRequest => Snap::resolve_code_action,
+            request::CodeLensRequest => Snap::code_lenses,
+            request::CodeLensResolve => Snap::resolve_code_lens,
+            request::DocumentLinkRequest => Snap::document_links,
+            request::WorkspaceSymbolRequest => Snap::workspace_symbols,
+            request::DocumentHighlightRequest => Snap::highlights,
+            request::DocumentDiagnosticRequest => Snap::document_diagnostic,
+            request::CallHierarchyPrepare => Snap::prepare_call_hierarchy,
+            request::CallHierarchyIncomingCalls => Snap::incoming_calls,
+            request::CallHierarchyOutgoingCalls => Snap::outgoing_calls,
+        }
+        route! { call:
             request::FoldingRangeRequest => Self::folding,
             request::SelectionRangeRequest => Self::selection_ranges,
-            request::Completion => Self::completion,
-            request::ResolveCompletionItem => Self::resolve_completion,
-            request::SignatureHelpRequest => Self::signature_help,
-            request::InlayHintRequest => Self::inlay_hints,
-            request::InlayHintResolveRequest => Self::resolve_inlay_hint,
-            request::CodeActionRequest => Self::code_actions,
-            request::CodeActionResolveRequest => Self::resolve_code_action,
-            request::CodeLensRequest => Self::code_lenses,
-            request::CodeLensResolve => Self::resolve_code_lens,
             request::Formatting => Self::formatting,
             request::RangeFormatting => Self::range_formatting,
             request::OnTypeFormatting => Self::on_type_formatting,
-            request::DocumentLinkRequest => Self::document_links,
-            request::WorkspaceSymbolRequest => Self::workspace_symbols,
-            request::DocumentHighlightRequest => Self::highlights,
-            request::DocumentDiagnosticRequest => Self::document_diagnostic,
             request::WillRenameFiles => Self::will_rename_files,
-            request::CallHierarchyPrepare => Self::prepare_call_hierarchy,
-            request::CallHierarchyIncomingCalls => Self::incoming_calls,
-            request::CallHierarchyOutgoingCalls => Self::outgoing_calls,
         }
         match req.method.as_str() {
             request::WorkspaceDiagnosticRequest::METHOD => match serde_json::from_value::<WorkspaceDiagnosticParams>(req.params) {
-                Ok(p) => self.workspace_diagnostic(req.id, p),
+                Ok(p) => self.start(req.id, req.method, None, move |s, sender| s.workspace_diagnostic(p, sender)),
                 Err(e) => self.reply_err(req.id, lsp_server::ErrorCode::InvalidParams as i32, e.to_string()),
             },
             crate::ANALYZER_STATUS => {
+                let mut stats = self.stats;
+                stats.cancelled_requests += self.worker_cancels.load(std::sync::atomic::Ordering::Relaxed);
                 let status = serde_json::json!({
                     "version": self.version,
                     "analysisVersion": self.analysis_version,
                     "inFlight": self.inflight.is_some(),
                     "queued": self.pending.len(),
-                    "stats": self.stats,
+                    "running": self.running.len(),
+                    "stats": stats,
                 });
                 self.reply(req.id, status)
             }
@@ -89,9 +109,10 @@ impl Server {
         }
     }
 
+    /// Runs a main-thread handler and replies.
     fn call<R: request::Request>(&mut self, req: Request, f: fn(&mut Self, R::Params) -> Reply<R::Result>) {
         match serde_json::from_value::<R::Params>(req.params) {
-            // A handler bug answers its request with `InternalError`
+            // A handler bug answers its request with 
             // instead of taking the server down.
             Ok(p) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let t = std::time::Instant::now();
@@ -110,85 +131,60 @@ impl Server {
         }
     }
 
-    /// The analysis plus the file index and byte offset of a position.
-    fn locate(&self, doc: &TextDocumentIdentifier, pos: Option<Position>) -> Option<(Arc<Analysis>, usize, u32)> {
-        let a = self.analysis.clone()?;
-        let file = a.file_index(&path_of(&doc.uri))?;
-        let offset = pos.map(|p| crate::encoding::offset(&a.files[file], p)).unwrap_or(0);
-        Some((a, file, offset))
-    }
-
-    fn location(&self, a: &Analysis, (file, span): nav::Target) -> Option<Location> {
-        Some(Location { uri: self.uri_of(a, file)?, range: range(&a.files[file], span) })
-    }
-
-    // -- navigation ----------------------------------------------------------
-
-    fn hover(&mut self, p: HoverParams) -> Reply<Option<Hover>> {
-        let tdp = p.text_document_position_params;
-        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
-            let sym = a.symbol_at(file, off)?;
-            let value = features::hover_markdown(&a, sym);
-            let r = a.name_span_at(file, off).map(|s| range(&a.files[file], s));
-            Some(Hover { contents: HoverContents::Markup(MarkupContent { kind: MarkupKind::Markdown, value }), range: r })
-        }))
-    }
-
-    fn definition(&mut self, p: GotoDefinitionParams) -> Reply<Option<GotoDefinitionResponse>> {
-        let tdp = p.text_document_position_params;
-        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
-            let loc = a.definition_at(file, off)?;
-            self.location(&a, (loc.file, loc.name_span)).map(GotoDefinitionResponse::Scalar)
-        }))
-    }
-
-    fn type_definition(&mut self, p: GotoDefinitionParams) -> Reply<Option<GotoDefinitionResponse>> {
-        let tdp = p.text_document_position_params;
-        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
-            let t = nav::type_definition(&a, file, off)?;
-            self.location(&a, t).map(GotoDefinitionResponse::Scalar)
-        }))
-    }
-
-    fn implementation(&mut self, p: GotoDefinitionParams) -> Reply<Option<GotoDefinitionResponse>> {
-        let tdp = p.text_document_position_params;
-        Ok(self.locate(&tdp.text_document, Some(tdp.position)).map(|(a, file, off)| {
-            let locs = nav::implementations(&a, file, off).into_iter().filter_map(|t| self.location(&a, t)).collect();
-            GotoDefinitionResponse::Array(locs)
-        }))
-    }
-
-    fn references(&mut self, p: ReferenceParams) -> Reply<Option<Vec<Location>>> {
-        let tdp = p.text_document_position;
-        let include_decl = p.context.include_declaration;
-        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
-            let sym = a.symbol_at(file, off)?;
-            let mut out = Vec::new();
-            if include_decl {
-                if let Some(l) = a.index.symbol(sym).loc {
-                    out.push((l.file, l.name_span));
-                }
+    /// Sends a handler to the pool; the document it is about (if any) is
+    /// recorded so that an edit of it can stop the request.
+    fn spawn<R: request::Request>(&mut self, req: Request, f: fn(&Snap, R::Params) -> Reply<R::Result>) {
+        let doc = req.params.pointer("/textDocument/uri").and_then(|u| u.as_str()).and_then(|u| Url::parse(u).ok()).map(|u| path_of(&u));
+        let doc = if PROJECT_WIDE.contains(&req.method.as_str()) { None } else { doc.or(Some(String::new())) };
+        match serde_json::from_value::<R::Params>(req.params) {
+            Ok(p) => self.start(req.id, req.method, doc, move |s, _| f(s, p).map(|r| Done::Reply(serde_json::to_value(r).unwrap_or_default()))),
+            Err(e) => {
+                eprintln!("zell-lsp: bad params for {}: {e}", req.method);
+                self.reply_err(req.id, lsp_server::ErrorCode::InvalidParams as i32, e.to_string());
             }
-            out.extend(a.references_of(sym).into_iter().map(|r| (r.file, r.span)));
-            Some(out.into_iter().filter_map(|t| self.location(&a, t)).collect())
-        }))
+        }
     }
 
-    fn document_symbols(&mut self, p: DocumentSymbolParams) -> Reply<Option<DocumentSymbolResponse>> {
-        Ok(self.locate(&p.text_document, None).map(|(a, file, _)| {
-            let f = &a.files[file];
-            DocumentSymbolResponse::Nested(a.document_symbols(file).iter().map(|s| features::doc_symbol(f, s)).collect())
-        }))
+    /// Runs `f` on the pool against a snapshot of the latest analysis.
+    /// `doc`: the document whose edit invalidates the request (`None`: any
+    /// edit of the project; the empty string: none).
+    fn start(&mut self, id: RequestId, method: String, doc: Option<String>, f: impl FnOnce(&Snap, &crossbeam_channel::Sender<lsp_server::Message>) -> Reply<Done> + Send + 'static) {
+        let Some(snap) = self.snap() else {
+            return self.reply_err(id, REQUEST_FAILED, "no analysis available (internal error during analysis)");
+        };
+        let delay = std::time::Duration::from_millis(self.request_delay.get(&method).copied().unwrap_or(0));
+        let doc = if method == request::WorkspaceDiagnosticRequest::METHOD { Some(String::new()) } else { doc };
+        self.running.insert(id.clone(), Running { state: snap.state.clone(), doc });
+        let sender = self.sender.clone();
+        let answer = Answer { id, method, sender: sender.clone(), events: self.events.clone(), cancelled: self.worker_cancels.clone(), delay, trace: self.trace != TraceValue::Off };
+        self.pool.run(Box::new(move || answer.run(&snap, |s| f(s, &sender))));
     }
 
-    fn highlights(&mut self, p: DocumentHighlightParams) -> Reply<Option<Vec<DocumentHighlight>>> {
-        let tdp = p.text_document_position_params;
-        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| assist::highlights(&a, file, off)))
+    /// A request on the pool finished; `park`: a `workspace/diagnostic`
+    /// request with nothing new, answered when a report changes.
+    pub(crate) fn finished(&mut self, id: RequestId, park: Option<(u64, WorkspaceDiagnosticParams)>) {
+        let running = self.running.remove(&id);
+        let Some((version, p)) = park else { return };
+        if running.is_some_and(|r| r.state.is_cancelled()) {
+            self.stats.cancelled_requests += 1;
+            return self.reply_err(id, lsp_server::ErrorCode::RequestCanceled as i32, "cancelled");
+        }
+        if version != self.analysis_version && self.fresh() {
+            // A newer analysis came meanwhile: report against it.
+            return self.start(id, request::WorkspaceDiagnosticRequest::METHOD.into(), None, move |s, sender| s.workspace_diagnostic(p, sender));
+        }
+        self.parked.push((id, p));
     }
 
-    fn workspace_symbols(&mut self, p: WorkspaceSymbolParams) -> Reply<Option<WorkspaceSymbolResponse>> {
-        Ok(self.analysis.clone().map(|a| WorkspaceSymbolResponse::Flat(assist::workspace_symbols(&a, &p.query, |f| self.uri_of(&a, f)))))
+    /// Re-runs the parked `workspace/diagnostic` requests against the new
+    /// analysis (answered when their reports changed, else parked again).
+    pub(crate) fn wake_parked(&mut self) {
+        for (id, p) in std::mem::take(&mut self.parked) {
+            self.start(id, request::WorkspaceDiagnosticRequest::METHOD.into(), None, move |s, sender| s.workspace_diagnostic(p, sender));
+        }
     }
+
+    // -- main-thread handlers (the current text) ----------------------------------
 
     fn selection_ranges(&mut self, p: SelectionRangeParams) -> Reply<Option<Vec<SelectionRange>>> {
         let Some(f) = self.current_source(&p.text_document.uri) else { return Ok(None) };
@@ -217,6 +213,134 @@ impl Server {
         ))
     }
 
+    /// `workspace/willRenameFiles`: import and namespace edits for files
+    /// whose path-derived namespace changes (see [`files`]).
+    fn will_rename_files(&mut self, p: RenameFilesParams) -> Reply<Option<WorkspaceEdit>> {
+        let Some(s) = self.snap() else { return Ok(None) };
+        let a = &s.analysis;
+        let moves: Vec<(usize, PathBuf)> = self.renamed_files(&p).into_iter().filter_map(|(old, new)| Some((a.file_index(&old)?, new))).collect();
+        let changes = files::rename_edits(a, &moves, files::derived_namespace, |f| s.uri_of(a, f));
+        Ok((!changes.is_empty()).then(|| s.workspace_edit(changes)))
+    }
+
+    fn folding(&mut self, p: FoldingRangeParams) -> Reply<Option<Vec<FoldingRange>>> {
+        Ok(self.current_source(&p.text_document.uri).map(|f| features::folding_ranges(&f)))
+    }
+
+    fn formatting(&mut self, p: DocumentFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
+        Ok(self.current_source(&p.text_document.uri).and_then(|f| assist::format_edits(&f, None)))
+    }
+
+    fn range_formatting(&mut self, p: DocumentRangeFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
+        Ok(self.current_source(&p.text_document.uri).and_then(|f| assist::format_edits(&f, Some((p.range.start.line, p.range.end.line)))))
+    }
+
+    fn on_type_formatting(&mut self, p: DocumentOnTypeFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
+        let tdp = p.text_document_position;
+        Ok(self.current_source(&tdp.text_document.uri).and_then(|f| assist::on_type_edits(&f, tdp.position, &p.ch)))
+    }
+}
+
+impl Snap {
+    fn workspace_diagnostic(&self, p: WorkspaceDiagnosticParams, sender: &crossbeam_channel::Sender<lsp_server::Message>) -> Reply<Done> {
+        let report = |r| serde_json::to_value(WorkspaceDiagnosticReportResult::Report(r)).unwrap_or_default();
+        Ok(match self.workspace_report(&p.previous_result_ids) {
+            // Partial results: one  per file, then an empty answer.
+            Some(r) if p.partial_result_params.partial_result_token.is_some() => {
+                let token = p.partial_result_params.partial_result_token.clone().unwrap_or(NumberOrString::Number(0));
+                for item in r.items {
+                    let value = WorkspaceDiagnosticReportPartialResult { items: vec![item] };
+                    let params = serde_json::json!({"token": token, "value": value});
+                    let _ = sender.send(lsp_server::Message::Notification(lsp_server::Notification::new("$/progress".into(), params)));
+                }
+                Done::Reply(report(WorkspaceDiagnosticReport { items: Vec::new() }))
+            }
+            Some(r) => Done::Reply(report(r)),
+            None => Done::Park(self.version, p),
+        })
+    }
+
+    /// The analysis plus the file index and byte offset of a position.
+    fn locate(&self, doc: &TextDocumentIdentifier, pos: Option<Position>) -> Option<(Arc<Analysis>, usize, u32)> {
+        let a = self.analysis.clone();
+        let file = a.file_index(&path_of(&doc.uri))?;
+        let offset = pos.map(|p| crate::encoding::offset(&a.files[file], p)).unwrap_or(0);
+        Some((a, file, offset))
+    }
+
+    fn location(&self, a: &Analysis, (file, span): nav::Target) -> Option<Location> {
+        Some(Location { uri: self.uri_of(a, file)?, range: range(&a.files[file], span) })
+    }
+
+    // -- navigation ----------------------------------------------------------
+
+    fn hover(&self, p: HoverParams) -> Reply<Option<Hover>> {
+        let tdp = p.text_document_position_params;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
+            let sym = a.symbol_at(file, off)?;
+            let value = features::hover_markdown(&a, sym);
+            let r = a.name_span_at(file, off).map(|s| range(&a.files[file], s));
+            Some(Hover { contents: HoverContents::Markup(MarkupContent { kind: MarkupKind::Markdown, value }), range: r })
+        }))
+    }
+
+    fn definition(&self, p: GotoDefinitionParams) -> Reply<Option<GotoDefinitionResponse>> {
+        let tdp = p.text_document_position_params;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
+            let loc = a.definition_at(file, off)?;
+            self.location(&a, (loc.file, loc.name_span)).map(GotoDefinitionResponse::Scalar)
+        }))
+    }
+
+    fn type_definition(&self, p: GotoDefinitionParams) -> Reply<Option<GotoDefinitionResponse>> {
+        let tdp = p.text_document_position_params;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
+            let t = nav::type_definition(&a, file, off)?;
+            self.location(&a, t).map(GotoDefinitionResponse::Scalar)
+        }))
+    }
+
+    fn implementation(&self, p: GotoDefinitionParams) -> Reply<Option<GotoDefinitionResponse>> {
+        let tdp = p.text_document_position_params;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).map(|(a, file, off)| {
+            let locs = nav::implementations(&a, file, off).into_iter().filter_map(|t| self.location(&a, t)).collect();
+            GotoDefinitionResponse::Array(locs)
+        }))
+    }
+
+    fn references(&self, p: ReferenceParams) -> Reply<Option<Vec<Location>>> {
+        let tdp = p.text_document_position;
+        let include_decl = p.context.include_declaration;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| {
+            let sym = a.symbol_at(file, off)?;
+            let mut out = Vec::new();
+            if include_decl {
+                if let Some(l) = a.index.symbol(sym).loc {
+                    out.push((l.file, l.name_span));
+                }
+            }
+            out.extend(a.references_of(sym).into_iter().map(|r| (r.file, r.span)));
+            Some(out.into_iter().take_while(|_| !self.stopped()).filter_map(|t| self.location(&a, t)).collect())
+        }))
+    }
+
+    fn document_symbols(&self, p: DocumentSymbolParams) -> Reply<Option<DocumentSymbolResponse>> {
+        Ok(self.locate(&p.text_document, None).map(|(a, file, _)| {
+            let f = &a.files[file];
+            DocumentSymbolResponse::Nested(a.document_symbols(file).iter().map(|s| features::doc_symbol(f, s)).collect())
+        }))
+    }
+
+    fn highlights(&self, p: DocumentHighlightParams) -> Reply<Option<Vec<DocumentHighlight>>> {
+        let tdp = p.text_document_position_params;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| assist::highlights(&a, file, off)))
+    }
+
+    fn workspace_symbols(&self, p: WorkspaceSymbolParams) -> Reply<Option<WorkspaceSymbolResponse>> {
+        let a = &self.analysis;
+        Ok(Some(WorkspaceSymbolResponse::Flat(assist::workspace_symbols(a, &p.query, || self.stopped(), |f| self.uri_of(a, f)))))
+    }
+
     // -- rename ------------------------------------------------------------------
 
     /// The renamable symbol at a position, or a reason why there is none.
@@ -233,23 +357,25 @@ impl Server {
         Ok((sym_id, span))
     }
 
-    fn prepare_call_hierarchy(&mut self, p: CallHierarchyPrepareParams) -> Reply<Option<Vec<CallHierarchyItem>>> {
+    fn prepare_call_hierarchy(&self, p: CallHierarchyPrepareParams) -> Reply<Option<Vec<CallHierarchyItem>>> {
         let tdp = p.text_document_position_params;
-        let v = self.analysis_version;
+        let v = self.version;
         Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| hierarchy::prepare(&a, v, file, off, &|f| self.uri_of(&a, f))))
     }
 
-    fn incoming_calls(&mut self, p: CallHierarchyIncomingCallsParams) -> Reply<Option<Vec<CallHierarchyIncomingCall>>> {
-        let v = self.analysis_version;
-        Ok(self.analysis.clone().and_then(|a| hierarchy::incoming(&a, v, &p.item, &|f| self.uri_of(&a, f))))
+    fn incoming_calls(&self, p: CallHierarchyIncomingCallsParams) -> Reply<Option<Vec<CallHierarchyIncomingCall>>> {
+        let v = self.version;
+        let a = &self.analysis;
+        Ok(hierarchy::incoming(a, v, &p.item, &|f| self.uri_of(a, f)))
     }
 
-    fn outgoing_calls(&mut self, p: CallHierarchyOutgoingCallsParams) -> Reply<Option<Vec<CallHierarchyOutgoingCall>>> {
-        let v = self.analysis_version;
-        Ok(self.analysis.clone().and_then(|a| hierarchy::outgoing(&a, v, &p.item, &|f| self.uri_of(&a, f))))
+    fn outgoing_calls(&self, p: CallHierarchyOutgoingCallsParams) -> Reply<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let v = self.version;
+        let a = &self.analysis;
+        Ok(hierarchy::outgoing(a, v, &p.item, &|f| self.uri_of(a, f)))
     }
 
-    fn prepare_rename(&mut self, p: TextDocumentPositionParams) -> Reply<Option<PrepareRenameResponse>> {
+    fn prepare_rename(&self, p: TextDocumentPositionParams) -> Reply<Option<PrepareRenameResponse>> {
         let Some((a, file, off)) = self.locate(&p.text_document, Some(p.position)) else { return Ok(None) };
         // Nothing to rename here: null (the client says so); a symbol that
         // cannot be renamed: an error with the reason.
@@ -261,7 +387,7 @@ impl Server {
         Ok(Some(PrepareRenameResponse::RangeWithPlaceholder { range: range(&a.files[file], span), placeholder }))
     }
 
-    fn rename(&mut self, p: RenameParams) -> Reply<Option<WorkspaceEdit>> {
+    fn rename(&self, p: RenameParams) -> Reply<Option<WorkspaceEdit>> {
         let tdp = p.text_document_position;
         let Some((a, file, off)) = self.locate(&tdp.text_document, Some(tdp.position)) else { return Ok(None) };
         if !features::is_identifier(&p.new_name) {
@@ -277,6 +403,9 @@ impl Server {
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         let mut seen = HashSet::new();
         for (f, s) in spans {
+            if self.stopped() {
+                break;
+            }
             if !seen.insert((f, s.start)) || a.files[f].text.get(s.start as usize..s.end as usize) != Some(sym.name.as_str()) {
                 continue;
             }
@@ -330,59 +459,38 @@ impl Server {
         WorkspaceEdit { document_changes: Some(DocumentChanges::Edits(docs)), ..Default::default() }
     }
 
-    /// `workspace/willRenameFiles`: import and namespace edits for files
-    /// whose path-derived namespace changes (see [`files`]).
-    fn will_rename_files(&mut self, p: RenameFilesParams) -> Reply<Option<WorkspaceEdit>> {
-        let Some(a) = self.analysis.clone() else { return Ok(None) };
-        let moves: Vec<(usize, PathBuf)> = self.renamed_files(&p).into_iter().filter_map(|(old, new)| Some((a.file_index(&old)?, new))).collect();
-        let changes = files::rename_edits(&a, &moves, files::derived_namespace, |f| self.uri_of(&a, f));
-        Ok((!changes.is_empty()).then(|| self.workspace_edit(changes)))
-    }
-
     // -- semantic tokens ---------------------------------------------------------
 
-    /// Remembers `data` as the last tokens of `key`; returns the result id.
-    fn remember_tokens(&mut self, key: String, data: Vec<SemanticToken>) -> String {
-        self.token_seq += 1;
-        let id = self.token_seq.to_string();
-        self.tokens.insert(key, (id.clone(), data));
-        id
-    }
-
-    fn semantic_tokens(&mut self, p: SemanticTokensParams) -> Reply<Option<SemanticTokensResult>> {
+    fn semantic_tokens(&self, p: SemanticTokensParams) -> Reply<Option<SemanticTokensResult>> {
         let Some((a, file, _)) = self.locate(&p.text_document, None) else { return Ok(None) };
         let data = features::semantic_tokens(&a, file);
-        let result_id = self.remember_tokens(path_of(&p.text_document.uri), data.clone());
+        let (result_id, _) = self.tokens.lock().unwrap_or_else(|e| e.into_inner()).remember(path_of(&p.text_document.uri), data.clone(), None);
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: Some(result_id), data })))
     }
 
     /// Edits from the tokens with `previous_result_id` when the server still
     /// has them, else the full tokens.
-    fn semantic_tokens_delta(&mut self, p: SemanticTokensDeltaParams) -> Reply<Option<SemanticTokensFullDeltaResult>> {
+    fn semantic_tokens_delta(&self, p: SemanticTokensDeltaParams) -> Reply<Option<SemanticTokensFullDeltaResult>> {
         let Some((a, file, _)) = self.locate(&p.text_document, None) else { return Ok(None) };
         let key = path_of(&p.text_document.uri);
         let data = features::semantic_tokens(&a, file);
-        let previous = self.tokens.get(&key).filter(|(id, _)| *id == p.previous_result_id).map(|(_, old)| features::token_edits(old, &data));
-        let result_id = self.remember_tokens(key, data.clone());
+        let (result_id, old) = self.tokens.lock().unwrap_or_else(|e| e.into_inner()).remember(key, data.clone(), Some(&p.previous_result_id));
+        let previous = old.map(|old| features::token_edits(&old, &data));
         Ok(Some(match previous {
             Some(edits) => SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta { result_id: Some(result_id), edits }),
             None => SemanticTokensFullDeltaResult::Tokens(SemanticTokens { result_id: Some(result_id), data }),
         }))
     }
 
-    fn semantic_tokens_range(&mut self, p: SemanticTokensRangeParams) -> Reply<Option<SemanticTokensRangeResult>> {
+    fn semantic_tokens_range(&self, p: SemanticTokensRangeParams) -> Reply<Option<SemanticTokensRangeResult>> {
         Ok(self.locate(&p.text_document, None).map(|(a, file, _)| SemanticTokensRangeResult::Tokens(SemanticTokens { result_id: None, data: features::semantic_tokens_range(&a, file, &p.range) })))
     }
 
     // -- editing assistance --------------------------------------------------------
 
-    fn folding(&mut self, p: FoldingRangeParams) -> Reply<Option<Vec<FoldingRange>>> {
-        Ok(self.current_source(&p.text_document.uri).map(|f| features::folding_ranges(&f)))
-    }
-
-    fn completion(&mut self, p: CompletionParams) -> Reply<Option<CompletionResponse>> {
+    fn completion(&self, p: CompletionParams) -> Reply<Option<CompletionResponse>> {
         let tdp = p.text_document_position;
-        let version = self.analysis_version;
+        let version = self.version;
         Ok(self.locate(&tdp.text_document, Some(tdp.position)).map(|(a, file, off)| {
             let mut list = crate::completion::completions(&a, file, off, self.caps.completion);
             for it in &mut list.items {
@@ -394,21 +502,18 @@ impl Server {
         }))
     }
 
-    fn resolve_completion(&mut self, item: CompletionItem) -> Reply<CompletionItem> {
-        Ok(match self.analysis.clone() {
-            Some(a) => crate::completion::resolve_completion(&a, self.analysis_version, item),
-            None => item,
-        })
+    fn resolve_completion(&self, item: CompletionItem) -> Reply<CompletionItem> {
+        Ok(crate::completion::resolve_completion(&self.analysis, self.version, item))
     }
 
-    fn signature_help(&mut self, p: SignatureHelpParams) -> Reply<Option<SignatureHelp>> {
+    fn signature_help(&self, p: SignatureHelpParams) -> Reply<Option<SignatureHelp>> {
         let tdp = p.text_document_position_params;
         Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| assist::signature_help(&a, file, off)))
     }
 
-    fn inlay_hints(&mut self, p: InlayHintParams) -> Reply<Option<Vec<InlayHint>>> {
+    fn inlay_hints(&self, p: InlayHintParams) -> Reply<Option<Vec<InlayHint>>> {
         let hints = self.hints;
-        let version = self.analysis_version;
+        let version = self.version;
         Ok(self.locate(&p.text_document, None).map(|(a, file, _)| {
             let within = assist::span_of(&a.files[file], &p.range);
             let mut out = assist::inlay_hints(&a, file, within, hints);
@@ -421,14 +526,11 @@ impl Server {
         }))
     }
 
-    fn resolve_inlay_hint(&mut self, hint: InlayHint) -> Reply<InlayHint> {
-        Ok(match self.analysis.clone() {
-            Some(a) => assist::resolve_inlay_hint(&a, self.analysis_version, hint),
-            None => hint,
-        })
+    fn resolve_inlay_hint(&self, hint: InlayHint) -> Reply<InlayHint> {
+        Ok(assist::resolve_inlay_hint(&self.analysis, self.version, hint))
     }
 
-    fn code_actions(&mut self, p: CodeActionParams) -> Reply<Option<CodeActionResponse>> {
+    fn code_actions(&self, p: CodeActionParams) -> Reply<Option<CodeActionResponse>> {
         Ok(self.locate(&p.text_document, None).map(|(a, file, _)| {
             let span = assist::span_of(&a.files[file], &p.range);
             let only = p.context.only.as_deref();
@@ -448,34 +550,21 @@ impl Server {
 
     /// Quick fixes always carry their edit (returned as is); refactorings
     /// listed lazily get theirs here.
-    fn resolve_code_action(&mut self, action: CodeAction) -> Reply<CodeAction> {
-        let Some(a) = self.analysis.clone() else { return Ok(action) };
-        Ok(crate::refactor::resolve(&a, |u| a.file_index(&path_of(u)), action))
+    fn resolve_code_action(&self, action: CodeAction) -> Reply<CodeAction> {
+        let a = &self.analysis;
+        Ok(crate::refactor::resolve(a, |u| a.file_index(&path_of(u)), action))
     }
 
-    fn code_lenses(&mut self, p: CodeLensParams) -> Reply<Option<Vec<CodeLens>>> {
+    fn code_lenses(&self, p: CodeLensParams) -> Reply<Option<Vec<CodeLens>>> {
         Ok(self.locate(&p.text_document, None).map(|(a, file, _)| lens::code_lenses(&a, file, &p.text_document.uri)))
     }
 
-    fn resolve_code_lens(&mut self, l: CodeLens) -> Reply<CodeLens> {
-        let Some(a) = self.analysis.clone() else { return Ok(l) };
-        Ok(lens::resolve_lens(&a, l, |u| a.file_index(&path_of(u)), |f| self.uri_of(&a, f)))
+    fn resolve_code_lens(&self, l: CodeLens) -> Reply<CodeLens> {
+        let a = &self.analysis;
+        Ok(lens::resolve_lens(a, l, |u| a.file_index(&path_of(u)), |f| self.uri_of(a, f)))
     }
 
-    fn formatting(&mut self, p: DocumentFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
-        Ok(self.current_source(&p.text_document.uri).and_then(|f| assist::format_edits(&f, None)))
-    }
-
-    fn range_formatting(&mut self, p: DocumentRangeFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
-        Ok(self.current_source(&p.text_document.uri).and_then(|f| assist::format_edits(&f, Some((p.range.start.line, p.range.end.line)))))
-    }
-
-    fn on_type_formatting(&mut self, p: DocumentOnTypeFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
-        let tdp = p.text_document_position;
-        Ok(self.current_source(&tdp.text_document.uri).and_then(|f| assist::on_type_edits(&f, tdp.position, &p.ch)))
-    }
-
-    fn document_links(&mut self, p: DocumentLinkParams) -> Reply<Option<Vec<DocumentLink>>> {
+    fn document_links(&self, p: DocumentLinkParams) -> Reply<Option<Vec<DocumentLink>>> {
         Ok(self.locate(&p.text_document, None).map(|(a, file, _)| crate::links::document_links(&a, file, |f| self.uri_of(&a, f))))
     }
 
@@ -490,7 +579,7 @@ impl Server {
         (format!("{:016x}", h.finish()), items)
     }
 
-    fn document_diagnostic(&mut self, p: DocumentDiagnosticParams) -> Reply<DocumentDiagnosticReportResult> {
+    fn document_diagnostic(&self, p: DocumentDiagnosticParams) -> Reply<DocumentDiagnosticReportResult> {
         let (result_id, items) = match self.locate(&p.text_document, None) {
             Some((a, file, _)) => self.report(&a, file),
             None => self.report_of_nothing(),
@@ -511,10 +600,13 @@ impl Server {
     /// unchanged (the request then stays parked until a report changes,
     /// so clients that re-request at once do not spin).
     fn workspace_report(&self, previous: &[PreviousResultId]) -> Option<WorkspaceDiagnosticReport> {
-        let a = self.analysis.clone()?;
+        let a = self.analysis.clone();
         let mut items = Vec::new();
         let mut changed = false;
         for i in 0..a.files.len() {
+            if self.stopped() {
+                return None;
+            }
             if a.is_read_only(i) {
                 continue;
             }
@@ -545,30 +637,5 @@ impl Server {
             }
         }
         changed.then_some(WorkspaceDiagnosticReport { items })
-    }
-
-    fn workspace_diagnostic(&mut self, id: RequestId, p: WorkspaceDiagnosticParams) {
-        match self.workspace_report(&p.previous_result_ids) {
-            // Partial results: one `$/progress` per file, then an empty answer.
-            Some(r) if p.partial_result_params.partial_result_token.is_some() => {
-                let token = p.partial_result_params.partial_result_token.unwrap_or(NumberOrString::Number(0));
-                for item in r.items {
-                    let value = WorkspaceDiagnosticReportPartialResult { items: vec![item] };
-                    let params = serde_json::json!({"token": token, "value": value});
-                    let _ = self.sender.send(lsp_server::Message::Notification(lsp_server::Notification::new("$/progress".into(), params)));
-                }
-                self.reply(id, WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items: Vec::new() }))
-            }
-            Some(r) => self.reply(id, WorkspaceDiagnosticReportResult::Report(r)),
-            None => self.parked.push((id, p)),
-        }
-    }
-
-    /// Answers the parked `workspace/diagnostic` requests whose reports
-    /// changed with the new analysis.
-    pub(crate) fn wake_parked(&mut self) {
-        for (id, p) in std::mem::take(&mut self.parked) {
-            self.workspace_diagnostic(id, p);
-        }
     }
 }

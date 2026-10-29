@@ -722,11 +722,15 @@ fn fuzzy(query: &str, name: &str) -> bool {
     query.chars().flat_map(|c| c.to_lowercase()).all(|q| cs.any(|c| c == q))
 }
 
-/// Declarations of the workspace matching `query`.
+/// Declarations of the workspace matching `query` (the search ends early,
+/// incomplete, when `stop` says so).
 #[allow(deprecated)]
-pub(crate) fn workspace_symbols(a: &Analysis, query: &str, uri_of: impl Fn(usize) -> Option<Url>) -> Vec<SymbolInformation> {
+pub(crate) fn workspace_symbols(a: &Analysis, query: &str, stop: impl Fn() -> bool, uri_of: impl Fn(usize) -> Option<Url>) -> Vec<SymbolInformation> {
     let mut out: Vec<(usize, SymbolInformation)> = Vec::new();
-    for s in &a.index.symbols {
+    for (i, s) in a.index.symbols.iter().enumerate() {
+        if i % 1024 == 0 && stop() {
+            break;
+        }
         let Some(loc) = s.loc else { continue };
         if !workspace_kind(s.kind) || matches!(s.key, zell::sema::index::SymKey::LocalConst(..)) || !fuzzy(query, &s.name) {
             continue;

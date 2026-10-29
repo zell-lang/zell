@@ -4,9 +4,10 @@
 //! The client lists the encodings it supports in order of preference; the
 //! server takes the first of UTF-8, UTF-16 and UTF-32 in that list, else
 //! UTF-16 (which every client must support). The choice is per server
-//! thread: every handler runs on the thread that called [`crate::run`],
-//! so it is kept in a thread-local set once by [`set`] (servers running
-//! side by side in tests do not share it).
+//! server: it is kept in a thread-local set by [`set`] on the thread that
+//! called [`crate::run`], and by each pool worker before it runs a request
+//! of that server ([`crate::snapshot::Snap`] carries it), so servers
+//! running side by side in tests do not share it.
 
 use lsp_types::{InitializeParams, Position, PositionEncodingKind};
 use std::cell::Cell;
@@ -50,6 +51,11 @@ impl Encoding {
 }
 
 /// Makes `e` the encoding of this thread's server.
+/// The encoding of this thread's server.
+pub(crate) fn get() -> Encoding {
+    CURRENT.with(Cell::get)
+}
+
 pub(crate) fn set(e: Encoding) {
     CURRENT.with(|c| c.set(e));
 }

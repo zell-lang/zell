@@ -32,7 +32,11 @@
 //! analysis of the latest text: while it is not ready they wait in a
 //! queue, from which `$/cancelRequest` removes them (answered with
 //! `RequestCancelled`). Requests that only need the text and its syntax
-//! (formatting, folding, selection ranges) are answered at once.
+//! (formatting, folding, selection ranges) are answered at once on the
+//! main thread. The others run on a worker pool against a read-only
+//! snapshot (see [`snapshot`]), so a long request does not block the main
+//! loop; `$/cancelRequest` stops them (`RequestCancelled`), and an edit
+//! stops those whose result it invalidates (`ContentModified`).
 
 mod assist;
 mod completion;
@@ -45,6 +49,7 @@ mod lens;
 mod links;
 mod nav;
 mod refactor;
+mod snapshot;
 mod sync;
 mod workspace;
 
@@ -57,7 +62,7 @@ use zell::session::{Analysis, Session};
 use zell::span::Span;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -101,7 +106,7 @@ enum DiagMode {
 
 /// What the client supports (from `initialize`).
 #[derive(Clone, Copy, Debug, Default)]
-struct ClientCaps {
+pub(crate) struct ClientCaps {
     work_done_progress: bool,
     pull_diagnostics: bool,
     diagnostic_refresh: bool,
@@ -188,6 +193,10 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn std::error::Error + Sen
         if let Some(ms) = opts.pointer("/debug/analysisDelayMs").and_then(|v| v.as_u64()) {
             server.analysis_delay = Duration::from_millis(ms);
         }
+        // Test hook: {"method": ms} slows the handlers of those requests.
+        if let Some(m) = opts.pointer("/debug/requestDelayMs").and_then(|v| v.as_object()) {
+            server.request_delay = m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_u64()?))).collect();
+        }
     }
     server.trace = params.trace.unwrap_or(TraceValue::Off);
     server.initial_index(&params);
@@ -226,6 +235,9 @@ fn event_loop(connection: &Connection, server: &mut Server, events: &Receiver<Ev
                         }
                         for r in std::mem::take(&mut server.pending) {
                             server.reply_err(r.id, lsp_server::ErrorCode::RequestCanceled as i32, "the server is shutting down");
+                        }
+                        for r in server.running.values() {
+                            r.state.cancel();
                         }
                         server.reply(req.id, ());
                         shut_down = true;
@@ -315,12 +327,22 @@ pub fn capabilities() -> ServerCapabilities {
     }
 }
 
-/// Messages from analysis workers to the main loop.
-enum Event {
+/// Messages from analysis and request workers to the main loop.
+pub(crate) enum Event {
     Analyzed { version: u64, outcome: Outcome },
+    /// A request on the pool was answered (or is to be parked: see
+    /// [`Server::finished`]).
+    Finished(RequestId, Option<(u64, WorkspaceDiagnosticParams)>),
 }
 
-enum Outcome {
+/// A request on the pool: its state, and the document whose edit
+/// invalidates it (`None`: any edit of the project; empty: none).
+pub(crate) struct Running {
+    state: snapshot::ReqState,
+    doc: Option<String>,
+}
+
+pub(crate) enum Outcome {
     Done(Box<Analysis>),
     Cancelled,
     Panicked,
@@ -371,22 +393,28 @@ struct Server {
     pending: VecDeque<Request>,
     /// Parked `workspace/diagnostic` requests: answered when a report changes.
     parked: Vec<(RequestId, WorkspaceDiagnosticParams)>,
+    /// Requests running (or queued) on the worker pool.
+    running: HashMap<RequestId, Running>,
+    pool: snapshot::Pool,
+    /// Requests cancelled on the pool (added to `stats`).
+    worker_cancels: Arc<AtomicU64>,
+    /// Test hook: per-method delay of the handlers (`debug.requestDelayMs`).
+    request_delay: HashMap<String, u64>,
     /// Texts of open documents (the editor's copy; parsed on flush).
     docs: HashMap<String, String>,
     /// Versions of open documents (from `didOpen` / `didChange`).
-    doc_versions: HashMap<String, i32>,
+    doc_versions: Arc<HashMap<String, i32>>,
     /// Open documents whose text the session has not parsed yet.
     unflushed: HashSet<String>,
     roots: Vec<PathBuf>,
     /// Session path -> URI the client knows the file by.
-    uris: HashMap<String, Url>,
+    uris: Arc<HashMap<String, Url>>,
     /// URIs that got non-empty diagnostics last time.
     /// URIs published last time, with a hash of what was sent (files whose
     /// diagnostics did not change are not published again).
     published: HashMap<Url, u64>,
     /// Last semantic tokens per document: (result id, tokens).
-    tokens: HashMap<String, (String, Vec<SemanticToken>)>,
-    token_seq: u64,
+    tokens: Arc<std::sync::Mutex<snapshot::Tokens>>,
     /// Progress token of the initial indexing, ended by the first analysis.
     indexing: Option<NumberOrString>,
     next_server_request: i32,
@@ -450,14 +478,17 @@ impl Server {
             dirty: None,
             pending: VecDeque::new(),
             parked: Vec::new(),
+            running: HashMap::new(),
+            pool: snapshot::Pool::new(),
+            worker_cancels: Arc::default(),
+            request_delay: HashMap::new(),
             docs: HashMap::new(),
-            doc_versions: HashMap::new(),
+            doc_versions: Arc::default(),
             unflushed: HashSet::new(),
             roots: Vec::new(),
-            uris: HashMap::new(),
+            uris: Arc::default(),
             published: HashMap::new(),
-            tokens: HashMap::new(),
-            token_seq: 0,
+            tokens: Arc::default(),
             indexing: None,
             next_server_request: 0,
             hints: assist::HintSettings::default(),
@@ -522,7 +553,7 @@ impl Server {
                 continue;
             }
             if let (Ok(text), Ok(uri)) = (std::fs::read_to_string(&p), Url::from_file_path(&p)) {
-                self.uris.insert(key.clone(), uri);
+                Arc::make_mut(&mut self.uris).insert(key.clone(), uri);
                 self.session.update_file(key, text);
             }
         }
@@ -548,7 +579,7 @@ impl Server {
             for f in files {
                 let key = f.display().to_string();
                 if let (Ok(text), Ok(uri)) = (std::fs::read_to_string(&f), Url::from_file_path(&f)) {
-                    self.uris.insert(key.clone(), uri);
+                    Arc::make_mut(&mut self.uris).insert(key.clone(), uri);
                     self.session.update_file(key.clone(), text);
                     self.session.set_read_only(&key, true);
                 }
@@ -595,6 +626,34 @@ impl Server {
         if let Some(f) = &self.inflight {
             f.cancel.store(true, Ordering::Relaxed);
         }
+        // Requests on the pool whose result the change invalidates answer
+        // `ContentModified`: project-wide ones on any change, the others on
+        // a change of their document.
+        for r in self.running.values() {
+            if r.doc.as_ref().is_none_or(|d| self.unflushed.contains(d)) {
+                r.state.modified();
+            }
+        }
+    }
+
+    /// A read-only snapshot of the latest analysis for a request.
+    pub(crate) fn snap(&self) -> Option<snapshot::Snap> {
+        Some(snapshot::Snap {
+            analysis: self.analysis.clone()?,
+            version: self.analysis_version,
+            uris: self.uris.clone(),
+            doc_versions: self.doc_versions.clone(),
+            caps: self.caps,
+            hints: self.hints,
+            tokens: self.tokens.clone(),
+            state: snapshot::ReqState::default(),
+            encoding: encoding::get(),
+        })
+    }
+
+    /// Forgets the semantic tokens of `key`.
+    pub(crate) fn forget_tokens(&self, key: &str) {
+        self.tokens.lock().unwrap_or_else(|e| e.into_inner()).forget(key);
     }
 
     fn fresh(&self) -> bool {
@@ -668,7 +727,10 @@ impl Server {
     }
 
     fn on_event(&mut self, ev: Event) {
-        let Event::Analyzed { version, outcome } = ev;
+        let (version, outcome) = match ev {
+            Event::Analyzed { version, outcome } => (version, outcome),
+            Event::Finished(id, park) => return self.finished(id, park),
+        };
         let mut started = None;
         if self.inflight.as_ref().is_some_and(|f| f.version == version) {
             started = self.inflight.take().map(|f| f.started);
@@ -737,20 +799,25 @@ impl Server {
         }
     }
 
-    /// `$/cancelRequest`: a request still waiting is answered with
-    /// `RequestCancelled` (answered ones are not affected).
+    /// `$/cancelRequest`: a request still waiting (or parked) is answered
+    /// with `RequestCancelled` here, one on the pool by its worker
+    /// (answered ones are not affected).
     fn cancel_request(&mut self, id: RequestId) {
         let waiting = self.pending.iter().position(|r| r.id == id).map(|i| self.pending.remove(i).map(|r| r.id));
         let parked = self.parked.iter().position(|p| p.0 == id).map(|i| Some(self.parked.remove(i).0));
         if let Some(Some(id)) = waiting.or(parked) {
             self.stats.cancelled_requests += 1;
             self.reply_err(id, lsp_server::ErrorCode::RequestCanceled as i32, "cancelled");
+        } else if let Some(r) = self.running.get(&id) {
+            // Its worker answers (see `snapshot`).
+            r.state.cancel();
         }
     }
 
     fn publish(&mut self) {
         use std::hash::{Hash, Hasher};
-        let Some(a) = &self.analysis else { return };
+        let Some(snap) = self.snap() else { return };
+        let a = &snap.analysis;
         let mut by_file: Vec<Vec<&zell::diagnostics::Diagnostic>> = vec![Vec::new(); a.files.len()];
         for d in &a.diagnostics {
             if let Some(v) = by_file.get_mut(d.file) {
@@ -784,7 +851,7 @@ impl Server {
             if self.published.get(uri) == Some(&h) {
                 continue;
             }
-            let diags: Vec<Diagnostic> = by_file[i].iter().map(|d| self.to_lsp_diag(a, d)).collect();
+            let diags: Vec<Diagnostic> = by_file[i].iter().map(|d| snap.to_lsp_diag(a, d)).collect();
             out.push(PublishDiagnosticsParams { uri: uri.clone(), diagnostics: diags, version: self.doc_versions.get(&f.path).copied() });
         }
         for uri in self.published.keys() {
@@ -796,59 +863,6 @@ impl Server {
         for p in out {
             self.notify::<notification::PublishDiagnostics>(p);
         }
-    }
-
-    /// The LSP diagnostics of file `i` (none for library files).
-    fn file_diagnostics(&self, a: &Analysis, i: usize) -> Vec<Diagnostic> {
-        if a.is_read_only(i) {
-            return Vec::new();
-        }
-        a.diagnostics_for(i).map(|d| self.to_lsp_diag(a, d)).collect()
-    }
-
-    fn to_lsp_diag(&self, a: &Analysis, d: &zell::diagnostics::Diagnostic) -> Diagnostic {
-        let file = &a.files[d.file];
-        let mut message = d.message.clone();
-        let mut related = Vec::new();
-        for (note, span) in &d.notes {
-            match (span, self.uris.get(&file.path)) {
-                (Some(s), Some(uri)) => related.push(DiagnosticRelatedInformation { location: Location { uri: uri.clone(), range: range(file, *s) }, message: note.clone() }),
-                _ => message.push_str(&format!("\nnote: {note}")),
-            }
-        }
-        // Notes about other files (e.g. the other declaration of a duplicate).
-        for (note, other, s) in &d.related {
-            match (a.files.get(*other), self.uri_of(a, *other)) {
-                (Some(f), Some(uri)) => related.push(DiagnosticRelatedInformation { location: Location { uri, range: range(f, *s) }, message: note.clone() }),
-                _ => message.push_str(&format!("\nnote: {note}")),
-            }
-        }
-        // The quick fixes travel with the diagnostic: `codeAction` uses them
-        // when the document is still at this version.
-        let data = (!d.fixes.is_empty()).then(|| assist::fixes_data(file, &d.fixes, self.doc_versions.get(&file.path).copied()));
-        Diagnostic {
-            range: range(file, d.span),
-            severity: Some(match d.severity {
-                zell::diagnostics::Severity::Error => DiagnosticSeverity::ERROR,
-                zell::diagnostics::Severity::Warning => DiagnosticSeverity::WARNING,
-                zell::diagnostics::Severity::Info => DiagnosticSeverity::INFORMATION,
-                zell::diagnostics::Severity::Hint => DiagnosticSeverity::HINT,
-            }),
-            source: Some("zell".into()),
-            code: d.code.map(|c| NumberOrString::String(c.into())),
-            message,
-            related_information: (!related.is_empty()).then_some(related),
-            // Unused code is faded out by editors.
-            tags: (matches!(d.code, Some(zell::diagnostics::codes::UNUSED_VARIABLE | zell::diagnostics::codes::UNUSED_IMPORT)) || d.code.and_then(zell::sema::lint::lint).is_some_and(|l| l.unnecessary))
-                .then(|| vec![DiagnosticTag::UNNECESSARY]),
-            data,
-            ..Default::default()
-        }
-    }
-
-    fn uri_of(&self, a: &Analysis, file: usize) -> Option<Url> {
-        let path = &a.files.get(file)?.path;
-        self.uris.get(path).cloned().or_else(|| Url::from_file_path(path).ok())
     }
 
     // -- messages ------------------------------------------------------------
@@ -923,8 +937,8 @@ impl Server {
                     }
                     self.discover_for(&path);
                 }
-                self.uris.insert(key.clone(), p.text_document.uri);
-                self.doc_versions.insert(key.clone(), p.text_document.version);
+                Arc::make_mut(&mut self.uris).insert(key.clone(), p.text_document.uri);
+                Arc::make_mut(&mut self.doc_versions).insert(key.clone(), p.text_document.version);
                 self.docs.insert(key.clone(), p.text_document.text);
                 self.unflushed.insert(key);
                 self.touch();
@@ -939,7 +953,7 @@ impl Server {
                     return;
                 }
                 let Some(text) = self.docs.get_mut(&key) else { return };
-                self.doc_versions.insert(key.clone(), p.text_document.version);
+                Arc::make_mut(&mut self.doc_versions).insert(key.clone(), p.text_document.version);
                 for change in p.content_changes {
                     sync::apply_change(text, change);
                 }
@@ -979,10 +993,10 @@ impl Server {
                     }
                     if ev.typ == FileChangeType::DELETED {
                         self.session.remove_file(&key);
-                        self.uris.remove(&key);
+                        Arc::make_mut(&mut self.uris).remove(&key);
                     } else if self.in_roots(&path) || self.session.contains(&key) {
                         if let Ok(text) = std::fs::read_to_string(&path) {
-                            self.uris.insert(key.clone(), ev.uri);
+                            Arc::make_mut(&mut self.uris).insert(key.clone(), ev.uri);
                             self.session.update_file(key, text);
                         }
                     }
@@ -1013,8 +1027,8 @@ impl Server {
             notification::DidCloseTextDocument::METHOD => {
                 let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else { return };
                 let key = path_of(&p.text_document.uri);
-                self.tokens.remove(&key);
-                self.doc_versions.remove(&key);
+                self.forget_tokens(&key);
+                Arc::make_mut(&mut self.doc_versions).remove(&key);
                 if self.docs.remove(&key).is_none() {
                     return;
                 }
@@ -1063,11 +1077,11 @@ impl Server {
             let read_only = self.session.is_read_only(&old);
             self.session.remove_file(&old);
             self.unflushed.remove(&old);
-            self.uris.remove(&old);
-            self.tokens.remove(&old);
+            Arc::make_mut(&mut self.uris).remove(&old);
+            self.forget_tokens(&old);
             if let Some(text) = text {
                 if let Ok(uri) = Url::from_file_path(&new) {
-                    self.uris.insert(new_key.clone(), uri);
+                    Arc::make_mut(&mut self.uris).insert(new_key.clone(), uri);
                 }
                 self.session.update_file(new_key.clone(), text);
                 self.session.set_read_only(&new_key, read_only);

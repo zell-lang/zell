@@ -11,6 +11,7 @@ use lsp_types::*;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use zell::sema::index::SymbolKind;
 use zell::session::Analysis;
 
@@ -90,8 +91,8 @@ impl Server {
         let keys: Vec<String> = self.session.paths().filter(|k| Path::new(k).starts_with(root) && !self.docs.contains_key(*k)).map(str::to_string).collect();
         for k in keys {
             self.session.remove_file(&k);
-            self.uris.remove(&k);
-            self.tokens.remove(&k);
+            Arc::make_mut(&mut self.uris).remove(&k);
+            self.forget_tokens(&k);
         }
         self.touch();
     }
@@ -107,7 +108,7 @@ impl Server {
             let keys: Vec<String> = self.session.paths().filter(|k| libs.iter().any(|l| Path::new(k).starts_with(l)) && self.session.is_read_only(k)).map(str::to_string).collect();
             for k in keys {
                 self.session.remove_file(&k);
-                self.uris.remove(&k);
+                Arc::make_mut(&mut self.uris).remove(&k);
             }
             self.add_dependencies(&root);
         }
