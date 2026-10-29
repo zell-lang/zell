@@ -15,11 +15,16 @@
 // <package or file> --filter ^Name$ -v` as a task), `zell.run` (file URI:
 // `zell run`) and `zell.showReferences` (URI, position, locations: the
 // references peek view).
+//
+// `Zell: Change signature…` (`zell.changeSignatureUI`) edits the
+// parameter list of the function under the cursor in an input box and
+// sends the server's `zell.changeSignature` command (docs/TOOLING.md),
+// applying the returned workspace edit.
 
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, State } from "vscode-languageclient/node";
+import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, State, WorkspaceEdit as LspWorkspaceEdit } from "vscode-languageclient/node";
 import { registerDebugging } from "./debug";
 
 let client: LanguageClient | undefined;
@@ -246,6 +251,96 @@ async function showReferences(uri: string, position: LspPosition, locations: Lsp
   await vscode.commands.executeCommand("editor.action.showReferences", vscode.Uri.parse(uri), toPos(position), locs);
 }
 
+/** Splits `text` at commas outside brackets. */
+function splitTopLevel(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (const c of text) {
+    if ("([{".includes(c)) depth++;
+    if (")]}".includes(c)) depth--;
+    if (c === "," && depth === 0) {
+      out.push(cur);
+      cur = "";
+    } else {
+      cur += c;
+    }
+  }
+  if (cur.trim() !== "") out.push(cur);
+  return out.map((p) => p.trim()).filter((p) => p !== "");
+}
+
+/** The parameter list text of the declaration at `loc` (inside its parentheses). */
+async function declaredParams(loc: vscode.Location): Promise<string | undefined> {
+  const doc = await vscode.workspace.openTextDocument(loc.uri);
+  const text = doc.getText();
+  const open = text.indexOf("(", doc.offsetAt(loc.range.start));
+  if (open < 0) return undefined;
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    if (text[i] === ")" && --depth === 0) return text.slice(open + 1, i).replace(/\s+/g, " ").trim();
+  }
+  return undefined;
+}
+
+/**
+ * `Zell: Change signature…`: the parameters of the function at the cursor
+ * in an input box. Entries keep the parameter of their name, `old->new
+ * type` renames, `name type = default` adds one (calls pass `default`);
+ * deleting or reordering entries removes or moves parameters.
+ */
+async function changeSignature(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== "zell" || !client) return;
+  const uri = editor.document.uri;
+  const pos = editor.selection.active;
+  const defs = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>("vscode.executeDefinitionProvider", uri, pos);
+  const d = defs?.[0];
+  if (!d) {
+    void vscode.window.showInformationMessage("Zell: put the cursor on a function or method name.");
+    return;
+  }
+  const loc = "targetUri" in d ? new vscode.Location(d.targetUri, d.targetSelectionRange ?? d.targetRange) : d;
+  const current = await declaredParams(loc);
+  if (current === undefined) return;
+  const oldNames = splitTopLevel(current).map((p) => p.split(/\s+/)[0]);
+  const input = await vscode.window.showInputBox({
+    title: "Change signature",
+    prompt: "Reorder or delete parameters; `old->new type` renames; `name type = default` adds one",
+    value: current,
+  });
+  if (input === undefined) return;
+  const params: object[] = [];
+  for (const entry of splitTopLevel(input)) {
+    const eq = entry.indexOf("=");
+    if (eq >= 0) {
+      const [name, ...ty] = entry.slice(0, eq).trim().split(/\s+/);
+      params.push({ name, type: ty.join(" "), default: entry.slice(eq + 1).trim() });
+      continue;
+    }
+    const head = entry.split(/\s+/)[0];
+    const [from, to] = head.includes("->") ? head.split("->") : [head, undefined];
+    const index = oldNames.indexOf(from);
+    if (index < 0) {
+      void vscode.window.showErrorMessage(`Zell: no parameter \`${from}\` (a new one needs \`name type = default\`).`);
+      return;
+    }
+    params.push(to ? { from: index, name: to } : { from: index });
+  }
+  try {
+    const result = await client.sendRequest<LspWorkspaceEdit | null>("workspace/executeCommand", {
+      command: "zell.changeSignature",
+      arguments: [{ uri: uri.toString(), position: { line: pos.line, character: pos.character }, params }],
+    });
+    if (result) {
+      await vscode.workspace.applyEdit(await client.protocol2CodeConverter.asWorkspaceEdit(result as LspWorkspaceEdit));
+    }
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Zell: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /** `Zell: Format document`: formats the active .zl file through the server (`zell fmt` rules). */
 async function formatDocument(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
@@ -272,6 +367,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(vscode.commands.registerCommand("zell.debugTest", debugTest));
   context.subscriptions.push(vscode.commands.registerCommand("zell.run", runMain));
   context.subscriptions.push(vscode.commands.registerCommand("zell.showReferences", showReferences));
+  context.subscriptions.push(vscode.commands.registerCommand("zell.changeSignatureUI", changeSignature));
   registerDebugging(context);
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {

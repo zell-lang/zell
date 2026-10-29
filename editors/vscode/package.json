@@ -75,6 +75,11 @@
         "command": "zell.showOutput",
         "title": "Show language server output",
         "category": "Zell"
+      },
+      {
+        "command": "zell.changeSignatureUI",
+        "title": "Change signature…",
+        "category": "Zell"
       }
     ],
     "configuration": {
@@ -163,6 +168,10 @@
         {
           "command": "zell.showReferences",
           "when": "false"
+        },
+        {
+          "command": "zell.changeSignatureUI",
+          "when": "editorLangId == zell"
         }
       ]
     },
