@@ -123,7 +123,8 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/completion`, `completionItem/resolve` | `completionProvider { triggerCharacters: ["."], resolveProvider }` | `completion.rs` |
 | `textDocument/signatureHelp` | `signatureHelpProvider` (`(`, `,`) | `assist.rs` |
 | `textDocument/inlayHint`, `inlayHint/resolve` | `inlayHintProvider { resolveProvider }` | `assist.rs` |
-| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix, refactor.extract, refactor.inline, refactor.rewrite, source.organizeImports], resolveProvider }` | `assist.rs`, `refactor.rs`, `generate.rs`, `errconv.rs` |
+| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix, refactor.extract, refactor.inline, refactor.rewrite, source.organizeImports], resolveProvider }` | `assist.rs`, `refactor.rs`, `generate.rs`, `errconv.rs`, `inline_fn.rs`, `signature.rs` |
+| `workspace/executeCommand` | `executeCommandProvider { commands: [zell.changeSignature] }` | `handlers.rs`, `signature.rs` |
 | `textDocument/codeLens`, `codeLens/resolve` | `codeLensProvider { resolveProvider }` | `lens.rs` |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | `semanticTokensProvider { full: { delta: true }, range: true }` | `features.rs` |
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | `callHierarchyProvider` | `hierarchy.rs` |
@@ -395,6 +396,62 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
   возвращаются строки-ханки форматированного результата, так что длинный
   литерал разбивается по полю на строку), иначе как есть. Quick fix'ы
   инспекций — см. «Инспекции».
+- **Рефакторинги по workspace**: `refactor.inline` по всему workspace (`lsp/src/inline_fn.rs`) —
+  «Inline call to f» на вызове и «Inline function f» на объявлении
+  (все вызовы; объявление с doc-комментарием удаляется, если все
+  использования — вызовы, иначе остаётся). Тело из одного `return e`
+  подставляется в любое выражение (в скобках, если нужно); тело из
+  нескольких операторов — только в оператор-вызов (`f(x)`, `await f(x)`,
+  `f(x)?`) или `var v = f(x)`, если единственный `return` — последний
+  оператор: операторы встают перед ним, значение — на место вызова
+  (`_ = e` в операторе, если у `e` есть эффекты). Аргументы: литерал, имя
+  или `this` подставляются; прочие (и любые для параметра, который тело
+  присваивает, берёт `&`, вызывает на нём метод или захватывает
+  замыканием) — во временную `var` (литерал — с типом параметра) в
+  порядке аргументов; неиспользуемый аргумент с эффектами остаётся как
+  `_ = arg`. `this` заменяется получателем (результат вызова — во
+  временную `recv`). Локальные тела и временные переименовываются
+  (`x2`), если имя встречается в вызывающей функции. Имена, которые
+  использует тело, должны значить то же в месте вызова: недостающее
+  пространство имён импортируется (`refactor::import_edit`); приватное
+  имя чужого пространства, имя, скрытое локальной вызывающей функции,
+  или имя через alias импорта — отказ. Отказы (действие приходит
+  `disabled` с причиной, если клиент поддерживает `disabledSupport`, иначе
+  не предлагается): нет тела, ранний или несколько `return` (и `try ...
+  else return`), `defer`, рекурсия, вызов через интерфейс или
+  значение-функцию, `async` без `await` (значение `Task`), функция с `T!`
+  или с `?` в теле, вызванная не через `?`, variadic, generic с типовыми
+  параметрами в теле без явных аргументов типа (generic-функции пока не
+  в индексе символов — для них действие не предлагается), получатель не
+  имя/поле/вызов (`xs[i].M()`), временные там, где их некуда поставить
+  (заголовок цикла, `else if`, правая часть `&&`/`||`, лямбда, обработчик
+  `try`). Вложенные вызовы при «inline all» — отказ.
+  «Change signature» (`refactor.rewrite`, `lsp/src/signature.rs`) на
+  имени функции или метода (объявление или вызов): «add parameter»
+  (`param int`, в вызовах `0`; перед variadic-параметром), «remove
+  parameter x», «move parameter x left/right». Полный вариант —
+  `workspace/executeCommand` `zell.changeSignature` с аргументом
+  `{"uri", "position", "params": [...]}`, где элемент — существующий
+  параметр `{"from": i, "name"?: "новое имя"}` или новый `{"name",
+  "type", "default"}` (`default` — выражение аргумента для всех вызовов,
+  вставляется как есть); результат — `WorkspaceEdit` (клиент применяет
+  его сам), отказ — ошибка запроса с причиной. Меняются объявление, все
+  вызовы во всех файлах (аргументы переставляются по одному; вложенные
+  и рекурсивные вызовы — изнутри наружу), переименованный параметр — в
+  теле. Метод меняется вместе с методами того же имени интерфейсов, которым
+  удовлетворяет его тип, и всеми их реализациями (метод интерфейса — с
+  интерфейсом и всеми реализациями, вызовы через интерфейс тоже).
+  Отказы: функция используется как значение (`var f = g`, `x.M` без
+  вызова — её тип изменился бы), объявление или вызов в read-only файле
+  или в stdlib, удаление параметра, который использует тело (любой
+  реализации), удаление аргумента с побочными эффектами (выбрано: отказ, а
+  не временная переменная — вызов не должен молча менять порядок
+  вычислений; вынесите аргумент в `var`), перестановка, меняющая порядок
+  двух аргументов с эффектами, variadic-параметр не последним, имя,
+  совпадающее с другим параметром или занятое в теле. В VS Code —
+  команда «Zell: Change signature…» (`zell.changeSignatureUI`): список
+  параметров в поле ввода (`old->new type` — переименование, `name type =
+  default` — новый параметр).
 - **Code lens**: на `@test`/`@bench`-функциях «▶ Run test» (`zell.runTest`)
   и «Debug test» (`zell.debugTest`) с аргументами `[uri файла, имя]`, на
   `main` — «▶ Run» (`zell.run`, `[uri]`); на экспортируемых объявлениях

@@ -9,7 +9,7 @@ to a server). Evidence is a test in `lsp/tests/server.rs`,
 (`server::<name>`), or a source location. Method table and design notes:
 `docs/TOOLING.md` "LSP-сервер".
 
-Summary: **74 ok, 0 partial, 4 missing, 8 n.a.** (86 rows).
+Summary: **75 ok, 0 partial, 4 missing, 7 n.a.** (86 rows).
 
 ## Lifecycle and base protocol
 
@@ -67,7 +67,7 @@ Summary: **74 ok, 0 partial, 4 missing, 8 n.a.** (86 rows).
 | `completionItem/resolve` | ok | `completion_resolve_adds_documentation` | — |
 | `textDocument/signatureHelp` | ok | `signature_help_shows_parameters_and_doc` | Parameter label offsets follow the negotiated encoding. |
 | `textDocument/inlayHint`, `inlayHint/resolve` | ok | `inlay_hints_types_and_parameter_names`, `inlay_hint_and_code_action_resolve` | — |
-| `textDocument/codeAction`, `codeAction/resolve` | ok | `code_actions_fix_structured_diagnostics`, `inlay_hint_and_code_action_resolve`, `inspect::*` | Quick fixes (errors and lints `L0001`–`L0010`), extract variable/function, inline variable, organize imports, fill struct fields, implement interface (quick fix for `implements`/"does not implement", rewrite for other visible interfaces), `?` <-> `try ... catch err { return err }`; refactorings resolve lazily with `resolveSupport`; generated code is formatted. Missing: inline function, change signature. |
+| `textDocument/codeAction`, `codeAction/resolve` | ok | `code_actions_fix_structured_diagnostics`, `inlay_hint_and_code_action_resolve`, `inspect::*`, `inline::*`, `signature::*` | Quick fixes (errors and lints `L0001`–`L0010`), extract variable/function, inline variable, organize imports, fill struct fields, implement interface (quick fix for `implements`/"does not implement", rewrite for other visible interfaces), `?` <-> `try ... catch err { return err }`; refactorings resolve lazily with `resolveSupport`; generated code is formatted; inline function (a call or every call) and change signature (add/remove/move parameter, across the workspace and an interface's implementations) — refused ones are listed `disabled` with the reason (`disabledSupport`). |
 | `textDocument/codeLens`, `codeLens/resolve` | ok | `code_lenses_for_tests_main_and_references` | — |
 | `textDocument/semanticTokens/full` | ok | `semantic_tokens_are_classified_and_stable` | — |
 | `semanticTokens/full/delta` | ok | `semantic_tokens_delta_and_range` (edits applied client-side equal a fresh `full`) | — |
@@ -112,7 +112,7 @@ Summary: **74 ok, 0 partial, 4 missing, 8 n.a.** (86 rows).
 | `workspace/willRenameFiles` (edits imports and the namespace line) | ok | `renaming_a_file_updates_its_namespace_and_imports`, `renaming_a_file_of_a_shared_namespace_adds_imports` | — |
 | `workspace/didRenameFiles` | ok | same tests | — |
 | `workspace/willCreateFiles` etc., `didCreateFiles`, `didDeleteFiles` | missing | — | Covered by watched files. |
-| `workspace/executeCommand` | n.a. | — | Code lens commands run in the client. |
+| `workspace/executeCommand` | ok | `signature::change_signature_command` | `zell.changeSignature` (`[{uri, position, params}]` → the `WorkspaceEdit`, refusals are errors); code lens commands run in the client. |
 | `workspace/semanticTokens/refresh`, `inlayHint/refresh`, `codeLens/refresh` | ok | `refresh_requests_follow_changes_seen_by_other_documents`, `configuration_is_pulled_from_the_client` | Sent when another open document may show something different: tokens and hints when declarations (kind, name, signature) changed, lenses also when reference counts did; at most one of each per analysis; hints also after their settings change. |
 
 ## Robustness
@@ -162,12 +162,13 @@ Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
 7. ~~**Rename scoping**~~ — done 2026-10-29 (`compiler/src/session/scopes.rs`,
    `lsp/src/scoping.rs`); also type aliases are symbols now (definition,
    hover, references, rename).
-8. **Refactoring code actions** (M each): extract variable/function,
-   inline variable and organize imports are done (`lsp/src/refactor.rs`);
-   fill struct fields, implement interface stubs and `?` <->
-   `try ... catch err { return err }` done 2026-10-29
-   (`lsp/src/generate.rs`, `lsp/src/errconv.rs`); still missing: inline
-   function, change signature.
+8. ~~**Refactoring code actions**~~ — done 2026-10-29: extract
+   variable/function, inline variable, organize imports
+   (`lsp/src/refactor.rs`); fill struct fields, implement interface, `?`
+   <-> `try ... catch err { return err }` (`generate.rs`, `errconv.rs`);
+   inline function and change signature (`inline_fn.rs`, `signature.rs`,
+   `zell.changeSignature`). Left: generic functions are not in the symbol
+   index, so neither is offered for them.
 9. ~~**`onTypeFormatting`, `documentLink`**~~ — done 2026-10-29
    (`assist.rs` `on_type_edits`, `links.rs`).
 10. ~~**Diagnostics details**~~ — done 2026-10-29: `version`, `data` with
