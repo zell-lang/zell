@@ -615,7 +615,10 @@ impl<'a> Sema<'a> {
     pub fn unknown_ident(&mut self, id: &ast::Ident) {
         let mut paths: Vec<String> = Vec::new();
         for ns in self.nss.iter().filter(|n| n.is_std) {
-            if ns.members.get(&id.name).is_some_and(|m| !matches!(m.0, Member::Ns(_))) {
+            // Private members of stdlib modules written in Zell cannot be
+            // imported (and whether their module is loaded yet varies).
+            let private = !is_exported(&id.name);
+            if ns.members.get(&id.name).is_some_and(|m| !matches!(m.0, Member::Ns(_)) && !(private && matches!(m.0, Member::Struct(_) | Member::Interface(_) | Member::Enum(_) | Member::Func(_) | Member::Global(_) | Member::Generic(_)))) {
                 paths.push(ns.path.clone());
             }
         }
