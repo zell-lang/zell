@@ -1139,3 +1139,9 @@ mod concurrency;
 
 #[path = "server/generate.rs"]
 mod generate;
+
+#[path = "server/inline.rs"]
+mod inline;
+
+#[path = "server/signature.rs"]
+mod signature;

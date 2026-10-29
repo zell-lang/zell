@@ -39,6 +39,7 @@
 //! stops those whose result it invalidates (`ContentModified`).
 
 mod assist;
+mod calls;
 mod completion;
 mod encoding;
 mod features;
@@ -47,8 +48,10 @@ mod files;
 mod generate;
 mod handlers;
 mod hierarchy;
+mod inline_fn;
 mod typehier;
 mod scoping;
+mod signature;
 mod lens;
 mod links;
 mod nav;
@@ -90,6 +93,11 @@ pub const ANALYZER_STATUS: &str = "zell/analyzerStatus";
 /// for tests).
 pub const DOCUMENT_TEXT: &str = "zell/documentText";
 
+/// `workspace/executeCommand` `zell.changeSignature`: arguments
+/// `[{"uri", "position", "params": [{"from": i, "name"?} | {"name", "type",
+/// "default"}]}]`; the result is the `WorkspaceEdit` (see `signature.rs`).
+pub const CHANGE_SIGNATURE: &str = "zell.changeSignature";
+
 /// Runs the server on stdin/stdout until the client disconnects.
 pub fn run_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (connection, io_threads) = Connection::stdio();
@@ -119,6 +127,9 @@ pub(crate) struct ClientCaps {
     /// `codeAction.resolveSupport` covers `edit`: refactorings are listed
     /// without their edits and computed by `codeAction/resolve`.
     resolve_edits: bool,
+    /// `codeAction.disabledSupport`: refused refactorings are listed
+    /// disabled with the reason.
+    disabled_actions: bool,
     /// `completionItem.snippetSupport` / `insertReplaceSupport`.
     completion: completion::CompletionCaps,
     /// `workspace.configuration`: settings are pulled.
@@ -146,6 +157,7 @@ impl ClientCaps {
                 .and_then(|t| t.code_action.as_ref())
                 .and_then(|ca| ca.resolve_support.as_ref())
                 .is_some_and(|r| r.properties.iter().any(|p| p == "edit")),
+            disabled_actions: c.text_document.as_ref().and_then(|t| t.code_action.as_ref()).and_then(|ca| ca.disabled_support).unwrap_or(false),
             completion: {
                 let ci = c.text_document.as_ref().and_then(|t| t.completion.as_ref()).and_then(|co| co.completion_item.as_ref());
                 completion::CompletionCaps {
@@ -298,6 +310,7 @@ pub fn capabilities() -> ServerCapabilities {
             ..Default::default()
         })),
         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(true) }),
+        execute_command_provider: Some(ExecuteCommandOptions { commands: vec![CHANGE_SIGNATURE.to_string()], ..Default::default() }),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions { first_trigger_character: "}".into(), more_trigger_character: Some(vec!["\n".into()]) }),
         document_link_provider: Some(DocumentLinkOptions { resolve_provider: Some(false), work_done_progress_options: Default::default() }),

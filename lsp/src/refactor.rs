@@ -3,7 +3,10 @@
 //! (`refactor.inline`), organize imports (`source.organizeImports`), and
 //! (`refactor.rewrite`) fill struct fields, implement interface
 //! (`generate.rs`) and `?` <-> `try ... catch err { return err }`
-//! (`errconv.rs`).
+//! (`errconv.rs`); across the workspace, inline function
+//! (`refactor.inline`, `inline_fn.rs`) and change signature
+//! (`refactor.rewrite`, `signature.rs`), listed disabled with the reason
+//! when refused (if the client supports `disabled`).
 //!
 //! Every refactoring is computed by [`compute`] from (kind, file,
 //! selection). When the client resolves code actions lazily
@@ -13,7 +16,7 @@
 
 use crate::assist::Walker;
 use crate::range;
-use lsp_types::{CodeAction, CodeActionKind, CodeActionOrCommand, TextEdit, Url, WorkspaceEdit};
+use lsp_types::{CodeAction, CodeActionDisabled, CodeActionKind, CodeActionOrCommand, TextEdit, Url, WorkspaceEdit};
 use std::collections::HashMap;
 use zell::ast::{self, Expr, ExprKind, Stmt, StmtKind};
 use zell::diagnostics::codes;
@@ -26,10 +29,15 @@ use zell::span::{SourceFile, Span};
 /// `impl_any|S|I` (`generate::impl_candidates`).
 const KINDS: &[&str] = &["extract_var", "extract_fn", "inline_var", "organize_imports", "fill_fields", "to_try", "to_propagate"];
 
+/// Workspace refactorings: edits in several files, may be refused.
+fn is_ws(id: &str) -> bool {
+    matches!(id, "inline_call" | "inline_fn") || id.starts_with("sig|")
+}
+
 fn kind_of(id: &str) -> CodeActionKind {
     match id {
         "extract_var" | "extract_fn" => CodeActionKind::REFACTOR_EXTRACT,
-        "inline_var" => CodeActionKind::REFACTOR_INLINE,
+        "inline_var" | "inline_call" | "inline_fn" => CodeActionKind::REFACTOR_INLINE,
         "organize_imports" => CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
         _ if id.starts_with("impl|") => CodeActionKind::QUICKFIX,
         _ => CodeActionKind::REFACTOR_REWRITE,
@@ -44,17 +52,46 @@ fn generated(id: &str) -> bool {
 /// An edit in byte offsets.
 pub(crate) type Edits = Vec<(Span, String)>;
 
+/// How code actions are listed: lazily (edits in `codeAction/resolve`),
+/// refused ones disabled with the reason (`codeAction.disabledSupport`),
+/// and the uri of each file.
+pub(crate) struct ListMode<'u> {
+    pub lazy: bool,
+    pub disabled: bool,
+    pub uri_of: &'u dyn Fn(usize) -> Option<Url>,
+}
+
 /// The refactorings available for `sel` in `file`, filtered by `only`
 /// (the requested kinds, as prefixes).
-pub(crate) fn actions(a: &Analysis, file: usize, uri: &Url, sel: Span, lazy: bool, only: Option<&[CodeActionKind]>) -> Vec<CodeActionOrCommand> {
+pub(crate) fn actions(a: &Analysis, file: usize, uri: &Url, sel: Span, mode: &ListMode, only: Option<&[CodeActionKind]>) -> Vec<CodeActionOrCommand> {
+    let lazy = mode.lazy;
     let mut out = Vec::new();
-    let ids: Vec<String> = KINDS.iter().map(|k| k.to_string()).chain(crate::generate::impl_candidates(a, file, sel)).collect();
+    let sel = trim(&a.files[file].text, sel);
+    let ids: Vec<String> = KINDS
+        .iter()
+        .map(|k| k.to_string())
+        .chain(crate::generate::impl_candidates(a, file, sel))
+        .chain(["inline_call".to_string(), "inline_fn".to_string()])
+        .chain(crate::signature::candidates(a, file, sel))
+        .collect();
     for id in &ids {
         let kind = kind_of(id);
         if let Some(only) = only {
             if !only.iter().any(|k| kind.as_str() == k.as_str() || kind.as_str().starts_with(&format!("{}.", k.as_str()))) {
                 continue;
             }
+        }
+        if is_ws(id) {
+            let Some((title, r)) = compute_ws(a, file, id, sel) else { continue };
+            let mut action = CodeAction { title, kind: Some(kind), ..Default::default() };
+            match r {
+                Err(reason) if mode.disabled => action.disabled = Some(CodeActionDisabled { reason }),
+                Err(_) => continue,
+                Ok(_) if lazy => action.data = Some(serde_json::json!({ "zell": "refactor", "id": id, "uri": uri, "start": sel.start, "end": sel.end })),
+                Ok(edits) => action.edit = Some(ws_edit(a, edits, mode.uri_of)),
+            }
+            out.push(CodeActionOrCommand::CodeAction(action));
+            continue;
         }
         let Some((title, edits)) = compute(a, file, id, sel) else { continue };
         let f = &a.files[file];
@@ -69,16 +106,46 @@ pub(crate) fn actions(a: &Analysis, file: usize, uri: &Url, sel: Span, lazy: boo
     out
 }
 
+/// The edit of a workspace refactoring.
+pub(crate) fn ws_edit(a: &Analysis, edits: crate::calls::WsEdits, uri_of: &dyn Fn(usize) -> Option<Url>) -> WorkspaceEdit {
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for (f, e) in edits {
+        let Some(uri) = uri_of(f) else { continue };
+        let file = &a.files[f];
+        changes.entry(uri).or_default().extend(e.into_iter().map(|(s, t)| TextEdit { range: range(file, s), new_text: t }));
+    }
+    WorkspaceEdit { changes: Some(changes), ..Default::default() }
+}
+
+/// Computes a workspace refactoring: `None` when not applicable, else
+/// its title and edits or the reason it is refused.
+pub(crate) fn compute_ws(a: &Analysis, file: usize, id: &str, sel: Span) -> Option<(String, Result<crate::calls::WsEdits, String>)> {
+    let sel = trim(&a.files[file].text, sel);
+    match id {
+        "inline_call" => crate::inline_fn::inline(a, file, sel, false),
+        "inline_fn" => crate::inline_fn::inline(a, file, sel, true),
+        _ => crate::signature::compute(a, file, id, sel),
+    }
+}
+
 fn workspace_edit(f: &SourceFile, uri: &Url, edits: Edits) -> WorkspaceEdit {
     let edits = edits.into_iter().map(|(s, t)| TextEdit { range: range(f, s), new_text: t }).collect();
     WorkspaceEdit { changes: Some(HashMap::from([(uri.clone(), edits)])), ..Default::default() }
 }
 
 /// Fills in the edit of a lazily listed refactoring.
-pub(crate) fn resolve(a: &Analysis, file_of: impl Fn(&Url) -> Option<usize>, mut action: CodeAction) -> CodeAction {
+pub(crate) fn resolve(a: &Analysis, file_of: impl Fn(&Url) -> Option<usize>, uri_of: &dyn Fn(usize) -> Option<Url>, mut action: CodeAction) -> CodeAction {
     let Some(d) = action.data.as_ref().filter(|d| d["zell"] == "refactor") else { return action };
     let (Some(id), Some(uri), Some(start), Some(end)) = (d["id"].as_str(), d["uri"].as_str().and_then(|u| Url::parse(u).ok()), d["start"].as_u64(), d["end"].as_u64()) else { return action };
     let Some(file) = file_of(&uri) else { return action };
+    if is_ws(id) {
+        match compute_ws(a, file, id, Span::new(start as u32, end as u32)) {
+            Some((_, Ok(edits))) => action.edit = Some(ws_edit(a, edits, uri_of)),
+            Some((_, Err(reason))) => action.disabled = Some(CodeActionDisabled { reason }),
+            None => {}
+        }
+        return action;
+    }
     if let Some((_, edits)) = compute(a, file, id, Span::new(start as u32, end as u32)) {
         action.edit = Some(workspace_edit(&a.files[file], &uri, finish(&a.files[file].text, id, edits)));
     }

@@ -27,6 +27,7 @@ const REQUEST_FAILED: i32 = -32803;
 const PROJECT_WIDE: &[&str] = &[
     request::References::METHOD,
     request::Rename::METHOD,
+    request::ExecuteCommand::METHOD,
     request::WorkspaceSymbolRequest::METHOD,
     request::CallHierarchyIncomingCalls::METHOD,
     request::CallHierarchyOutgoingCalls::METHOD,
@@ -79,6 +80,7 @@ impl Server {
             request::TypeHierarchyPrepare => Snap::prepare_type_hierarchy,
             request::TypeHierarchySupertypes => Snap::supertypes,
             request::TypeHierarchySubtypes => Snap::subtypes,
+            request::ExecuteCommand => Snap::execute_command,
         }
         route! { call:
             request::FoldingRangeRequest => Self::folding,
@@ -569,7 +571,9 @@ impl Snap {
                 Vec::new()
             };
             if !a.is_read_only(file) {
-                out.extend(crate::refactor::actions(&a, file, &p.text_document.uri, span, self.caps.resolve_edits, only));
+                let uri_of = |f: usize| self.uri_of(&a, f);
+                let mode = crate::refactor::ListMode { lazy: self.caps.resolve_edits, disabled: self.caps.disabled_actions, uri_of: &uri_of };
+                out.extend(crate::refactor::actions(&a, file, &p.text_document.uri, span, &mode, only));
             }
             out
         }))
@@ -579,7 +583,29 @@ impl Snap {
     /// listed lazily get theirs here.
     fn resolve_code_action(&self, action: CodeAction) -> Reply<CodeAction> {
         let a = &self.analysis;
-        Ok(crate::refactor::resolve(a, |u| a.file_index(&path_of(u)), action))
+        Ok(crate::refactor::resolve(a, |u| a.file_index(&path_of(u)), &|f| self.uri_of(a, f), action))
+    }
+
+    /// `workspace/executeCommand`: `zell.changeSignature` with
+    /// `[{uri, position, params}]` returns the `WorkspaceEdit` (the client
+    /// applies it); a refusal is an error with the reason.
+    fn execute_command(&self, p: ExecuteCommandParams) -> Reply<Option<serde_json::Value>> {
+        if p.command != crate::CHANGE_SIGNATURE {
+            return Err((lsp_server::ErrorCode::InvalidParams as i32, format!("unknown command {}", p.command)));
+        }
+        let arg = p.arguments.first().ok_or((lsp_server::ErrorCode::InvalidParams as i32, "missing argument".to_string()))?;
+        let invalid = |m: String| (lsp_server::ErrorCode::InvalidParams as i32, m);
+        let doc: TextDocumentIdentifier = serde_json::from_value(serde_json::json!({ "uri": arg["uri"] })).map_err(|e| invalid(e.to_string()))?;
+        let pos: Position = serde_json::from_value(arg["position"].clone()).map_err(|e| invalid(e.to_string()))?;
+        let spec = crate::signature::parse_spec(&arg["params"]).map_err(invalid)?;
+        let Some((a, file, off)) = self.locate(&doc, Some(pos)) else { return Err(invalid("unknown document".into())) };
+        let edits = crate::signature::command(&a, file, off, &spec).map_err(|m| (REQUEST_FAILED, m))?;
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for (f, e) in edits {
+            let Some(uri) = self.uri_of(&a, f) else { continue };
+            changes.entry(uri).or_default().extend(e.into_iter().map(|(s, t)| TextEdit { range: range(&a.files[f], s), new_text: t }));
+        }
+        Ok(Some(serde_json::to_value(self.workspace_edit(changes)).unwrap_or_default()))
     }
 
     fn code_lenses(&self, p: CodeLensParams) -> Reply<Option<Vec<CodeLens>>> {
