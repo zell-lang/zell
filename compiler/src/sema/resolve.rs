@@ -75,9 +75,18 @@ impl<'a> Sema<'a> {
     /// Adds a member to a namespace, reporting duplicates.
     fn register(&mut self, ns: NsIdx, name: &ast::Ident, m: Member) {
         if let Some((_, prev, pfile)) = self.nss[ns].members.get(&name.name).cloned() {
-            let note_span = if pfile == self.cur_file { Some(prev) } else { None };
             let path = self.nss[ns].path.clone();
-            self.err_note(format!("duplicate declaration of {} in namespace {path}", name.name), name.span, "previously declared here", note_span);
+            let msg = format!("duplicate declaration of {} in namespace {path}", name.name);
+            if pfile == self.cur_file {
+                self.err_note(msg, name.span, "previously declared here", Some(prev));
+            } else if prev == Span::DUMMY {
+                self.err_note(msg, name.span, "previously declared here", None);
+            } else {
+                // Declared in another file of the namespace: a related location.
+                let mut d = Diagnostic::error(msg, name.span).in_file(self.cur_file);
+                d.related.push(("previously declared here".into(), pfile, prev));
+                self.push_diag(d);
+            }
             return;
         }
         self.nss[ns].members.insert(name.name.clone(), (m, name.span, self.cur_file));
