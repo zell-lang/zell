@@ -125,7 +125,12 @@ func main() {
 ```
 
 Destructors also run on early exits (`return`, `?`, `break`), in reverse
-order of declaration. They do not run on a `panic`.
+order of declaration. A panic inside a task (`task.Go`, `task.Spawn`, an
+`async` function after its first suspension) unwinds that task: its
+pending `defer`s and the `Drop` of its live values run on the way out, as
+on a normal exit (see [When a task panics](async.md#when-a-task-panics)).
+A panic in synchronous `main`, or in other code outside a scheduler task,
+ends the process with exit code 2 without running them.
 
 ### `Drop` or `defer Close()`
 
