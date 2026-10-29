@@ -210,6 +210,7 @@ fn kind_word(k: SymbolKind) -> &'static str {
     match k {
         SymbolKind::Namespace => "namespace",
         SymbolKind::Struct => "struct",
+        SymbolKind::TypeAlias => "type alias",
         SymbolKind::Interface => "interface",
         SymbolKind::Enum => "enum",
         SymbolKind::Variant => "enum variant",
@@ -326,11 +327,11 @@ fn by_name(ws: &mut Workspace, q: &str) -> Result<Found, String> {
         if matches!(s.kind, SymbolKind::Local | SymbolKind::Param) {
             continue;
         }
-        let rank = if s.full_name == q {
+        let rank = if &*s.full_name == q {
             0
         } else if s.full_name.ends_with(&suffix) {
             1
-        } else if s.name == q {
+        } else if &*s.name == q {
             2
         } else {
             continue;
@@ -497,7 +498,7 @@ fn hover(ws: &mut Workspace, args: &Value) -> ToolResult {
         let _ = write!(out, "\n{}", zell::doc::markdown::to_text(&zell::doc::markdown::parse(&zell::doc::clean_doc(doc)), ""));
     }
     if s.is_std {
-        if let Some(e) = zell::doc::std_examples().get(&s.full_name).and_then(|v| v.first()) {
+        if let Some(e) = zell::doc::std_examples().get(&*s.full_name).and_then(|v| v.first()) {
             let _ = write!(out, "\nExample:\n```zell\n{}\n```\n", e.code.trim_end());
             if let Some(o) = &e.output {
                 let _ = writeln!(out, "Output:\n{}", o.trim_end());
@@ -610,7 +611,7 @@ fn rename(ws: &mut Workspace, args: &Value) -> ToolResult {
     let mut by_file: std::collections::BTreeMap<usize, Vec<TextEdit>> = std::collections::BTreeMap::new();
     let mut seen = std::collections::HashSet::new();
     for (f, sp) in spans {
-        if !seen.insert((f, sp.start)) || a.files[f].text.get(sp.start as usize..sp.end as usize) != Some(s.name.as_str()) || a.is_read_only(f) {
+        if !seen.insert((f, sp.start)) || a.files[f].text.get(sp.start as usize..sp.end as usize) != Some(&*s.name) || a.is_read_only(f) {
             continue;
         }
         by_file.entry(f).or_default().push(TextEdit { span: sp, new_text: new_name.clone() });
