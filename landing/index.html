@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zell — a compiled language for services and tools</title>
+<meta name="description" content="Zell keeps Go's small core and adds errors without boilerplate, async/await, enums with data and compile-time reflection. Native code through LLVM, no garbage collector.">
+<meta property="og:title" content="Zell programming language">
+<meta property="og:description" content="Go's simplicity, C#'s expressiveness, native speed without a garbage collector.">
+<meta property="og:url" content="https://zell-lang.org/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%230067b8'/%3E%3Cpath d='M9 10h14L9 22h14' fill='none' stroke='white' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+/* Layout: Fluent-style product page. White bands alternate with a light neutral band,
+   one blue accent, square controls, Segoe on Windows and the native UI face elsewhere. */
+:root {
+  --bg: #ffffff;
+  --bg-alt: #f5f6f7;
+  --fg: #1b1b1b;
+  --fg-muted: #5c6066;
+  --line: #e1e3e6;
+  --accent: #0067b8;
+  --accent-hover: #005a9e;
+  --accent-fg: #ffffff;
+  --code-bg: #f7f8fa;
+  --code-fg: #1f2328;
+  --tok-kw: #0550ae;
+  --tok-type: #116329;
+  --tok-str: #a3420c;
+  --tok-num: #0a6e74;
+  --tok-com: #6e7781;
+  --tok-attr: #8250df;
+  --term-bg: #0f1419;
+  --term-fg: #d6dde4;
+  --term-dim: #7d8794;
+  --term-ok: #7ee2a8;
+  --bar-zell: #0067b8;
+  --bar-other: #c4c9cf;
+  --font: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Code", "Cascadia Mono", "SF Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1180px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111315;
+    --bg-alt: #181b1e;
+    --fg: #eef0f2;
+    --fg-muted: #a3a9b0;
+    --line: #2b3035;
+    --accent: #4ba3f0;
+    --accent-hover: #6cb4f3;
+    --accent-fg: #0b1620;
+    --code-bg: #15181b;
+    --code-fg: #e3e7eb;
+    --tok-kw: #79b8ff;
+    --tok-type: #7ee2a8;
+    --tok-str: #ffab70;
+    --tok-num: #56d4dd;
+    --tok-com: #7d8794;
+    --tok-attr: #d2a8ff;
+    --term-bg: #0a0c0e;
+    --bar-zell: #4ba3f0;
+    --bar-other: #3d444b;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.55 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code, pre { font-family: var(--mono); }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding-left: max(24px, env(safe-area-inset-left, 0px));
+  padding-right: max(24px, env(safe-area-inset-right, 0px));
+}
+.band { padding-block: 88px; }
+.band.alt { background: var(--bg-alt); }
+
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.4rem, 5vw, 3.6rem); font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; }
+h2 { font-size: clamp(1.8rem, 3.2vw, 2.4rem); font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; }
+h3 { font-size: 1.15rem; font-weight: 600; }
+.lead { font-size: 1.2rem; color: var(--fg-muted); max-width: 40rem; margin: 20px 0 0; }
+.eyebrow { font-size: .8rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin: 0 0 12px; }
+.section-head { max-width: 46rem; margin-bottom: 48px; }
+.section-head p { color: var(--fg-muted); margin: 14px 0 0; font-size: 1.08rem; }
+
+/* header */
+header.top {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+header.top .wrap { display: flex; align-items: center; gap: 32px; height: 56px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--fg); font-weight: 600; font-size: 1.15rem; }
+.brand:hover { text-decoration: none; }
+.brand svg { width: 26px; height: 26px; }
+nav.links { display: flex; gap: 26px; font-size: .95rem; }
+nav.links a { color: var(--fg); }
+.top .spacer { flex: 1; }
+.top .ver { font-size: .85rem; color: var(--fg-muted); }
+
+/* buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 22px; border-radius: 3px; font-weight: 600; font-size: .98rem;
+  border: 1px solid transparent; cursor: pointer; transition: background .15s;
+}
+.btn:hover { text-decoration: none; }
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.ghost { color: var(--fg); border-color: var(--line); background: var(--bg); }
+.btn.ghost:hover { border-color: var(--fg-muted); }
+.btn svg { width: 16px; height: 16px; }
+
+/* hero */
+.hero { position: relative; overflow: hidden; padding-block: 96px 88px; }
+.hero canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.hero .wrap { position: relative; display: grid; grid-template-columns: 1.05fr 1fr; gap: 64px; align-items: center; }
+.hero .cta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 32px; }
+.install { margin-top: 28px; max-width: 34rem; }
+.install .tabs { display: flex; gap: 2px; }
+.install .tabs button {
+  font: inherit; font-size: .82rem; padding: 6px 12px; border: 0; cursor: pointer;
+  background: transparent; color: var(--fg-muted); border-bottom: 2px solid transparent;
+}
+.install .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.install .cmd {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 3px; padding: 10px 10px 10px 14px;
+}
+.install code { flex: 1; min-width: 0; font-size: .82rem; overflow-x: auto; white-space: nowrap; color: var(--code-fg); }
+.install code::before { content: "$ "; color: var(--fg-muted); }
+.install .cmd.ps code::before { content: "PS> "; }
+.copy {
+  flex: none; font: inherit; font-size: .8rem; padding: 4px 10px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 3px;
+}
+
+/* terminal */
+.term {
+  background: var(--term-bg); color: var(--term-fg); border-radius: 6px;
+  box-shadow: 0 24px 60px -24px rgba(0, 40, 80, .35), 0 2px 6px rgba(0, 0, 0, .08);
+  font: .86rem/1.6 var(--mono); min-width: 0;
+}
+.term .bar { display: flex; align-items: center; gap: 7px; padding: 12px 14px; border-bottom: 1px solid #ffffff14; }
+.term .bar i { width: 10px; height: 10px; border-radius: 50%; background: #ffffff26; }
+.term .bar span { margin-left: 8px; color: var(--term-dim); font-size: .78rem; }
+.term pre { margin: 0; padding: 18px 20px 22px; min-height: 19.5em; overflow-x: auto; white-space: pre; }
+.term .p { color: var(--term-dim); }
+.term .ok { color: var(--term-ok); }
+.term .dim { color: var(--term-dim); }
+.caret { display: inline-block; width: .55em; height: 1.1em; vertical-align: -0.2em; background: var(--term-fg); animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* stats */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.stat { padding: 30px 28px; border-left: 1px solid var(--line); }
+.stat:first-child { border-left: 0; padding-left: 0; }
+.stat b { display: block; font-family: var(--font-display); font-size: 2.2rem; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--fg-muted); font-size: .92rem; }
+
+/* code tabs */
+.code-tabs { display: grid; grid-template-columns: 280px 1fr; gap: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--bg); }
+.code-tabs [role="tablist"] { display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+.code-tabs [role="tab"] {
+  text-align: left; font: inherit; cursor: pointer; padding: 18px 22px; border: 0;
+  border-left: 3px solid transparent; border-bottom: 1px solid var(--line);
+  background: var(--bg); color: var(--fg);
+}
+.code-tabs [role="tab"]:last-child { border-bottom: 0; }
+.code-tabs [role="tab"] strong { display: block; font-weight: 600; }
+.code-tabs [role="tab"] small { display: block; color: var(--fg-muted); font-size: .86rem; margin-top: 2px; }
+.code-tabs [role="tab"][aria-selected="true"] { border-left-color: var(--accent); background: var(--bg-alt); }
+.code-tabs .panel { min-width: 0; background: var(--code-bg); display: flex; flex-direction: column; }
+.code-tabs pre { margin: 0; padding: 26px 28px; font-size: .88rem; line-height: 1.65; color: var(--code-fg); overflow-x: auto; flex: 1; }
+.code-tabs .note { margin: 0; padding: 14px 28px; border-top: 1px solid var(--line); color: var(--fg-muted); font-size: .9rem; background: var(--bg); }
+.k { color: var(--tok-kw); } .t { color: var(--tok-type); } .s { color: var(--tok-str); }
+.n { color: var(--tok-num); } .c { color: var(--tok-com); font-style: italic; } .a { color: var(--tok-attr); }
+
+/* compare */
+.table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+table.cmp { width: 100%; border-collapse: collapse; min-width: 760px; font-size: .95rem; }
+.cmp th, .cmp td { text-align: left; vertical-align: top; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.cmp tr:last-child td { border-bottom: 0; }
+.cmp thead th { font-size: .82rem; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-muted); font-weight: 600; background: var(--bg-alt); }
+.cmp thead th.zell { color: var(--accent); }
+.cmp tbody th { font-weight: 600; width: 16%; }
+.cmp td.zell { background: color-mix(in srgb, var(--accent) 6%, transparent); width: 30%; }
+.cmp code { font-size: .86em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+
+/* benchmarks */
+.bench { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+.metric { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 24px 26px; min-width: 0; }
+.metric h3 { font-size: 1rem; }
+.metric .sub { color: var(--fg-muted); font-size: .86rem; margin: 2px 0 18px; }
+.row { display: grid; grid-template-columns: 52px 1fr 92px; align-items: center; gap: 12px; margin-top: 10px; font-size: .88rem; }
+.row .lbl { color: var(--fg-muted); }
+.row.z .lbl { color: var(--fg); font-weight: 600; }
+.track { height: 10px; background: var(--bg-alt); border-radius: 2px; overflow: hidden; }
+.fill { height: 100%; width: var(--w); background: var(--bar-other); border-radius: 2px; transform-origin: left; }
+.row.z .fill { background: var(--bar-zell); }
+.row .val { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: .82rem; }
+.bench-note { color: var(--fg-muted); font-size: .9rem; margin-top: 28px; max-width: 52rem; }
+
+/* features */
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.feat { background: var(--bg); padding: 30px 28px; }
+.feat svg { width: 28px; height: 28px; color: var(--accent); margin-bottom: 16px; }
+.feat p { margin: 8px 0 0; color: var(--fg-muted); font-size: .95rem; }
+.feat code { font-size: .86em; }
+
+/* final cta */
+.final { text-align: left; display: flex; align-items: center; justify-content: space-between; gap: 32px; flex-wrap: wrap; }
+.final p { color: var(--fg-muted); margin: 10px 0 0; }
+
+footer { border-top: 1px solid var(--line); padding-block: 36px; font-size: .88rem; color: var(--fg-muted); }
+footer .wrap { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
+footer nav { display: flex; gap: 22px; flex-wrap: wrap; }
+footer a { color: var(--fg-muted); }
+footer .spacer { flex: 1; }
+
+/* load sequence */
+@media (prefers-reduced-motion: no-preference) {
+  .rise { animation: rise .7s cubic-bezier(.2, .7, .2, 1) both; }
+  .rise.d1 { animation-delay: .08s; } .rise.d2 { animation-delay: .16s; } .rise.d3 { animation-delay: .24s; }
+  @keyframes rise { from { opacity: 0; transform: translateY(12px); } }
+  .bench.on .fill { animation: grow 1s cubic-bezier(.2, .7, .2, 1) both; }
+  @keyframes grow { from { transform: scaleX(0); } }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .caret { animation: none; } }
+
+@media (max-width: 960px) {
+  .hero .wrap { grid-template-columns: 1fr; gap: 48px; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .stat:nth-child(3) { border-left: 0; padding-left: 0; }
+  .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .code-tabs { grid-template-columns: 1fr; }
+  .code-tabs [role="tablist"] { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .code-tabs [role="tab"] { border-left: 0; border-bottom: 3px solid transparent; flex: none; padding: 14px 18px; }
+  .code-tabs [role="tab"] small { display: none; }
+  .code-tabs [role="tab"][aria-selected="true"] { border-bottom-color: var(--accent); }
+  .bench { grid-template-columns: 1fr; }
+  .grid3 { grid-template-columns: 1fr 1fr; }
+  nav.links { display: none; }
+}
+@media (max-width: 600px) {
+  .band { padding-block: 64px; }
+  .hero { padding-block: 56px 64px; }
+  .stats { grid-template-columns: 1fr; }
+  .stat { border-left: 0 !important; padding-left: 0 !important; border-top: 1px solid var(--line); }
+  .stat:first-child { border-top: 0; }
+  .grid3 { grid-template-columns: 1fr; }
+  .top .ver { display: none; }
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/" aria-label="Zell home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="4" fill="var(--accent)"/><path d="M9 10h14L9 22h14" fill="none" stroke="var(--accent-fg)" stroke-width="3" stroke-linejoin="round"/></svg>
+      Zell
+    </a>
+    <nav class="links" aria-label="Main">
+      <a href="/docs/">Docs</a>
+      <a href="/docs/guide/tour">Tour</a>
+      <a href="#compare">Compare</a>
+      <a href="#performance">Performance</a>
+      <a href="https://github.com/zell-lang">Packages</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="ver">v0.1.5</span>
+    <a class="btn ghost" href="https://github.com/zell-lang/zell" style="padding:7px 14px">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.72 1.22 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <canvas id="grid" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <div>
+      <p class="eyebrow rise">Compiled · Statically typed · No garbage collector</p>
+      <h1 class="rise d1">The simplicity of Go.<br>The expressiveness of C#.<br>Native code without GC pauses.</h1>
+      <p class="lead rise d2">Zell is a language for services, tools and command-line programs. Errors are values without the boilerplate, <code>async</code>/<code>await</code> runs on a multi-threaded scheduler, and memory is freed deterministically by reference counting.</p>
+      <div class="cta rise d3">
+        <a class="btn primary" href="/docs/guide/getting-started">Get started</a>
+        <a class="btn ghost" href="https://github.com/zell-lang/zell/releases/latest">Download v0.1.5</a>
+      </div>
+      <div class="install rise d3">
+        <div class="tabs" role="tablist" aria-label="Install command">
+          <button role="tab" id="os-unix" aria-selected="true" data-os="unix">Linux · macOS</button>
+          <button role="tab" id="os-win" aria-selected="false" data-os="win">Windows</button>
+        </div>
+        <div class="cmd" id="cmd">
+          <code id="cmd-text">curl -fsSL https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.sh | sh</code>
+          <button class="copy" id="copy" type="button">Copy</button>
+        </div>
+      </div>
+    </div>
+    <div class="term rise d2" aria-label="Example terminal session">
+      <div class="bar"><i></i><i></i><i></i><span>~/hello</span></div>
+      <pre id="term"><span class="p">$</span> zell run main.zl
+ann is 31
+skipped: age of bob: invalid integer: "x"
+<span class="p">$</span> zell build --release --target windows-amd64 main.zl
+<span class="ok">built</span> main.exe <span class="dim">(101 KB)</span>
+<span class="p">$</span> zell test
+<span class="ok">ok</span>  parse_test.zl  <span class="dim">4 passed</span>
+<span class="p">$</span> <span class="caret"></span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" aria-label="Key numbers">
+  <div class="stats">
+    <div class="stat"><b>1.54×</b><span>HTTP/1.1 requests per second of Go's <code>net/http</code>, at half the CPU per request</span></div>
+    <div class="stat"><b>46 KB</b><span>Hello world, stripped. Go's is 1.4 MB</span></div>
+    <div class="stat"><b>0</b><span>GC pauses. Memory is freed when the last reference goes away</span></div>
+    <div class="stat"><b>5</b><span>Host platforms. One archive cross-compiles to all of them</span></div>
+  </div>
+</section>
+
+<section class="band" id="code">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">The language</p>
+      <h2>Code that reads like Go and says more</h2>
+      <p>A small core you can learn in a weekend, with the features Go makes you write by hand. Every example below compiles with the current toolchain.</p>
+    </div>
+    <div class="code-tabs">
+      <div role="tablist" aria-label="Examples" id="ex-tabs">
+        <button role="tab" aria-selected="true" aria-controls="ex-panel" data-ex="errors"><strong>Errors</strong><small><code>T!</code>, <code>?</code> and <code>try … catch</code></small></button>
+        <button role="tab" aria-selected="false" aria-controls="ex-panel" data-ex="async"><strong>Async</strong><small>Tasks on every core</small></button>
+        <button role="tab" aria-selected="false" aria-controls="ex-panel" data-ex="http"><strong>HTTP</strong><small>In the standard library</small></button>
+        <button role="tab" aria-selected="false" aria-controls="ex-panel" data-ex="json"><strong>JSON</strong><small>Compile-time reflection</small></button>
+        <button role="tab" aria-selected="false" aria-controls="ex-panel" data-ex="enums"><strong>Enums</strong><small>Data and exhaustive <code>switch</code></small></button>
+        <button role="tab" aria-selected="false" aria-controls="ex-panel" data-ex="defer"><strong>Resources</strong><small><code>defer await</code> and <code>Drop</code></small></button>
+      </div>
+      <div class="panel" role="tabpanel" id="ex-panel" tabindex="0">
+        <pre id="ex-code"></pre>
+        <p class="note" id="ex-note"></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band alt" id="compare">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Compare</p>
+      <h2>What you get over Go and C#</h2>
+      <p>Zell takes the parts that work in both and leaves out the runtime costs.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead><tr><th></th><th class="zell">Zell</th><th>Go</th><th>C# / .NET</th></tr></thead>
+        <tbody>
+          <tr><th>Errors</th><td class="zell">Values: <code>T!</code> results, <code>?</code> to propagate, a trace of where each error was created and passed</td><td>Values, checked with <code>if err != nil</code> after every call</td><td>Exceptions; which calls throw is not in the signature</td></tr>
+          <tr><th>Memory</th><td class="zell">Reference counting with compile-time ownership; destructors run at a known point; no GC</td><td>Tracing garbage collector</td><td>Tracing garbage collector; <code>using</code> for deterministic cleanup</td></tr>
+          <tr><th>Concurrency</th><td class="zell"><code>async</code>/<code>await</code>, channels, mutexes; cancellation flows through the task tree</td><td>Goroutines and channels; <code>context.Context</code> passed by hand</td><td><code>async</code>/<code>await</code>; <code>CancellationToken</code> passed by hand</td></tr>
+          <tr><th>Sum types</th><td class="zell">Enums with data, exhaustive <code>switch</code></td><td>None; <code>iota</code> constants</td><td>None built in; records with pattern matching</td></tr>
+          <tr><th>Generics</th><td class="zell">Monomorphized, on functions, methods and types</td><td>Since 1.18; methods cannot take type parameters</td><td>Reified at run time</td></tr>
+          <tr><th>Reflection</th><td class="zell">At compile time: JSON, SQL mapping and DI generate plain code</td><td>At run time (<code>reflect</code>, struct tags)</td><td>At run time, or source generators</td></tr>
+          <tr><th>Structure</th><td class="zell">Namespaces, <code>var</code> inference, methods inside structs</td><td>Packages per directory, methods declared apart from the type</td><td>Namespaces, classes, inheritance</td></tr>
+          <tr><th>Deployment</th><td class="zell">One native executable; one archive builds for Linux, macOS and Windows</td><td>One native executable, cross-compiles</td><td>Needs the runtime, or Native AOT with trimming limits</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="performance">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Performance</p>
+      <h2>Measured against Go and .NET</h2>
+      <p>The same programs in each language, release builds, medians of interleaved runs on one 16-thread machine. Lower is better unless marked.</p>
+    </div>
+    <div class="bench" id="bench">
+      <div class="metric">
+        <h3>HTTP/1.1 hello server</h3>
+        <p class="sub">Requests per second, 64 keep-alive connections · higher is better</p>
+        <div class="row z"><span class="lbl">Zell</span><div class="track"><div class="fill" style="--w:100%"></div></div><span class="val">608,886</span></div>
+        <div class="row"><span class="lbl">Go</span><div class="track"><div class="fill" style="--w:65%"></div></div><span class="val">396,296</span></div>
+      </div>
+      <div class="metric">
+        <h3>Contended mutex</h3>
+        <p class="sub">Milliseconds to finish the run</p>
+        <div class="row z"><span class="lbl">Zell</span><div class="track"><div class="fill" style="--w:3.1%"></div></div><span class="val">107 ms</span></div>
+        <div class="row"><span class="lbl">Go</span><div class="track"><div class="fill" style="--w:5.9%"></div></div><span class="val">203 ms</span></div>
+        <div class="row"><span class="lbl">.NET</span><div class="track"><div class="fill" style="--w:100%"></div></div><span class="val">3,452 ms</span></div>
+      </div>
+      <div class="metric">
+        <h3>Timer accuracy</h3>
+        <p class="sub">Mean lateness of a timer, microseconds</p>
+        <div class="row z"><span class="lbl">Zell</span><div class="track"><div class="fill" style="--w:5.2%"></div></div><span class="val">41 µs</span></div>
+        <div class="row"><span class="lbl">Go</span><div class="track"><div class="fill" style="--w:15.9%"></div></div><span class="val">126 µs</span></div>
+        <div class="row"><span class="lbl">.NET</span><div class="track"><div class="fill" style="--w:100%"></div></div><span class="val">793 µs</span></div>
+      </div>
+      <div class="metric">
+        <h3>Cancelling a task tree</h3>
+        <p class="sub">Average time to drain a cancelled tree, microseconds</p>
+        <div class="row z"><span class="lbl">Zell</span><div class="track"><div class="fill" style="--w:27.4%"></div></div><span class="val">2,323 µs</span></div>
+        <div class="row"><span class="lbl">Go</span><div class="track"><div class="fill" style="--w:51.1%"></div></div><span class="val">4,336 µs</span></div>
+        <div class="row"><span class="lbl">.NET</span><div class="track"><div class="fill" style="--w:100%"></div></div><span class="val">8,491 µs</span></div>
+      </div>
+    </div>
+    <p class="bench-note">Go is still ahead on select-heavy fan-in (2.1×) and worker pools (1.7×). Every benchmark, the machine and the method are in <a href="https://github.com/zell-lang/zell/blob/master/benchmarks/README.md">benchmarks/README.md</a>.</p>
+  </div>
+</section>
+
+<section class="band alt" id="tooling">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Tooling</p>
+      <h2>Everything in one archive</h2>
+      <p>No clang, no C headers, no SDKs. Unpack it and build for any supported platform.</p>
+    </div>
+    <div class="grid3">
+      <div class="feat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 17l6-5-6-5M12 19h8"/></svg>
+        <h3>One command</h3>
+        <p><code>zell build</code>, <code>run</code>, <code>test</code>, <code>fmt</code>, <code>doc</code> and <code>check</code>.</p>
+      </div>
+      <div class="feat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 9h18M8 13l2 2-2 2M12 17h4"/></svg>
+        <h3>Editors</h3>
+        <p>A language server with typed completion, refactorings and type hierarchy. Extensions for VS Code and IntelliJ; works with Neovim and Helix.</p>
+      </div>
+      <div class="feat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg>
+        <h3>Packages</h3>
+        <p><code>zell.toml</code> manifests, a lock file and workspaces. Dependencies come straight from Git.</p>
+      </div>
+      <div class="feat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/></svg>
+        <h3>Cross-compilation</h3>
+        <p>Linux on x86-64 and arm64, glibc or fully static musl, macOS and Windows from any host.</p>
+      </div>
+      <div class="feat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 3h6M10 3v5l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/></svg>
+        <h3>Testing</h3>
+        <p>Tests and benchmarks next to the code. <code>t.Must</code> unwraps results and reports the file and line.</p>
+      </div>
+      <div class="feat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 4h8l1 3h3v4H4V7h3l1-3zM6 11v6a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-6M12 14v3"/></svg>
+        <h3>Debugging</h3>
+        <p>DWARF for lldb and gdb with pretty-printers. A panic ends its task and prints a backtrace with file and line.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap final">
+    <div>
+      <h2>Write your first program in five minutes</h2>
+      <p>Install the toolchain, then follow the tour of the language.</p>
+    </div>
+    <div class="cta" style="display:flex;gap:12px;flex-wrap:wrap">
+      <a class="btn primary" href="/docs/guide/getting-started">Get started</a>
+      <a class="btn ghost" href="/docs/guide/tour">Take the tour</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Zell contributors · MIT License</span>
+    <span class="spacer"></span>
+    <nav aria-label="Footer">
+      <a href="/docs/">Documentation</a>
+      <a href="https://github.com/zell-lang/zell/releases">Releases</a>
+      <a href="https://github.com/zell-lang/zell">Source</a>
+      <a href="https://github.com/zell-lang/zell-idea-plugin">IntelliJ plugin</a>
+    </nav>
+  </div>
+</footer>
+
+<!-- Examples: raw Zell source, checked with `zell check` -->
+<script type="text/x-zell" id="src-errors">namespace hello
+
+import io
+
+struct User {
+    Name string
+    Age  int
+}
+
+func parse(line string) User! {
+    var parts = strings.Split(line, ":")
+    if len(parts) != 2 {
+        return error("expected name:age, got " + strconv.Quote(line))
+    }
+    var age = strings.ToInt(parts[1])?("age of " + parts[0])
+    return User{Name: parts[0], Age: age}
+}
+
+func main() {
+    for line in ["ann:31", "bob:x"] {
+        var u = try parse(line) catch err {
+            println("skipped:", err)
+            continue
+        }
+        println(u.Name, "is", u.Age)
+    }
+}</script>
+<script type="text/x-zell" id="src-async">namespace crawler
+
+import io
+import net
+
+async func size(url string) int! {
+    var res = await http.Get(url)?
+    return len(res.Body)
+}
+
+async func main() void! {
+    var pending []Task<int!>
+    for url in ["https://zell-lang.org", "https://go.dev"] {
+        pending = append(pending, size(url))
+    }
+    // both requests run at once; the first error cancels the rest
+    var sizes = await task.All(pending)?
+    println(sizes)
+}</script>
+<script type="text/x-zell" id="src-http">namespace api
+
+import net
+
+async func Hello(req *http.Request, res *http.Response) void! {
+    res.Text(200, "hello, " + req.Param("name") + "!\n")
+}
+
+async func main() void! {
+    var r = http.NewRouter()
+    r.Get("/hello/{name}", Hello)
+
+    var srv = http.Server{Addr: ":8080", Handler: r}
+    srv.Listen()?
+    await srv.Serve()?
+}</script>
+<script type="text/x-zell" id="src-json">namespace users
+
+import encoding
+import io
+
+struct User {
+    @json(name: "id") Id int
+    Name string
+    @json(omitEmpty: true) Email string
+    @json(skip: true) password string
+}
+
+func main() void! {
+    var u = json.Parse<User>("{\"id\": 7, \"Name\": \"ann\"}")?
+    println(u.Name, json.Format(u))
+}</script>
+<script type="text/x-zell" id="src-enums">namespace shapes
+
+import io
+
+enum Shape {
+    Circle(radius float)
+    Rect(w float, h float)
+}
+
+// a missing case is a compile error, not a runtime surprise
+func Area(s Shape) float {
+    switch s {
+        case Shape.Circle(r):
+            return 3.14159 * r * r
+        case Shape.Rect(w, h):
+            return w * h
+    }
+}
+
+func main() {
+    println(Area(Shape.Rect(2.0, 3.0)))
+}</script>
+<script type="text/x-zell" id="src-defer">namespace cache
+
+import data
+import io
+
+async func main() void! {
+    var c = await redis.Connect("redis://localhost:6379/0")?
+    // closed on every way out, `?` included
+    defer await c.Close()
+
+    await c.Set("greeting", "hello")?
+    println(await c.Get("greeting")?)
+}</script>
+
+<script>
+(() => {
+  const notes = {
+    errors: "Output: ann is 31 · skipped: age of bob: invalid integer: \"x\". The error says where it came from without a single if err != nil.",
+    async: "Calling an async function without await starts it as a task. task.All waits for all of them on the multi-threaded scheduler.",
+    http: "HTTP/1.1 and HTTP/2, TLS 1.3, routing and middleware ship with the standard library.",
+    json: "Output: ann {\"id\":7,\"Name\":\"ann\"}. The encoder is generated at compile time from the struct and its attributes: no run-time reflection.",
+    enums: "Output: 6. Variants carry their own fields, and switch binds them by name.",
+    defer: "defer await runs at function exit on every path. Types with a Drop method are released when their last reference goes away."
+  };
+  const KW = new Set("namespace import struct interface enum func async await var const if else for in switch case default return try catch defer break continue nil true false this weak type".split(" "));
+  const TY = new Set("int float string bool void error byte char any int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 float32 float64 Task".split(" "));
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const re = /(\/\/[^\n]*)|("(?:[^"\\\n]|\\.)*")|(@[A-Za-z_]\w*)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_]\w*)|([\s\S])/g;
+  function highlight(src) {
+    let out = "", m;
+    re.lastIndex = 0;
+    while ((m = re.exec(src))) {
+      if (m[1]) out += `<span class="c">${esc(m[1])}</span>`;
+      else if (m[2]) out += `<span class="s">${esc(m[2])}</span>`;
+      else if (m[3]) out += `<span class="a">${esc(m[3])}</span>`;
+      else if (m[4]) out += `<span class="n">${m[4]}</span>`;
+      else if (m[5]) {
+        const w = m[5];
+        if (KW.has(w)) out += `<span class="k">${w}</span>`;
+        else if (TY.has(w) || /^[A-Z]/.test(w)) out += `<span class="t">${w}</span>`;
+        else out += w;
+      } else out += esc(m[6]);
+    }
+    return out;
+  }
+  const code = document.getElementById("ex-code"), note = document.getElementById("ex-note");
+  const tabs = [...document.querySelectorAll("#ex-tabs [role=tab]")];
+  function show(name) {
+    tabs.forEach(t => t.setAttribute("aria-selected", String(t.dataset.ex === name)));
+    code.innerHTML = highlight(document.getElementById("src-" + name).textContent);
+    note.textContent = notes[name];
+  }
+  tabs.forEach(t => t.addEventListener("click", () => show(t.dataset.ex)));
+  document.getElementById("ex-tabs").addEventListener("keydown", e => {
+    const i = tabs.findIndex(t => t.getAttribute("aria-selected") === "true");
+    const d = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 0;
+    if (!d) return;
+    e.preventDefault();
+    const n = tabs[(i + d + tabs.length) % tabs.length];
+    n.focus(); show(n.dataset.ex);
+  });
+  show("errors");
+
+  // install command
+  const cmds = {
+    unix: "curl -fsSL https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.sh | sh",
+    win: "irm https://raw.githubusercontent.com/zell-lang/zell/master/scripts/install.ps1 | iex"
+  };
+  const cmdBox = document.getElementById("cmd"), cmdText = document.getElementById("cmd-text");
+  document.querySelectorAll(".install [role=tab]").forEach(b => b.addEventListener("click", () => {
+    document.querySelectorAll(".install [role=tab]").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+    cmdText.textContent = cmds[b.dataset.os];
+    cmdBox.classList.toggle("ps", b.dataset.os === "win");
+  }));
+  if (/Win/.test(navigator.platform || navigator.userAgent)) document.getElementById("os-win").click();
+  const copy = document.getElementById("copy");
+  copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(cmdText.textContent); copy.textContent = "Copied"; }
+    catch { const r = document.createRange(); r.selectNodeContents(cmdText); const s = getSelection(); s.removeAllRanges(); s.addRange(r); copy.textContent = "Selected"; }
+    setTimeout(() => copy.textContent = "Copy", 1600);
+  });
+
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // terminal: type the session once, ending in the same text the page ships with
+  const term = document.getElementById("term");
+  if (!reduce) {
+    const finalHTML = term.innerHTML;
+    const lines = [
+      { cmd: "zell run main.zl", out: 'ann is 31\nskipped: age of bob: invalid integer: "x"' },
+      { cmd: "zell build --release --target windows-amd64 main.zl", out: '<span class="ok">built</span> main.exe <span class="dim">(101 KB)</span>' },
+      { cmd: "zell test", out: '<span class="ok">ok</span>  parse_test.zl  <span class="dim">4 passed</span>' }
+    ];
+    let html = "";
+    const caret = '<span class="caret"></span>';
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    (async () => {
+      for (const l of lines) {
+        html += '<span class="p">$</span> ';
+        for (let i = 1; i <= l.cmd.length; i++) { term.innerHTML = html + esc(l.cmd.slice(0, i)) + caret; await wait(28); }
+        html += esc(l.cmd) + "\n";
+        term.innerHTML = html + caret;
+        await wait(380);
+        html += l.out + "\n";
+        term.innerHTML = html + caret;
+        await wait(650);
+      }
+      term.innerHTML = finalHTML;
+    })();
+  }
+
+  // hero background: a quiet dot grid with a slow wave of brightness
+  const cv = document.getElementById("grid"), ctx = cv.getContext("2d");
+  let w = 0, h = 0, dpr = 1;
+  function size() {
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    w = cv.clientWidth; h = cv.clientHeight;
+    cv.width = w * dpr; cv.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function draw(t) {
+    ctx.clearRect(0, 0, w, h);
+    const col = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+    ctx.fillStyle = col;
+    const step = 28;
+    for (let y = step / 2; y < h; y += step) {
+      for (let x = step / 2; x < w; x += step) {
+        const fade = Math.max(0, 1 - x / (w * 0.9)) * 0.5 + 0.08;
+        const wave = 0.5 + 0.5 * Math.sin(x * 0.012 + y * 0.018 - t * 0.0009);
+        ctx.globalAlpha = (0.05 + 0.13 * wave * wave) * fade;
+        ctx.fillRect(x, y, 1.6, 1.6);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  size();
+  addEventListener("resize", () => { size(); draw(performance.now()); });
+  if (reduce) draw(0);
+  else {
+    let visible = true;
+    new IntersectionObserver(([e]) => { visible = e.isIntersecting; }).observe(cv);
+    const loop = t => { if (visible && !document.hidden) draw(t); requestAnimationFrame(loop); };
+    requestAnimationFrame(loop);
+  }
+
+  // benchmark bars grow once when they scroll into view
+  const bench = document.getElementById("bench");
+  new IntersectionObserver((es, o) => { if (es[0].isIntersecting) { bench.classList.add("on"); o.disconnect(); } }, { threshold: .3 }).observe(bench);
+})();
+</script>
+</body>
+</html>
