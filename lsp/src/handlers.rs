@@ -302,7 +302,7 @@ impl Server {
         if matches!(s.kind, K::Field | K::Method | K::Variant) {
             return None; // members are reached through a value: only siblings clash
         }
-        spans.iter().find_map(|&(f, sp)| features::resolve_name(a, f, sp.start, new_name).filter(|&o| o != sym).map(clash))
+        spans.iter().find_map(|&(f, sp)| crate::completion::resolve_name(a, f, sp.start, new_name).filter(|&o| o != sym).map(clash))
     }
 
     /// A workspace edit of `changes`: versioned `documentChanges` when the
@@ -377,19 +377,19 @@ impl Server {
         let tdp = p.text_document_position;
         let version = self.analysis_version;
         Ok(self.locate(&tdp.text_document, Some(tdp.position)).map(|(a, file, off)| {
-            let mut items = features::completions(&a, file, off);
-            for it in &mut items {
+            let mut list = crate::completion::completions(&a, file, off, self.caps.completion);
+            for it in &mut list.items {
                 if let Some(serde_json::Value::Object(d)) = &mut it.data {
                     d.insert("v".into(), version.into());
                 }
             }
-            CompletionResponse::Array(items)
+            CompletionResponse::List(list)
         }))
     }
 
     fn resolve_completion(&mut self, item: CompletionItem) -> Reply<CompletionItem> {
         Ok(match self.analysis.clone() {
-            Some(a) => features::resolve_completion(&a, self.analysis_version, item),
+            Some(a) => crate::completion::resolve_completion(&a, self.analysis_version, item),
             None => item,
         })
     }

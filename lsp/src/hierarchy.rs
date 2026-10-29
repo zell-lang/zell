@@ -58,7 +58,7 @@ pub(crate) fn incoming(a: &Analysis, version: u64, it: &CallHierarchyItem, uri_o
     let id = target(a, version, it)?;
     let mut by_caller: BTreeMap<SymbolId, Vec<Range>> = BTreeMap::new();
     for r in a.references_of(id).iter().filter(|r| is_call(a, r)) {
-        if let Some(caller) = features::enclosing_fn(a, r.file, r.span.start) {
+        if let Some(caller) = crate::completion::enclosing_fn(a, r.file, r.span.start) {
             by_caller.entry(caller).or_default().push(range(&a.files[r.file], r.span));
         }
     }
@@ -71,7 +71,7 @@ pub(crate) fn outgoing(a: &Analysis, version: u64, it: &CallHierarchyItem, uri_o
     let loc = a.index.symbol(id).loc?;
     let mut by_callee: BTreeMap<SymbolId, Vec<Range>> = BTreeMap::new();
     for r in &a.index.references {
-        if r.file == loc.file && loc.full_span.start <= r.span.start && r.span.end <= loc.full_span.end && callable(a, r.symbol) && is_call(a, r) && features::enclosing_fn(a, r.file, r.span.start) == Some(id) {
+        if r.file == loc.file && loc.full_span.start <= r.span.start && r.span.end <= loc.full_span.end && callable(a, r.symbol) && is_call(a, r) && crate::completion::enclosing_fn(a, r.file, r.span.start) == Some(id) {
             by_callee.entry(r.symbol).or_default().push(range(&a.files[r.file], r.span));
         }
     }

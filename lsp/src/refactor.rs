@@ -256,6 +256,29 @@ fn whole_lines(text: &str, s: Span) -> Span {
     }
 }
 
+/// The edit adding `import <path>` to a file (auto-import completion):
+/// before the first import that sorts after it (the order organize
+/// imports keeps), else after the last import, else on its own paragraph
+/// after the namespace line.
+pub(crate) fn import_edit(ast: &ast::File, text: &str, path: &str) -> (Span, String) {
+    let key = |i: &ast::Import| slice(text, i.span).trim().trim_start_matches("import ").to_string();
+    if let Some(i) = ast.imports.iter().find(|i| key(i).as_str() > path) {
+        let at = whole_lines(text, i.span).start;
+        return (Span::new(at, at), format!("import {path}\n"));
+    }
+    if let Some(last) = ast.imports.last() {
+        let at = whole_lines(text, last.span).end;
+        let nl = if text[..at as usize].ends_with('\n') { "" } else { "\n" };
+        return (Span::new(at, at), format!("{nl}import {path}\n"));
+    }
+    let ns = ast.namespace.span;
+    if ns.end == 0 {
+        return (Span::new(0, 0), format!("import {path}\n\n"));
+    }
+    let at = text[ns.end as usize..].find('\n').map_or(text.len(), |i| ns.end as usize + i) as u32;
+    (Span::new(at, at), format!("\n\nimport {path}"))
+}
+
 fn organize_imports(a: &Analysis, file: usize, ast: &ast::File, text: &str) -> Option<(String, Edits)> {
     let first = ast.imports.first()?;
     let last = ast.imports.last()?;

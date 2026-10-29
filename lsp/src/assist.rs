@@ -346,7 +346,7 @@ pub(crate) fn signature_help(a: &Analysis, file: usize, off: u32) -> Option<Sign
         .reference_at(file, start as u32)
         .map(|r| r.symbol)
         .filter(|id| a.index.symbol(*id).name == name)
-        .or_else(|| crate::features::resolve_name(a, file, start as u32, name))?;
+        .or_else(|| crate::completion::resolve_name(a, file, start as u32, name))?;
     let sym = a.index.symbol(id);
     if !matches!(sym.kind, SymbolKind::Func | SymbolKind::Method | SymbolKind::BuiltinFunc) {
         return None;

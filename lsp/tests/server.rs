@@ -619,6 +619,9 @@ mod intrinsics;
 #[path = "server/members.rs"]
 mod members;
 
+#[path = "server/completion.rs"]
+mod completion;
+
 // ---------------------------------------------------------------------------
 // Stage 3-5 features
 // ---------------------------------------------------------------------------

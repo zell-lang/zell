@@ -389,7 +389,7 @@ fn completion_resolve_adds_documentation() {
         partial_result_params: Default::default(),
         context: None,
     });
-    let Some(CompletionResponse::Array(items)) = r else { panic!("{r:?}") };
+    let Some(CompletionResponse::List(CompletionList { items, .. })) = r else { panic!("{r:?}") };
     let money = items.iter().find(|i| i.label == "Money").expect("Money").clone();
     assert!(money.documentation.is_none(), "the list stays light");
     assert!(money.data.is_some());
@@ -404,7 +404,7 @@ fn completion_resolve_adds_documentation() {
     let again: CompletionItem = c.request::<request::ResolveCompletionItem>(money);
     assert!(again.documentation.is_some());
     // Keywords and builtins carry no data and come back unchanged.
-    let kw = items.iter().find(|i| i.label == "var").unwrap().clone();
+    let kw = CompletionItem { label: "var".into(), kind: Some(CompletionItemKind::KEYWORD), ..Default::default() };
     let r: CompletionItem = c.request::<request::ResolveCompletionItem>(kw.clone());
     assert_eq!(r, kw);
 }

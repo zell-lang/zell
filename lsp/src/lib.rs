@@ -33,6 +33,7 @@
 //! (formatting, folding, selection ranges) are answered at once.
 
 mod assist;
+mod completion;
 mod encoding;
 mod features;
 mod files;
@@ -105,6 +106,8 @@ struct ClientCaps {
     /// `codeAction.resolveSupport` covers `edit`: refactorings are listed
     /// without their edits and computed by `codeAction/resolve`.
     resolve_edits: bool,
+    /// `completionItem.snippetSupport` / `insertReplaceSupport`.
+    completion: completion::CompletionCaps,
 }
 
 impl ClientCaps {
@@ -121,6 +124,13 @@ impl ClientCaps {
                 .and_then(|t| t.code_action.as_ref())
                 .and_then(|ca| ca.resolve_support.as_ref())
                 .is_some_and(|r| r.properties.iter().any(|p| p == "edit")),
+            completion: {
+                let ci = c.text_document.as_ref().and_then(|t| t.completion.as_ref()).and_then(|co| co.completion_item.as_ref());
+                completion::CompletionCaps {
+                    snippets: ci.and_then(|i| i.snippet_support).unwrap_or(false),
+                    insert_replace: ci.and_then(|i| i.insert_replace_support).unwrap_or(false),
+                }
+            },
         }
     }
 }
