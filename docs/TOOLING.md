@@ -120,7 +120,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/hover` | `hoverProvider` | `features.rs` |
 | `textDocument/documentSymbol`, `workspace/symbol` | `documentSymbolProvider`, `workspaceSymbolProvider` | `features.rs`, `assist.rs` |
 | `textDocument/prepareRename`, `rename` | `renameProvider { prepareProvider }` | `handlers.rs` |
-| `textDocument/completion`, `completionItem/resolve` | `completionProvider { triggerCharacters: ["."], resolveProvider }` | `features.rs` |
+| `textDocument/completion`, `completionItem/resolve` | `completionProvider { triggerCharacters: ["."], resolveProvider }` | `completion.rs` |
 | `textDocument/signatureHelp` | `signatureHelpProvider` (`(`, `,`) | `assist.rs` |
 | `textDocument/inlayHint`, `inlayHint/resolve` | `inlayHintProvider { resolveProvider }` | `assist.rs` |
 | `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix, refactor.extract, refactor.inline, source.organizeImports], resolveProvider }` | `assist.rs`, `refactor.rs` |
@@ -197,7 +197,35 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
   методы enum, элементы кортежа `0`, `1`, … Видимость — как у sema
   (свои члены — в своём пространстве имён, чужие — экспортированные).
   Если записи нет (пространство имён `encoding.json.`, тип `Point.`), —
-  прежний разбор цепочки имён из текста.
+  прежний разбор цепочки имён из текста. Получатель `T!` (до `?`) даёт
+  члены `T` без правки (`?` допустим только в функции `T!`, поэтому
+  `?`/`try` дописывает пользователь); `weak *T` — члены `T`; параметр
+  типа с ограничением-интерфейсом (`func F<T: Shape>`) — методы
+  интерфейса (их записывает абстрактная проверка шаблона,
+  `GenState::abstract_recvs`); без ограничения — ничего.
+- **Качество completion** (`lsp/src/completion.rs`): у каждого элемента
+  `textEdit` с точным диапазоном — префикс слова под курсором (при
+  `insertReplaceSupport` — `InsertReplaceEdit`: insert = префикс, replace
+  = всё слово). Список фильтруется по префиксу (подпоследовательность без
+  учёта регистра), сортируется сервером и несёт `sortText`: сначала
+  совпадения по префиксу, затем локальные > параметры > поля > прочие
+  члены > имена своего пространства > импортированные/std/встроенные >
+  авто-импорт > ключевые слова; внутри — члены в порядке объявления
+  (поля раньше методов), локальные — ближайшее объявление первым,
+  остальное по имени. Больше 200 элементов — обрезка после сортировки и
+  `isIncomplete: true`. Только при `snippetSupport`: вызовы
+  `name(${1:a}, ${2:b})` / `name()$0` (не если `(` уже стоит после слова)
+  и сниппеты операторов в начале инструкции (`if`, `for`, `switch`,
+  `defer`, `defer await` — только в async-функции, `try`, `return` — с
+  `$0`, если функция что-то возвращает); иначе — простой текст.
+  Ключевые слова по контексту: вне функции в начале строки — только
+  слова объявлений; в середине выражения — без операторных
+  (`for`, `return`, `var`, …). Авто-импорт: при непустом префиксе
+  экспортированные типы, функции, константы и глобалы неимпортированных
+  пространств имён (std — все), имя которых начинается с префикса и ещё
+  не видно, с `labelDetails.description = "import ns"` и
+  `additionalTextEdits`, вставляющим `import ns` в порядке organize
+  imports (`refactor::import_edit`).
 - **Resolve**: элементы completion несут `data` (id символа, полное имя,
   версия анализа); `completionItem/resolve` добавляет `detail` и Markdown-
   документацию (тот же конвейер, что hover). Подсказки inlay — tooltip в

@@ -8,7 +8,7 @@ to a server). Evidence is a test in `lsp/tests/server.rs`,
 (`server::<name>`), or a source location. Method table and design notes:
 `docs/TOOLING.md` "LSP-сервер".
 
-Summary: **54 ok, 7 partial, 12 missing, 8 n.a.** (81 rows).
+Summary: **55 ok, 6 partial, 12 missing, 8 n.a.** (81 rows).
 
 ## Lifecycle and base protocol
 
@@ -60,7 +60,7 @@ Summary: **54 ok, 7 partial, 12 missing, 8 n.a.** (81 rows).
 | rename: `documentChanges` with versions when supported | ok | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | — |
 | rename of a symbol declared in an unopened file | ok | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | — |
 | rename that would clash / shadow | partial | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | Refused when the new name is a sibling member or a name visible at a use (local declared earlier in the function, namespace member, import). Not detected: a local declared *later* in the same block that a use would then capture, and clashes inside other functions' block scopes (the index has no block scopes). |
-| `textDocument/completion` | partial | `completion_members_and_scope` | No `textEdit` (clients use their word range; correct in VS Code with the contributed `wordPattern`), no `sortText` (client-side fuzzy order), no snippets (so `snippetSupport` is never violated), `isIncomplete` is always false and the list is never truncated. Members after `.` are listed from the receiver's type as sema recorded it, so any expression works (`f().`, `x.Get().Name.`, `xs[0].`, `m["k"].`, `(await g()).`, lambda bodies; test `member_completion_on_typed_expressions`); namespaces and types by name fall back to the chain of names in the text. |
+| `textDocument/completion` | ok | `completion_members_and_scope`, `completion_ranks_and_replaced_range`, `completion_snippets_and_insert_replace_with_capable_client`, `completion_auto_import_and_truncation`, `completion_on_fallible_weak_and_type_parameter_receivers`, `member_completion_on_typed_expressions` | `textEdit` with the typed prefix (`InsertReplaceEdit` with `insertReplaceSupport`); server-side filter (case-insensitive subsequence) and `sortText` (prefix matches first, then locals > params > fields > members > own namespace > imported/std/builtins > auto-import > keywords; members in declaration order, fields first); cut to 200 with `isIncomplete`; call and statement snippets only with `snippetSupport`; keywords filtered by position; auto-import items carry the `import` line as `additionalTextEdits`. Members after `.` come from the receiver's sema type (any expression; `T!` and `weak *T` give `T`'s members, a type parameter its constraint interface's methods); namespaces and types by name fall back to the chain of names in the text. |
 | `completionItem/resolve` | ok | `completion_resolve_adds_documentation` | — |
 | `textDocument/signatureHelp` | ok | `signature_help_shows_parameters_and_doc` | Parameter label offsets follow the negotiated encoding. |
 | `textDocument/inlayHint`, `inlayHint/resolve` | ok | `inlay_hints_types_and_parameter_names`, `inlay_hint_and_code_action_resolve` | — |
@@ -125,9 +125,11 @@ Summary: **54 ok, 7 partial, 12 missing, 8 n.a.** (81 rows).
 
 Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
 
-1. **Completion quality** (M): `textEdit` with the
-   replaced range, `sortText` by relevance (locals > members > globals >
-   keywords), call snippets with `snippetSupport`, auto-import items.
+1. ~~**Completion quality**~~ — done 2026-10-29 (`lsp/src/completion.rs`):
+   `textEdit`/`InsertReplaceEdit`, `sortText` by relevance, truncation
+   with `isIncomplete`, call/statement snippets with `snippetSupport`,
+   auto-import items. Left: snippets for generic type arguments,
+   postfix completions, ranking by expected type.
 2. **Incremental analysis** (L): every edit re-analyses the whole project
    (debounced and cancellable, fine at today's sizes); per-namespace
    invalidation is needed for large workspaces.
