@@ -20,7 +20,7 @@ pub(crate) fn document_links(a: &Analysis, file: usize, uri_of: impl Fn(usize) -
         // The namespace itself, else the namespace of an imported member.
         let target = (1..=segs.len()).rev().take(2).find_map(|n| {
             let name = segs[..n].join(".");
-            let ns = a.index.symbols.iter().find(|s| s.kind == SymbolKind::Namespace && s.full_name == name);
+            let ns = a.index.symbols.iter().find(|s| s.kind == SymbolKind::Namespace && &*s.full_name == name);
             // Std namespaces have no declaration of their own: the first
             // file declaring one of their members.
             let file = ns.and_then(|s| s.loc).map(|l| l.file).or_else(|| {

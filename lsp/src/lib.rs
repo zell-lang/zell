@@ -445,7 +445,7 @@ fn path_of(uri: &Url) -> String {
 /// `data` of an item naming symbol `id` (completion items, inlay hints).
 pub(crate) fn symbol_data(a: &Analysis, id: zell::sema::index::SymbolId) -> serde_json::Value {
     let s = a.index.symbol(id);
-    serde_json::json!({"sym": id.0, "name": s.name, "fullName": s.full_name})
+    serde_json::json!({"sym": id.0, "name": &*s.name, "fullName": &*s.full_name})
 }
 
 /// The symbol named by [`symbol_data`] (plus `"v"`, the analysis version
@@ -455,11 +455,11 @@ pub(crate) fn symbol_from_data(a: &Analysis, version: u64, data: &serde_json::Va
     let full = data.get("fullName")?.as_str()?;
     let id = data.get("sym")?.as_u64()? as usize;
     if data.get("v").and_then(|v| v.as_u64()) == Some(version) {
-        if let Some(s) = a.index.symbols.get(id).filter(|s| s.name == name && s.full_name == full) {
+        if let Some(s) = a.index.symbols.get(id).filter(|s| *s.name == *name && *s.full_name == *full) {
             return Some(s.id);
         }
     }
-    a.index.symbols.iter().find(|s| s.full_name == full && s.name == name).map(|s| s.id)
+    a.index.symbols.iter().find(|s| *s.full_name == *full && *s.name == *name).map(|s| s.id)
 }
 
 impl Server {
@@ -682,7 +682,10 @@ impl Server {
         self.flush();
         // The previous results are dropped first: requests wait for the new
         // analysis anyway, and this keeps one analysis in memory at a time.
-        self.analysis = None;
+        // Freeing a large index takes milliseconds: another thread does it.
+        if let Some(old) = self.analysis.take() {
+            std::thread::spawn(move || drop(old));
+        }
         let snapshot = self.session.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let version = self.version;

@@ -138,7 +138,7 @@ pub(crate) fn skey_of(sym: &Symbol, program: &crate::hir::Program) -> Option<SKe
         SymKey::Std(p) => SKey::Std(p.clone()),
         SymKey::Builtin(n) => SKey::Builtin(n.clone()),
         SymKey::Local(f, l) if sym.kind == SymbolKind::Param => SKey::Param(program.funcs.get(*f as usize)?.full_name.clone(), *l),
-        k => SKey::Decl(decl_kind(k)?, sym.full_name.clone()),
+        k => SKey::Decl(decl_kind(k)?, sym.full_name.to_string()),
     })
 }
 

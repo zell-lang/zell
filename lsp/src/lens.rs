@@ -38,7 +38,7 @@ pub(crate) fn code_lenses(a: &Analysis, file: usize, uri: &Url) -> Vec<CodeLens>
         out.push(CodeLens {
             range: range(f, name.span),
             command: None,
-            data: Some(serde_json::json!({"uri": uri, "offset": name.span.start, "fullName": s.full_name})),
+            data: Some(serde_json::json!({"uri": uri, "offset": name.span.start, "fullName": &*s.full_name})),
         });
     };
     for d in &ast.decls {
@@ -86,7 +86,7 @@ pub(crate) fn resolve_lens(a: &Analysis, mut lens: CodeLens, file_of: impl Fn(&U
         .index
         .symbols
         .iter()
-        .find(|s| s.full_name == full && s.kind != SymbolKind::Local && s.loc.is_some_and(|l| Some(l.file) == file))
+        .find(|s| *s.full_name == *full && s.kind != SymbolKind::Local && s.loc.is_some_and(|l| Some(l.file) == file))
         .map(|s| s.id)
         .or_else(|| file.and_then(|f| a.index.declaration_at(f, offset)));
     let locations: Vec<Location> = id

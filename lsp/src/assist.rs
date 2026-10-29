@@ -345,7 +345,7 @@ pub(crate) fn signature_help(a: &Analysis, file: usize, off: u32) -> Option<Sign
         .index
         .reference_at(file, start as u32)
         .map(|r| r.symbol)
-        .filter(|id| a.index.symbol(*id).name == name)
+        .filter(|id| &*a.index.symbol(*id).name == name)
         .or_else(|| crate::completion::resolve_name(a, file, start as u32, name))?;
     let sym = a.index.symbol(id);
     if !matches!(sym.kind, SymbolKind::Func | SymbolKind::Method | SymbolKind::BuiltinFunc) {
@@ -362,7 +362,7 @@ pub(crate) fn signature_help(a: &Analysis, file: usize, off: u32) -> Option<Sign
     if variadic && !ranges.is_empty() {
         active = active.min(ranges.len() as u32 - 1);
     }
-    let documentation = sym.doc.as_ref().map(|d| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d.clone() }));
+    let documentation = sym.doc.as_ref().map(|d| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d.to_string() }));
     Some(SignatureHelp {
         signatures: vec![SignatureInformation { label, documentation, parameters: Some(parameters), active_parameter: Some(active) }],
         active_signature: Some(0),
@@ -744,12 +744,12 @@ pub(crate) fn workspace_symbols(a: &Analysis, query: &str, stop: impl Fn() -> bo
         out.push((
             exact,
             SymbolInformation {
-                name: s.name.clone(),
+                name: s.name.clone().to_string(),
                 kind: crate::features::lsp_kind(s.kind),
                 tags: None,
                 deprecated: None,
                 location: Location { uri, range: range(f, loc.name_span) },
-                container_name,
+                container_name: container_name.map(|c| c.to_string()),
             },
         ));
     }

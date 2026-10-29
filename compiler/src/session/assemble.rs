@@ -1,7 +1,7 @@
 //! Combining the fragments of all units into one [`Analysis`]: symbols get
 //! their ids, stable keys are resolved, namespace declarations are recorded
-//! over the whole file list, and the checks over the whole program (unused
-//! imports, the entry point) are made.
+//! over the whole file list, and the checks over the whole program (lints
+//! and unused imports only without errors, the entry point) are made.
 
 use super::fragment::{FImport, FKey, Fragment, SKey, SymRef};
 use super::stdblock::StdBlock;
@@ -12,6 +12,7 @@ use crate::hir::Program;
 use crate::sema::index::{self, FileInfo, ImportInfo, Location, MemberRecv, Reference, SymKey, Symbol, SymbolId, SymbolIndex, SymbolKind};
 use crate::span::{SourceFile, Span};
 use crate::types::TypeId;
+use crate::fxhash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -51,13 +52,16 @@ fn diag_key(d: &Diagnostic) -> (usize, u32, u32, String, bool, Option<&'static s
 
 pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program, std: &StdBlock, std_files: &[Arc<SourceFile>]) -> Analysis {
     let n = files.len();
-    let mut symbols: Vec<Symbol> = std.symbols.clone();
+    let own_count: usize = units.iter().map(|u| u.frag.symbols.len()).sum();
+    let mut symbols: Vec<Symbol> = Vec::with_capacity(std.symbols.len() + own_count + files.len());
+    symbols.extend_from_slice(&std.symbols);
     for s in &mut symbols {
         if let Some(l) = &mut s.loc {
             l.file += n;
         }
     }
-    let mut by_key: HashMap<SymKey, SymbolId> = std.by_key.clone();
+    let mut by_key: FxHashMap<SymKey, SymbolId> = FxHashMap::with_capacity_and_hasher(symbols.capacity(), Default::default());
+    by_key.extend(std.by_key.iter().map(|(k, v)| (k.clone(), *v)));
     let mut recvs: Vec<MemberRecv> = Vec::new();
     let mut refs: Vec<Reference> = Vec::with_capacity(units.iter().map(|u| u.frag.refs.len()).sum::<usize>() + files.len());
     // (A file belongs to one unit and its run de-duplicated its references.)
@@ -97,10 +101,10 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
                 id: SymbolId(0),
                 key: SymKey::Ns(path.clone()),
                 kind: SymbolKind::Namespace,
-                name: segs[i].name.clone(),
-                full_name: path.clone(),
+                name: segs[i].name.clone().into(),
+                full_name: path.clone().into(),
                 loc: Some(Location { file: fi, name_span: segs[i].span, full_span }),
-                signature: format!("namespace {path}"),
+                signature: format!("namespace {path}").into(),
                 ty: None,
                 doc: None,
                 container: None,
@@ -128,7 +132,7 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
         }
     }
     // Owned symbols of every unit.
-    let mut skeys: HashMap<&SKey, SymbolId> = HashMap::new();
+    let mut skeys: FxHashMap<&SKey, SymbolId> = FxHashMap::default();
     let mut own: Vec<Vec<SymbolId>> = Vec::with_capacity(units.len());
     let (mut fbase, mut gbase) = (0u32, 0u32);
     for u in units {
@@ -149,20 +153,32 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
                 FKey::Local(f, l) => SymKey::Local(fbase + f, l),
                 FKey::LocalConst(p, start) => SymKey::LocalConst(gfile(p as usize), start),
             };
-            if let Some(&id) = by_key.get(&key) {
-                ids.push(id);
-                continue;
-            }
             let id = SymbolId(symbols.len() as u32);
-            let mut s = fs.sym.clone();
-            s.id = id;
-            s.key = key.clone();
-            s.ty = fs.ty.and_then(|t| m.types.get(t.0 as usize).copied());
-            if let Some(l) = &mut s.loc {
-                l.file = gfile(l.file);
-            }
-            by_key.insert(key, id);
-            symbols.push(s);
+            let slot = match by_key.entry(key) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    ids.push(*e.get());
+                    continue;
+                }
+                std::collections::hash_map::Entry::Vacant(e) => e,
+            };
+            let f = &fs.sym;
+            symbols.push(Symbol {
+                id,
+                key: slot.key().clone(),
+                kind: f.kind,
+                name: f.name.clone(),
+                full_name: f.full_name.clone(),
+                loc: f.loc.map(|l| Location { file: gfile(l.file), ..l }),
+                signature: f.signature.clone(),
+                ty: fs.ty.and_then(|t| m.types.get(t.0 as usize).copied()),
+                doc: f.doc.clone(),
+                container: f.container,
+                is_static: f.is_static,
+                is_async: f.is_async,
+                is_readonly: f.is_readonly,
+                is_std: f.is_std,
+            });
+            slot.insert(id);
             if let Some(k) = &fs.skey {
                 skeys.entry(k).or_insert(id);
             }
@@ -290,6 +306,12 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
             }
         }
     }
+    // Lints are made only for a program without errors (as by a compiler
+    // run); a unit run saw no errors in its part, but others may have some.
+    let lint = crate::sema::lint::is_lint;
+    if units.iter().any(|u| u.frag.diags.iter().any(|d| d.severity == Severity::Error && !lint(d.code))) {
+        sema.retain(|d| !lint(d.code));
+    }
     // Unused imports count only in a program without other errors.
     if !sema.iter().any(|d| d.severity == Severity::Error) {
         let mut unused: Vec<Diagnostic> = Vec::new();
@@ -319,7 +341,7 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
     }
     diagnostics.extend(sema);
     let ok = !diagnostics.iter().any(|d| d.severity == Severity::Error);
-    let mut index = SymbolIndex::from_parts(symbols, refs, infos, ns_members);
+    let mut index = SymbolIndex::from_parts(symbols, refs, infos, ns_members, by_key);
     index.set_member_recvs(recvs);
     let mut all_files: Vec<Arc<SourceFile>> = files.iter().map(|f| f.source.clone()).collect();
     all_files.extend(std_files.iter().cloned());
@@ -330,7 +352,7 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
 
 /// The symbol for `key`, created as an implicit symbol (namespace, std
 /// member, builtin) when missing.
-fn ensure(symbols: &mut Vec<Symbol>, by_key: &mut HashMap<SymKey, SymbolId>, key: SymKey) -> Option<SymbolId> {
+fn ensure(symbols: &mut Vec<Symbol>, by_key: &mut FxHashMap<SymKey, SymbolId>, key: SymKey) -> Option<SymbolId> {
     if let Some(&id) = by_key.get(&key) {
         return Some(id);
     }

@@ -383,7 +383,7 @@ impl Snap {
             return Ok(None);
         }
         let (sym, span) = Self::rename_target(&a, file, off).map_err(|m| (REQUEST_FAILED, m))?;
-        let placeholder = a.index.symbol(sym).name.clone();
+        let placeholder = a.index.symbol(sym).name.to_string();
         Ok(Some(PrepareRenameResponse::RangeWithPlaceholder { range: range(&a.files[file], span), placeholder }))
     }
 
@@ -406,7 +406,7 @@ impl Snap {
             if self.stopped() {
                 break;
             }
-            if !seen.insert((f, s.start)) || a.files[f].text.get(s.start as usize..s.end as usize) != Some(sym.name.as_str()) {
+            if !seen.insert((f, s.start)) || a.files[f].text.get(s.start as usize..s.end as usize) != Some(&*sym.name) {
                 continue;
             }
             let Some(uri) = self.uri_of(&a, f) else { continue };
@@ -422,7 +422,7 @@ impl Snap {
     fn rename_conflict(a: &Analysis, sym: zell::sema::index::SymbolId, spans: &[(usize, Span)], new_name: &str) -> Option<String> {
         use zell::sema::index::SymbolKind as K;
         let s = a.index.symbol(sym);
-        if s.name == new_name {
+        if *s.name == *new_name {
             return None;
         }
         let clash = |other: zell::sema::index::SymbolId| {
@@ -431,7 +431,7 @@ impl Snap {
             format!("renaming `{}` to `{new_name}` would clash with `{}`{at}", s.name, o.full_name)
         };
         if let Some(c) = s.container.filter(|_| !matches!(s.kind, K::Local | K::Param | K::Const)) {
-            if let Some(o) = a.index.symbols.iter().find(|o| o.container == Some(c) && o.name == new_name && o.id != sym) {
+            if let Some(o) = a.index.symbols.iter().find(|o| o.container == Some(c) && *o.name == *new_name && o.id != sym) {
                 return Some(clash(o.id));
             }
         }

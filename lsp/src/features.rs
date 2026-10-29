@@ -119,7 +119,7 @@ pub(crate) fn hover_markdown(a: &Analysis, id: SymbolId) -> String {
     }
     // the first example of a std symbol (std/**/*_test.zl), collapsed
     if s.is_std {
-        if let Some(e) = zell::doc::std_examples().get(&s.full_name).and_then(|v| v.first()) {
+        if let Some(e) = zell::doc::std_examples().get(&*s.full_name).and_then(|v| v.first()) {
             out.push('\n');
             out.push_str(&zell::doc::example_markdown(e));
         }
@@ -138,7 +138,7 @@ fn symbol_link(a: &Analysis, s: &Symbol, text: &str) -> Option<String> {
     let ns = s.full_name.rsplit_once('.').map_or("", |x| x.0);
     let parent_ns = ns.rsplit_once('.').map_or("", |x| x.0);
     let cands = [text.to_string(), format!("{ns}.{text}"), format!("{parent_ns}.{text}")];
-    let sym = cands.iter().find_map(|c| a.index.symbols.iter().find(|x| x.full_name == *c && x.loc.is_some() && x.kind != SymbolKind::Local))?;
+    let sym = cands.iter().find_map(|c| a.index.symbols.iter().find(|x| *x.full_name == **c && x.loc.is_some() && x.kind != SymbolKind::Local))?;
     let loc = sym.loc.as_ref()?;
     let f = a.files.get(loc.file)?;
     let (line, _) = f.line_col(loc.name_span.start);
@@ -301,7 +301,7 @@ pub(crate) fn absolute_tokens(a: &Analysis, file: usize) -> Vec<AbsToken> {
             TokenKind::Ident(name) => names.get(&(t.span.start, t.span.end)).and_then(|(id, decl)| {
                 let s = a.index.symbol(*id);
                 // Only trust spans whose text matches the symbol (namespaces aside).
-                (s.name == *name || matches!(s.key, SymKey::Ns(_))).then(|| token_class(s, *decl))
+                (*s.name == **name || matches!(s.key, SymKey::Ns(_))).then(|| token_class(s, *decl))
             })
             // `in` of `for x in xs` is a contextual keyword (an identifier
             // token); a variable named `in` resolves above.

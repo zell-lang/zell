@@ -12,7 +12,9 @@ use super::resolve::PathRes;
 use super::*;
 use crate::hir::dump::{type_name, DeclNames};
 use crate::hir::{FuncKind, Program};
+use crate::fxhash::FxHashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Public model
@@ -82,17 +84,17 @@ pub struct Symbol {
     pub id: SymbolId,
     pub key: SymKey,
     pub kind: SymbolKind,
-    pub name: String,
+    pub name: Arc<str>,
     /// `app.models.User.Display`, `strings.Split`, `x` for locals.
-    pub full_name: String,
+    pub full_name: Arc<str>,
     /// `None` for stdlib members and builtins (no user source).
     pub loc: Option<Location>,
     /// Source-like signature: `func Display() string`, `var x int`.
-    pub signature: String,
+    pub signature: Arc<str>,
     /// Value type (locals, params, fields, globals) in the analysis' program.
     pub ty: Option<TypeId>,
     /// The `//` comment block directly above the declaration.
-    pub doc: Option<String>,
+    pub doc: Option<Arc<str>>,
     pub container: Option<SymbolId>,
     pub is_static: bool,
     pub is_async: bool,
@@ -136,13 +138,51 @@ pub struct SymbolIndex {
     pub files: Vec<Option<FileInfo>>,
     /// Members of every namespace (user and std) by name.
     pub ns_members: HashMap<String, Vec<(String, SymbolId)>>,
-    by_key: HashMap<SymKey, SymbolId>,
-    refs_by_symbol: HashMap<SymbolId, Vec<usize>>,
+    by_key: FxHashMap<SymKey, SymbolId>,
+    refs_by_symbol: RefTable,
     /// Receivers of member accesses, sorted by (file, name start): the
     /// type of `x` in `x.name`, `x.name(...)` and `x.` being typed (empty
     /// name right after the dot). Member completion lists the members of
     /// this type ([`SymbolIndex::member_receiver`]).
     pub member_recvs: Vec<MemberRecv>,
+}
+
+/// Indices of `SymbolIndex::references` by symbol: those of symbol `i` are
+/// `refs[start[i]..start[i + 1]]`, in reference order.
+#[derive(Clone, Debug, Default)]
+struct RefTable {
+    start: Vec<u32>,
+    refs: Vec<u32>,
+}
+
+impl RefTable {
+    /// A counting sort of `references` by symbol.
+    fn of(references: &[Reference], n_symbols: usize) -> RefTable {
+        let n = references.iter().map(|r| r.symbol.0 as usize + 1).max().unwrap_or(0).max(n_symbols);
+        let mut start = vec![0u32; n + 1];
+        for r in references {
+            start[r.symbol.0 as usize + 1] += 1;
+        }
+        for i in 0..n {
+            start[i + 1] += start[i];
+        }
+        let mut fill = start.clone();
+        let mut refs = vec![0u32; references.len()];
+        for (i, r) in references.iter().enumerate() {
+            let at = &mut fill[r.symbol.0 as usize];
+            refs[*at as usize] = i as u32;
+            *at += 1;
+        }
+        RefTable { start, refs }
+    }
+
+    fn of_symbol(&self, id: SymbolId) -> &[u32] {
+        let i = id.0 as usize;
+        match (self.start.get(i), self.start.get(i + 1)) {
+            (Some(&a), Some(&b)) => &self.refs[a as usize..b as usize],
+            _ => &[],
+        }
+    }
 }
 
 /// The receiver type of one member access (`base.name`).
@@ -180,7 +220,7 @@ impl SymbolIndex {
 
     /// References to `id` (not including the declaration itself).
     pub fn references_of(&self, id: SymbolId) -> Vec<Reference> {
-        self.refs_by_symbol.get(&id).map(|v| v.iter().map(|&i| self.references[i]).collect()).unwrap_or_default()
+        self.refs_by_symbol.of_symbol(id).iter().map(|&i| self.references[i as usize]).collect()
     }
 
     /// Symbols whose container is `id`, in declaration order.
@@ -242,15 +282,9 @@ impl SymbolIndex {
     }
 
     /// An index of `symbols` (ids are their positions) and `references`.
-    pub(crate) fn from_parts(symbols: Vec<Symbol>, references: Vec<Reference>, files: Vec<Option<FileInfo>>, ns_members: HashMap<String, Vec<(String, SymbolId)>>) -> SymbolIndex {
-        let mut by_key = HashMap::with_capacity(symbols.len());
-        for s in &symbols {
-            by_key.entry(s.key.clone()).or_insert(s.id);
-        }
-        let mut refs_by_symbol: HashMap<SymbolId, Vec<usize>> = HashMap::new();
-        for (i, r) in references.iter().enumerate() {
-            refs_by_symbol.entry(r.symbol).or_default().push(i);
-        }
+    /// `by_key` maps the key of every symbol to its id.
+    pub(crate) fn from_parts(symbols: Vec<Symbol>, references: Vec<Reference>, files: Vec<Option<FileInfo>>, ns_members: HashMap<String, Vec<(String, SymbolId)>>, by_key: FxHashMap<SymKey, SymbolId>) -> SymbolIndex {
+        let refs_by_symbol = RefTable::of(&references, symbols.len());
         SymbolIndex { symbols, references, files, ns_members, by_key, refs_by_symbol, member_recvs: Vec::new() }
     }
 
@@ -288,7 +322,7 @@ pub fn analyze_indexed_cancellable(files: &[ast::File], texts: &[&str], diags: &
     let (extra, names) = s.ide_collect_extras_for(&|_| true, true);
     let rec = *s.ide.take().unwrap();
     let program = s.finish();
-    let index = build_with(rec, extra, &program, texts, &names);
+    let index = build_with(rec, extra, &program, texts, &names, &|_| true);
     Some((program, index))
 }
 
@@ -353,10 +387,16 @@ impl<'a> Sema<'a> {
         std && !(self.unit.is_some() && self.cur_file < self.files.len() && self.file_scopes.get(self.cur_file).map(|s| s.ns) == Some(self.cur_ns))
     }
 
+    /// Uses in `file` are recorded: not a declaration-only file of a unit
+    /// run (nobody asks about them; see `sema::units`).
+    fn ide_detailed(&self, file: usize) -> bool {
+        self.unit.as_ref().is_none_or(|u| u.full.get(file).copied().unwrap_or(true))
+    }
+
     /// Records a use of `key` at `span` in the current file.
     pub(crate) fn ide_ref(&mut self, span: Span, key: SymKey) {
         let file = self.cur_file;
-        if self.ide_in_std() {
+        if self.ide_in_std() || !self.ide_detailed(file) {
             return;
         }
         if let Some(r) = &mut self.ide {
@@ -388,6 +428,9 @@ impl<'a> Sema<'a> {
 
     /// Adds a receiver record (see [`Sema::ide_member_recv`]).
     pub(crate) fn ide_member_recv_in(&mut self, file: usize, name: Span, ty: TypeId) {
+        if !self.ide_detailed(file) {
+            return;
+        }
         if let Some(r) = &mut self.ide {
             r.recvs.push(MemberRecv { file, name_span: name, ty });
         }
@@ -738,22 +781,28 @@ fn narrow(text: &str, span: Span, name: &str) -> Span {
 
 /// Builds the index from the records of an analysis; `names` are the
 /// names of its type parameters.
-pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&str], names: &[String]) -> SymbolIndex {
+/// `detailed(file)` is false for the declaration-only files of a unit run
+/// (see `sema::units`): their symbols only need the kind and full name the
+/// keys of other units are made of, not signatures or doc comments.
+pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&str], names: &[String], detailed: &dyn Fn(usize) -> bool) -> SymbolIndex {
     let mut idx = SymbolIndex::default();
     let tn = |t| type_name(&p.types, t, &ShortNames(p, names));
     // Containers are resolved after all symbols exist.
     let mut containers: Vec<(SymbolId, SymKey)> = Vec::new();
-    for d in &rec.defs {
+    // Declarations of declaration-only files, added when something refers
+    // to them (keys of other units: kind and full name only).
+    let mut lazy: crate::fxhash::FxHashMap<&SymKey, &RawDef> = Default::default();
+    let base = |d: &RawDef| {
         let text = texts.get(d.file).copied().unwrap_or("");
         let name_span = narrow(text, d.name_span, &d.name);
-        let mut sym = Symbol {
+        Symbol {
             id: SymbolId(0),
             key: d.key.clone(),
             kind: SymbolKind::Local,
-            name: d.name.clone(),
-            full_name: d.name.clone(),
+            name: d.name.clone().into(),
+            full_name: d.name.clone().into(),
             loc: Some(Location { file: d.file, name_span, full_span: d.full_span }),
-            signature: String::new(),
+            signature: String::new().into(),
             ty: None,
             doc: None,
             container: None,
@@ -761,19 +810,27 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
             is_async: false,
             is_readonly: false,
             is_std: false,
-        };
+        }
+    };
+    for d in &rec.defs {
+        if !detailed(d.file) {
+            lazy.entry(&d.key).or_insert(d);
+            continue;
+        }
+        let text = texts.get(d.file).copied().unwrap_or("");
+        let mut sym = base(d);
         let mut want_doc = true;
         match &d.key {
             SymKey::Ns(path) => {
                 sym.kind = SymbolKind::Namespace;
-                sym.full_name = path.clone();
-                sym.signature = format!("namespace {path}");
+                sym.full_name = path.clone().into();
+                sym.signature = format!("namespace {path}").into();
                 want_doc = false;
             }
             SymKey::Struct(i) => {
                 let st = &p.structs[*i as usize];
                 sym.kind = SymbolKind::Struct;
-                sym.full_name = st.full_name.clone();
+                sym.full_name = st.full_name.clone().into();
                 let mut s = format!("struct {}", st.name);
                 if !st.fields.is_empty() {
                     s.push_str(" {\n");
@@ -789,72 +846,72 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
                     }
                     s.push('}');
                 }
-                sym.signature = s;
+                sym.signature = s.into();
             }
             SymKey::Interface(i) => {
                 let it = &p.interfaces[*i as usize];
                 sym.kind = SymbolKind::Interface;
-                sym.full_name = it.full_name.clone();
+                sym.full_name = it.full_name.clone().into();
                 let mut s = format!("interface {} {{\n", it.name);
                 for m in &it.methods {
                     s.push_str(&format!("    {}\n", iface_method_sig(p, names, m)));
                 }
                 s.push('}');
-                sym.signature = s;
+                sym.signature = s.into();
             }
             SymKey::Enum(i) => {
                 let e = &p.enums[*i as usize];
                 sym.kind = SymbolKind::Enum;
-                sym.full_name = e.full_name.clone();
+                sym.full_name = e.full_name.clone().into();
                 let vs: Vec<String> = e.variants.iter().map(|v| variant_sig(p, names, v)).collect();
-                sym.signature = format!("enum {} {{ {} }}", e.name, vs.join(", "));
+                sym.signature = format!("enum {} {{ {} }}", e.name, vs.join(", ")).into();
             }
             SymKey::Variant(e, v) => {
                 let en = &p.enums[*e as usize];
                 sym.kind = SymbolKind::Variant;
-                sym.full_name = format!("{}.{}", en.full_name, d.name);
+                sym.full_name = format!("{}.{}", en.full_name, d.name).into();
                 sym.is_readonly = true;
                 if let Some(var) = en.variants.get(*v as usize) {
-                    sym.signature = format!("{}.{}", en.name, variant_sig(p, names, var));
+                    sym.signature = format!("{}.{}", en.name, variant_sig(p, names, var)).into();
                 }
             }
             SymKey::Field(s, f) => {
                 let st = &p.structs[*s as usize];
                 sym.kind = SymbolKind::Field;
-                sym.full_name = format!("{}.{}", st.full_name, d.name);
+                sym.full_name = format!("{}.{}", st.full_name, d.name).into();
                 if let Some(field) = st.fields.get(*f as usize) {
                     sym.ty = Some(field.ty);
-                    sym.signature = format!("{} {}", field.name, tn(field.ty));
+                    sym.signature = format!("{} {}", field.name, tn(field.ty)).into();
                 }
             }
             SymKey::IfaceMethod(i, m) => {
                 let it = &p.interfaces[*i as usize];
                 sym.kind = SymbolKind::Method;
-                sym.full_name = format!("{}.{}", it.full_name, d.name);
+                sym.full_name = format!("{}.{}", it.full_name, d.name).into();
                 if let Some(ms) = it.methods.get(*m as usize) {
-                    sym.signature = iface_method_sig(p, names, ms);
+                    sym.signature = iface_method_sig(p, names, ms).into();
                 }
             }
             SymKey::Func(f) => {
                 let func = &p.funcs[*f as usize];
                 sym.kind = if matches!(func.kind, FuncKind::Method { .. }) { SymbolKind::Method } else { SymbolKind::Func };
-                sym.full_name = func.full_name.clone();
+                sym.full_name = func.full_name.clone().into();
                 sym.is_static = matches!(func.kind, FuncKind::Method { is_static: true, .. });
                 sym.is_async = func.is_async;
-                sym.signature = func_signature_with(p, names, *f, false);
+                sym.signature = func_signature_with(p, names, *f, false).into();
             }
             SymKey::Global(g) => {
                 let gl = &p.globals[*g as usize];
-                sym.full_name = gl.full_name.clone();
+                sym.full_name = gl.full_name.clone().into();
                 sym.ty = Some(gl.ty);
                 if gl.is_const {
                     sym.kind = SymbolKind::Const;
                     sym.is_readonly = true;
                     let value = gl.value.as_ref().map(|v| format!(" = {}", crate::hir::dump::const_str(v))).unwrap_or_default();
-                    sym.signature = format!("const {} {}{value}", gl.name, tn(gl.ty));
+                    sym.signature = format!("const {} {}{value}", gl.name, tn(gl.ty)).into();
                 } else {
                     sym.kind = SymbolKind::Global;
-                    sym.signature = format!("var {} {}", gl.name, tn(gl.ty));
+                    sym.signature = format!("var {} {}", gl.name, tn(gl.ty)).into();
                 }
             }
             SymKey::Local(f, l) => {
@@ -863,21 +920,21 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
                     sym.ty = Some(local.ty);
                     if local.kind == LocalKind::Param {
                         sym.kind = SymbolKind::Param;
-                        sym.signature = format!("{} {}", local.name, tn(local.ty));
+                        sym.signature = format!("{} {}", local.name, tn(local.ty)).into();
                     } else {
-                        sym.signature = format!("var {} {}", local.name, tn(local.ty));
+                        sym.signature = format!("var {} {}", local.name, tn(local.ty)).into();
                     }
                 }
             }
             SymKey::LocalConst(..) => {
                 sym.kind = SymbolKind::Const;
                 sym.is_readonly = true;
-                sym.signature = d.detail.clone().unwrap_or_default();
+                sym.signature = d.detail.clone().unwrap_or_default().into();
             }
             SymKey::Std(_) | SymKey::Builtin(_) => {}
         }
         if want_doc {
-            sym.doc = doc_comment(text, d.full_span.start);
+            sym.doc = doc_comment(text, d.full_span.start).map(Into::into);
         }
         let id = idx.add(sym);
         if let Some(c) = &d.container {
@@ -888,6 +945,11 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
     let ensure = |idx: &mut SymbolIndex, key: &SymKey| -> Option<SymbolId> {
         if let Some(id) = idx.lookup(key) {
             return Some(id);
+        }
+        if let Some(d) = lazy.get(key) {
+            let mut sym = base(d);
+            light_symbol(&mut sym, d, p);
+            return Some(idx.add(sym));
         }
         Some(idx.add(implicit_symbol(key, extra.std_info.get(key).cloned())?))
     };
@@ -917,16 +979,17 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
             idx.symbols[id.0 as usize].container = c;
         }
     }
-    idx.set_member_recvs(rec.recvs);
-    let mut seen = HashSet::new();
+    idx.set_member_recvs(rec.recvs.into_iter().filter(|r| detailed(r.file)).collect());
+    let mut seen = crate::fxhash::FxHashSet::default();
     for (file, span, key) in rec.refs {
+        if !detailed(file) {
+            continue;
+        }
         let Some(sym) = ensure(&mut idx, &key).or_else(|| idx.lookup(&key)) else { continue };
         if !seen.insert((file, span.start, span.end, sym)) {
             continue;
         }
-        let i = idx.references.len();
         idx.references.push(Reference { file, span, symbol: sym });
-        idx.refs_by_symbol.entry(sym).or_default().push(i);
     }
     for (fi, mut f) in extra.files.into_iter().enumerate() {
         for (glob, named, key) in &extra.imports[fi] {
@@ -942,7 +1005,61 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
         }
         idx.files.push(Some(f));
     }
+    idx.refs_by_symbol = RefTable::of(&idx.references, idx.symbols.len());
     idx
+}
+
+/// Kind and full name of `sym` (a declaration of `d`) without its
+/// signature and doc comment: the part of [`build_with`] that keys need.
+fn light_symbol(sym: &mut Symbol, d: &RawDef, p: &Program) {
+    match &d.key {
+        SymKey::Ns(path) => {
+            sym.kind = SymbolKind::Namespace;
+            sym.full_name = path.as_str().into();
+        }
+        SymKey::Struct(i) => {
+            sym.kind = SymbolKind::Struct;
+            sym.full_name = p.structs[*i as usize].full_name.as_str().into();
+        }
+        SymKey::Interface(i) => {
+            sym.kind = SymbolKind::Interface;
+            sym.full_name = p.interfaces[*i as usize].full_name.as_str().into();
+        }
+        SymKey::Enum(i) => {
+            sym.kind = SymbolKind::Enum;
+            sym.full_name = p.enums[*i as usize].full_name.as_str().into();
+        }
+        SymKey::Variant(e, _) => {
+            sym.kind = SymbolKind::Variant;
+            sym.full_name = format!("{}.{}", p.enums[*e as usize].full_name, d.name).into();
+            sym.is_readonly = true;
+        }
+        SymKey::Field(s, _) => {
+            sym.kind = SymbolKind::Field;
+            sym.full_name = format!("{}.{}", p.structs[*s as usize].full_name, d.name).into();
+        }
+        SymKey::IfaceMethod(i, _) => {
+            sym.kind = SymbolKind::Method;
+            sym.full_name = format!("{}.{}", p.interfaces[*i as usize].full_name, d.name).into();
+        }
+        SymKey::Func(f) => {
+            let func = &p.funcs[*f as usize];
+            sym.kind = if matches!(func.kind, FuncKind::Method { .. }) { SymbolKind::Method } else { SymbolKind::Func };
+            sym.full_name = func.full_name.as_str().into();
+        }
+        SymKey::Global(g) => {
+            let gl = &p.globals[*g as usize];
+            sym.full_name = gl.full_name.as_str().into();
+            sym.kind = if gl.is_const { SymbolKind::Const } else { SymbolKind::Global };
+        }
+        SymKey::Local(f, l) => {
+            if p.funcs.get(*f as usize).and_then(|func| func.locals.get(*l as usize)).is_some_and(|x| x.kind == LocalKind::Param) {
+                sym.kind = SymbolKind::Param;
+            }
+        }
+        SymKey::LocalConst(..) => sym.kind = SymbolKind::Const,
+        SymKey::Std(_) | SymKey::Builtin(_) => {}
+    }
 }
 
 /// `task.Channel<int>.Send` without its type arguments.
@@ -992,10 +1109,10 @@ pub(crate) fn implicit_symbol(key: &SymKey, info: Option<(SymbolKind, String)>) 
         id: SymbolId(0),
         key: key.clone(),
         kind,
-        name,
-        full_name: full,
+        name: name.into(),
+        full_name: full.into(),
         loc: None,
-        signature: sig,
+        signature: sig.into(),
         ty: None,
         doc: None,
         container: None,

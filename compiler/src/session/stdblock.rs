@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 /// the std index files (shifted past the session files on assembly).
 pub(crate) struct StdBlock {
     pub symbols: Vec<Symbol>,
-    pub by_key: HashMap<SymKey, SymbolId>,
+    pub by_key: crate::fxhash::FxHashMap<SymKey, SymbolId>,
     pub ns_members: HashMap<String, Vec<(String, SymbolId)>>,
 }
 
@@ -67,11 +67,11 @@ pub(crate) fn block(std: Option<&Arc<StdIndex>>) -> Arc<StdBlock> {
             sym.loc = Some(Location { file: d.file, name_span: d.name_span, full_span: d.full_span });
             sym.is_std = true;
             if sym.doc.is_none() {
-                sym.doc = d.doc.clone();
+                sym.doc = d.doc.clone().map(Into::into);
             }
             // Placeholder signatures of stdlib templates (`func Get`).
             if !sym.signature.contains('(') && !sym.signature.contains('{') && matches!(sym.kind, SymbolKind::Func | SymbolKind::Method | SymbolKind::Struct | SymbolKind::Enum) {
-                sym.signature = d.signature.clone();
+                sym.signature = d.signature.clone().into();
             }
         }
     }
@@ -88,20 +88,20 @@ pub(crate) fn block(std: Option<&Arc<StdIndex>>) -> Arc<StdBlock> {
 /// keyed `SymKey::Std` by path, the key sema records for their uses), and
 /// the `@intrinsic` structs that document a builtin type's methods
 /// (`task.Task.Cancel` for `Task<T>`), from the `std/` sources.
-fn add_members(std: &StdIndex, symbols: &mut Vec<Symbol>, by_key: &mut HashMap<SymKey, SymbolId>) {
-    let add = |symbols: &mut Vec<Symbol>, by_key: &mut HashMap<SymKey, SymbolId>, d: &crate::stdindex::StdDecl, kind: SymbolKind, container: Option<SymbolId>| -> SymbolId {
+fn add_members(std: &StdIndex, symbols: &mut Vec<Symbol>, by_key: &mut crate::fxhash::FxHashMap<SymKey, SymbolId>) {
+    let add = |symbols: &mut Vec<Symbol>, by_key: &mut crate::fxhash::FxHashMap<SymKey, SymbolId>, d: &crate::stdindex::StdDecl, kind: SymbolKind, container: Option<SymbolId>| -> SymbolId {
         let id = SymbolId(symbols.len() as u32);
         let key = SymKey::Std(d.full_name.clone());
         symbols.push(Symbol {
             id,
             key: key.clone(),
             kind,
-            name: d.name.clone(),
-            full_name: d.full_name.clone(),
+            name: d.name.clone().into(),
+            full_name: d.full_name.clone().into(),
             loc: Some(Location { file: d.file, name_span: d.name_span, full_span: d.full_span }),
-            signature: d.signature.clone(),
+            signature: d.signature.clone().into(),
             ty: None,
-            doc: d.doc.clone(),
+            doc: d.doc.clone().map(Into::into),
             container,
             is_static: d.is_static,
             is_async: d.signature.starts_with("async "),

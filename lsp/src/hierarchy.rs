@@ -31,10 +31,10 @@ pub(crate) fn item(a: &Analysis, version: u64, id: SymbolId, uri_of: &impl Fn(us
     let mut data = symbol_data(a, id);
     data["v"] = version.into();
     Some(CallHierarchyItem {
-        name: s.name.clone(),
+        name: s.name.clone().to_string(),
         kind: features::lsp_kind(s.kind),
         tags: None,
-        detail: Some(s.signature.clone()).filter(|d| !d.is_empty()),
+        detail: Some(s.signature.to_string()).filter(|d| !d.is_empty()),
         uri: uri_of(loc.file)?,
         range: range(f, loc.full_span),
         selection_range: range(f, loc.name_span),

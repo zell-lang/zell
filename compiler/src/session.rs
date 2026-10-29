@@ -28,8 +28,11 @@ mod fragment;
 mod incr;
 mod remap;
 mod stdblock;
+mod synthetic;
 
 pub use incr::Stats;
+#[doc(hidden)]
+pub use synthetic::synthetic_file;
 
 use crate::ast;
 use crate::diagnostics::{codes, Diagnostic, Diagnostics, Fix, TextEdit};
@@ -407,7 +410,7 @@ impl Analysis {
             _ => s.signature.lines().next().unwrap_or("").to_string(),
         };
         let full_span = if loc.full_span.start <= loc.name_span.start && loc.full_span.end >= loc.name_span.end { loc.full_span } else { loc.name_span };
-        DocumentSymbol { name: s.name.clone(), kind: s.kind, detail, full_span, name_span: loc.name_span, symbol: Some(id), children }
+        DocumentSymbol { name: s.name.to_string(), kind: s.kind, detail, full_span, name_span: loc.name_span, symbol: Some(id), children }
     }
 }
 
@@ -447,7 +450,7 @@ mod tests {
         // `import app.models` does not name User; the struct literal does.
         assert_eq!(a.references_of(user).len(), 1);
         let local = a.symbol_at(main, MAIN.find("u.Hello").unwrap() as u32).unwrap();
-        assert_eq!(a.index.symbol(local).signature, "var u User");
+        assert_eq!(a.index.symbol(local).signature.as_ref(), "var u User");
     }
 
     #[test]
@@ -473,7 +476,7 @@ mod tests {
         let main = a.file_index("main.zl").unwrap();
         let off = main_broken.find("u.\n").unwrap() as u32;
         let id = a.symbol_at(main, off).expect("u resolves in the broken line");
-        assert_eq!(a.index.symbol(id).signature, "var u User");
+        assert_eq!(a.index.symbol(id).signature.as_ref(), "var u User");
         let errs: Vec<&Diagnostic> = a.diagnostics_for(main).collect();
         assert_eq!(errs.len(), 1, "only the syntax error: {errs:?}");
     }
@@ -571,7 +574,7 @@ mod tests {
         // A body: only its own unit.
         s.update_file("lib.zl", LIB.replace("x * 2", "x + x"));
         let a = s.analyze();
-        assert_eq!(s.last_stats(), Stats { dirty: 1, unit_runs: 1, full_run: false, units: 3 });
+        assert_eq!(s.last_stats(), Stats { dirty: 1, unit_runs: 1, full_run: false, run_files: 1, units: 3 });
         assert_eq!(a.canonical(), s.analyze_full().canonical());
         // A signature: also the importer, which now has an error.
         s.update_file("lib.zl", LIB.replace("x int) int", "x int) string").replace("x * 2", "\"\""));
@@ -591,7 +594,7 @@ mod tests {
         assert_eq!(a.files[loc.file].path, "lib.zl");
         let id = a.symbol_at(main, APP.find("Twice").unwrap() as u32).unwrap();
         assert_eq!(a.references_of(id).len(), 1);
-        assert_eq!(a.index.symbol(id).signature, "func Twice(x int) int");
+        assert_eq!(a.index.symbol(id).signature.as_ref(), "func Twice(x int) int");
         let y = a.symbol_at(main, APP.find("y int").unwrap() as u32).unwrap();
         assert_eq!(index::short_type_name(&a.hir, a.index.symbol(y).ty.unwrap()), "int");
     }

@@ -343,17 +343,17 @@ fn extract_fn(a: &Analysis, file: usize, ast: &ast::File, text: &str, sel: Span)
     let ty_of = |id| a.index.symbol(id).ty.map(|t| short_type_name(&a.hir, t)).unwrap_or_else(|| "int".into());
     for r in a.index.references.iter().filter(|r| r.file == file) {
         let sym = a.index.symbol(r.symbol);
-        if !matches!(sym.kind, SymbolKind::Local | SymbolKind::Param) || sym.name == "this" {
+        if !matches!(sym.kind, SymbolKind::Local | SymbolKind::Param) || &*sym.name == "this" {
             continue;
         }
         let Some(loc) = sym.loc else { continue };
         let inside_use = range.start <= r.span.start && r.span.end <= range.end;
         let declared_inside = range.start <= loc.name_span.start && loc.name_span.end <= range.end;
-        if inside_use && !declared_inside && loc.name_span.start >= fspan.start && !params.iter().any(|p| p.0 == sym.name) {
-            params.push((sym.name.clone(), ty_of(r.symbol)));
+        if inside_use && !declared_inside && loc.name_span.start >= fspan.start && !params.iter().any(|p| *p.0 == *sym.name) {
+            params.push((sym.name.to_string(), ty_of(r.symbol)));
         }
-        if declared_inside && r.span.start >= range.end && r.span.end <= fspan.end && !results.iter().any(|p| p.0 == sym.name) {
-            results.push((sym.name.clone(), ty_of(r.symbol)));
+        if declared_inside && r.span.start >= range.end && r.span.end <= fspan.end && !results.iter().any(|p| *p.0 == *sym.name) {
+            results.push((sym.name.to_string(), ty_of(r.symbol)));
         }
     }
     let is_async = is_word(body, "await");

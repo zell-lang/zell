@@ -63,7 +63,7 @@ fn decl_target(a: &Analysis, key: Option<SymKey>, full_name: &str, file: usize, 
             }
         }
     }
-    a.index.symbols.iter().find(|s| s.full_name == plain && s.loc.is_some() && s.kind != SymbolKind::Local).and_then(|s| s.loc).map(|l| (l.file, l.name_span))
+    a.index.symbols.iter().find(|s| *s.full_name == *plain && s.loc.is_some() && s.kind != SymbolKind::Local).and_then(|s| s.loc).map(|l| (l.file, l.name_span))
 }
 
 /// The name of the declaration (or member) of `f` whose span is `span`.

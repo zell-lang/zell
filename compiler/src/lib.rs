@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod doc;
 pub mod driver;
 pub mod fmt;
+pub mod fxhash;
 pub mod hir;
 pub mod lexer;
 pub mod lines;

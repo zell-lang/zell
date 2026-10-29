@@ -295,7 +295,7 @@ pub fn run_unit(files: &[&ast::File], texts: &[&str], full: Vec<bool>, index_ns:
     let rec = *s.ide.take().unwrap();
     let unit = *s.unit.take().unwrap();
     let program = s.finish();
-    let index = index::build_with(rec, extra, &program, texts, &names);
+    let index = index::build_with(rec, extra, &program, texts, &names, &|f| lint_files.get(f).copied().unwrap_or(false));
     let names: Vec<String> = names;
     if !diags.has_errors() {
         crate::sema::lint::check(&program, texts, &|f| lint_files.get(f).copied().unwrap_or(false), &mut diags);
@@ -360,5 +360,5 @@ pub fn std_symbols() -> SymbolIndex {
     let (extra, names) = s.ide_collect_extras_for(&|p| crate::sema::stdlib::is_std_namespace(p), true);
     let rec = *s.ide.take().unwrap();
     let program = s.finish();
-    index::build_with(rec, extra, &program, &[""], &names)
+    index::build_with(rec, extra, &program, &[""], &names, &|_| true)
 }
