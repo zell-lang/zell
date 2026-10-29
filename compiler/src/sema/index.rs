@@ -367,12 +367,27 @@ impl<'a> Sema<'a> {
     }
 
     /// Records the receiver type of the member access `base.name` (`name`
-    /// may be empty: `x.` being typed), for member completion.
+    /// may be empty: `x.` being typed), for member completion. In a
+    /// generic body under its abstract check (recording is otherwise off
+    /// there), a type parameter with an interface constraint is kept as
+    /// that interface: its members are what the body may use.
     pub(crate) fn ide_member_recv(&mut self, name: Span, ty: TypeId) {
-        let file = self.cur_file;
+        if self.ide.is_none() && self.gen.recv_only {
+            if let Some(super::generics::Bound::Iface(i)) = self.bound_of(ty) {
+                if !self.ide_in_std() && name != Span::DUMMY {
+                    self.gen.abstract_recvs.push((self.cur_file, name, i));
+                }
+            }
+            return;
+        }
         if self.ide_in_std() || name == Span::DUMMY || self.tt.is_invalid(ty) {
             return;
         }
+        self.ide_member_recv_in(self.cur_file, name, ty);
+    }
+
+    /// Adds a receiver record (see [`Sema::ide_member_recv`]).
+    pub(crate) fn ide_member_recv_in(&mut self, file: usize, name: Span, ty: TypeId) {
         if let Some(r) = &mut self.ide {
             r.recvs.push(MemberRecv { file, name_span: name, ty });
         }

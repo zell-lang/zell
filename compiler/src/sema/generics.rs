@@ -161,6 +161,15 @@ pub(crate) struct GenState<'a> {
     /// abstract check: always comma-ok in every instance (DESIGN.md,
     /// comma-ok), even when the parameter is instantiated as a tuple.
     pub comma_ok_param: HashSet<(usize, crate::span::Span)>,
+    /// Template under its abstract check (bodies of instances are checked
+    /// with IDE recording off).
+    pub abstract_root: Option<u32>,
+    /// Set while a body of the template under its abstract check is checked:
+    /// receivers that are type parameters with an interface constraint are
+    /// collected into [`GenState::abstract_recvs`] for member completion.
+    pub recv_only: bool,
+    /// `(file, member name span, constraint interface type)`.
+    pub abstract_recvs: Vec<(usize, crate::span::Span, TypeId)>,
 }
 
 /// Saved analyser context around an instantiation.
@@ -854,9 +863,11 @@ impl<'a> Sema<'a> {
             depth: std::mem::replace(&mut self.gen.depth, info.depth),
             muted: false,
         };
+        let recv_only = std::mem::replace(&mut self.gen.recv_only, self.gen.abstract_root == Some(info.root));
         let unit_prev = self.unit_enter(self.unit_func_node(fid));
         self.check_body_in_scope(fid, decl, body);
         self.unit_leave(unit_prev);
+        self.gen.recv_only = recv_only;
         self.leave(saved);
     }
 
@@ -922,6 +933,7 @@ impl<'a> Sema<'a> {
             let unit_prev = self.unit_enter(node);
             let saved_fns = std::mem::take(&mut self.fns);
             let args = self.param_types(t);
+            self.gen.abstract_root = Some(t);
             match self.gen.templates[t as usize].decl {
                 TmplDecl::Func(_) | TmplDecl::Method(..) => {
                     if let Some(fid) = self.instantiate_func(t, args, span) {
@@ -953,12 +965,17 @@ impl<'a> Sema<'a> {
                     }
                 }
             }
+            self.gen.abstract_root = None;
             self.fns = saved_fns;
             self.unit_leave(unit_prev);
             self.rollback(mark);
             if self.error_count() > before {
                 self.gen.templates[t as usize].failed = true;
             }
+        }
+        let recvs = std::mem::take(&mut self.gen.abstract_recvs);
+        for (file, span, ty) in recvs {
+            self.ide_member_recv_in(file, span, ty);
         }
     }
 
