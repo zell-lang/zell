@@ -616,6 +616,9 @@ mod protocol;
 #[path = "server/intrinsics.rs"]
 mod intrinsics;
 
+#[path = "server/members.rs"]
+mod members;
+
 // ---------------------------------------------------------------------------
 // Stage 3-5 features
 // ---------------------------------------------------------------------------

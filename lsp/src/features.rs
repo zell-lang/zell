@@ -425,6 +425,10 @@ enum Target {
     /// A value of struct type (or pointer to struct).
     StructValue(u32),
     IfaceValue(u32),
+    /// A value of enum type: its methods.
+    EnumValue(u32),
+    /// A tuple: its elements `0`, `1`, ...
+    TupleValue(Vec<TypeId>),
     ErrorValue,
     /// A value of a std struct or of a builtin type documented by an
     /// `@intrinsic` std struct (`Task<T>`: `task.Task`): the members of
@@ -502,6 +506,15 @@ pub(crate) fn completions(a: &Analysis, file: usize, off: u32) -> Vec<Completion
         start -= 1;
     }
     if start > 0 && bytes[start - 1] == b'.' && !(start >= 2 && bytes[start - 2] == b'.') {
+        // Typed path: sema recorded the receiver of the member access
+        // whose name starts here (`f().`, `xs[0].`, `(await g()).`, ...).
+        if let Some(target) = a.index.member_receiver(file, start as u32).and_then(|ty| value_target(a, ty)) {
+            let items = target_members(a, file, target);
+            if !items.is_empty() {
+                return items;
+            }
+        }
+        // Fallback (namespaces, types, a stale analysis): a chain of names.
         let mut segs: Vec<&str> = Vec::new();
         let mut end = start - 1;
         loop {
@@ -616,13 +629,38 @@ fn value_target(a: &Analysis, ty: TypeId) -> Option<Target> {
     }
     let std = |path: &str| a.index.lookup(&SymKey::Std(path.to_string())).map(Target::StdValue);
     match t {
-        Type::Struct(d) if a.index.lookup(&SymKey::Struct(d.0)).is_none() => a.hir.structs.get(d.0 as usize).and_then(|st| std(&zell::sema::index::strip_type_args(&st.full_name))),
+        Type::Struct(d) if struct_symbol(a, d.0).is_none() => a.hir.structs.get(d.0 as usize).and_then(|st| std(&zell::sema::index::strip_type_args(&st.full_name))),
         Type::Task(_) => std("task.Task"),
         Type::Struct(d) => Some(Target::StructValue(d.0)),
         Type::Interface(d) => Some(Target::IfaceValue(d.0)),
+        Type::Enum(d) => Some(Target::EnumValue(d.0)),
+        Type::Tuple(elems) => Some(Target::TupleValue(elems.clone())),
         Type::Error => Some(Target::ErrorValue),
         _ => None,
     }
+}
+
+/// The symbol of user struct `sid`: its own, or for an instance of a
+/// generic struct (`Box<int>`) the symbol of the generic declaration.
+fn struct_symbol(a: &Analysis, sid: u32) -> Option<SymbolId> {
+    if let Some(id) = a.index.lookup(&SymKey::Struct(sid)) {
+        return Some(id);
+    }
+    let st = a.hir.structs.get(sid as usize)?;
+    if !st.full_name.contains('<') {
+        return None;
+    }
+    let name = zell::sema::index::strip_type_args(&st.full_name);
+    a.index.symbols.iter().find(|s| s.kind == SymbolKind::Struct && !s.is_std && s.full_name == name).map(|s| s.id)
+}
+
+/// Same lookup for interfaces (generic instances by their declaration).
+fn iface_symbol(a: &Analysis, iid: u32) -> Option<SymbolId> {
+    if let Some(id) = a.index.lookup(&SymKey::Interface(iid)) {
+        return Some(id);
+    }
+    let name = zell::sema::index::strip_type_args(&a.hir.interfaces.get(iid as usize)?.full_name);
+    a.index.symbols.iter().find(|s| s.kind == SymbolKind::Interface && s.full_name == name).map(|s| s.id)
 }
 
 fn symbol_target(a: &Analysis, id: SymbolId) -> Option<Target> {
@@ -669,7 +707,14 @@ fn member_completions(a: &Analysis, file: usize, off: u32, segs: &[&str]) -> Vec
             _ => None,
         };
     }
-    let Some(target) = target else { return Vec::new() };
+    match target {
+        Some(target) => target_members(a, file, target),
+        None => Vec::new(),
+    }
+}
+
+/// The completion items of the members of `target` as seen from `file`.
+fn target_members(a: &Analysis, file: usize, target: Target) -> Vec<CompletionItem> {
     let own_ns = file_ns(a, file).unwrap_or("").to_string();
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -698,10 +743,25 @@ fn member_completions(a: &Analysis, file: usize, off: u32, segs: &[&str]) -> Vec
         }
         Target::StructValue(sid) => struct_members(a, sid, &own_ns, &mut out, &mut seen, 0),
         Target::IfaceValue(iid) => {
-            if let Some(id) = a.index.lookup(&SymKey::Interface(iid)) {
+            if let Some(id) = iface_symbol(a, iid) {
                 for c in a.index.children(id) {
                     out.push(item(a, &a.index.symbol(c).name, c));
                 }
+            }
+        }
+        Target::EnumValue(eid) => {
+            if let Some(id) = a.index.lookup(&SymKey::Enum(eid)) {
+                for c in a.index.children(id) {
+                    let cs = a.index.symbol(c);
+                    if matches!(cs.kind, SymbolKind::Method | SymbolKind::Func) && !cs.is_static && seen.insert(cs.name.clone()) {
+                        out.push(item(a, &cs.name, c));
+                    }
+                }
+            }
+        }
+        Target::TupleValue(elems) => {
+            for (i, t) in elems.iter().enumerate() {
+                out.push(plain(&i.to_string(), CompletionItemKind::FIELD, Some(&zell::sema::index::short_type_name(&a.hir, *t))));
             }
         }
         Target::ErrorValue => out.push(plain("Message", CompletionItemKind::METHOD, Some("func Message() string"))),
@@ -718,15 +778,24 @@ fn member_completions(a: &Analysis, file: usize, off: u32, segs: &[&str]) -> Vec
 }
 
 /// Fields and non-static methods of struct `sid`, then promoted members.
+/// For an instance of a generic struct, field details show the
+/// substituted types (`Value int` of `Box<int>`).
 fn struct_members(a: &Analysis, sid: u32, own_ns: &str, out: &mut Vec<CompletionItem>, seen: &mut HashSet<String>, depth: usize) {
-    let Some(id) = a.index.lookup(&SymKey::Struct(sid)) else { return };
+    let Some(id) = struct_symbol(a, sid) else { return };
     let s = a.index.symbol(id);
     let ns = s.full_name.strip_suffix(&format!(".{}", s.name)).unwrap_or("");
+    let instance = a.index.lookup(&SymKey::Struct(sid)).is_none();
     for c in a.index.children(id) {
         let cs = a.index.symbol(c);
         let wanted = cs.kind == SymbolKind::Field || (cs.kind == SymbolKind::Method && !cs.is_static);
         if wanted && (ns == own_ns || exported(&cs.name)) && seen.insert(cs.name.clone()) {
-            out.push(item(a, &cs.name, c));
+            let mut it = item(a, &cs.name, c);
+            if instance && cs.kind == SymbolKind::Field {
+                if let Some(f) = a.hir.structs.get(sid as usize).and_then(|st| st.fields.iter().find(|f| f.name == cs.name)) {
+                    it.detail = Some(format!("{} {}", cs.name, zell::sema::index::short_type_name(&a.hir, f.ty)));
+                }
+            }
+            out.push(it);
         }
     }
     if depth > 8 {

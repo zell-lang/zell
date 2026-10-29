@@ -60,7 +60,7 @@ Summary: **54 ok, 7 partial, 12 missing, 8 n.a.** (81 rows).
 | rename: `documentChanges` with versions when supported | ok | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | — |
 | rename of a symbol declared in an unopened file | ok | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | — |
 | rename that would clash / shadow | partial | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | Refused when the new name is a sibling member or a name visible at a use (local declared earlier in the function, namespace member, import). Not detected: a local declared *later* in the same block that a use would then capture, and clashes inside other functions' block scopes (the index has no block scopes). |
-| `textDocument/completion` | partial | `completion_members_and_scope` | No `textEdit` (clients use their word range; correct in VS Code with the contributed `wordPattern`), no `sortText` (client-side fuzzy order), no snippets (so `snippetSupport` is never violated), `isIncomplete` is always false and the list is never truncated. Members after `.` only for a chain of names: `a.b().` and chains split across lines (`x\n    .y.`) give no items (needs typing of the expression at the cursor). |
+| `textDocument/completion` | partial | `completion_members_and_scope` | No `textEdit` (clients use their word range; correct in VS Code with the contributed `wordPattern`), no `sortText` (client-side fuzzy order), no snippets (so `snippetSupport` is never violated), `isIncomplete` is always false and the list is never truncated. Members after `.` are listed from the receiver's type as sema recorded it, so any expression works (`f().`, `x.Get().Name.`, `xs[0].`, `m["k"].`, `(await g()).`, lambda bodies; test `member_completion_on_typed_expressions`); namespaces and types by name fall back to the chain of names in the text. |
 | `completionItem/resolve` | ok | `completion_resolve_adds_documentation` | — |
 | `textDocument/signatureHelp` | ok | `signature_help_shows_parameters_and_doc` | Parameter label offsets follow the negotiated encoding. |
 | `textDocument/inlayHint`, `inlayHint/resolve` | ok | `inlay_hints_types_and_parameter_names`, `inlay_hint_and_code_action_resolve` | — |
@@ -125,8 +125,7 @@ Summary: **54 ok, 7 partial, 12 missing, 8 n.a.** (81 rows).
 
 Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
 
-1. **Completion quality** (M–L): typing of the expression at the cursor
-   for members after calls and multi-line chains, `textEdit` with the
+1. **Completion quality** (M): `textEdit` with the
    replaced range, `sortText` by relevance (locals > members > globals >
    keywords), call snippets with `snippetSupport`, auto-import items.
 2. **Incremental analysis** (L): every edit re-analyses the whole project
