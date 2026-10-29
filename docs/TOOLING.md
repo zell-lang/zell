@@ -119,7 +119,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/references`, `documentHighlight` | `referencesProvider`, `documentHighlightProvider` | `handlers.rs`, `assist.rs` |
 | `textDocument/hover` | `hoverProvider` | `features.rs` |
 | `textDocument/documentSymbol`, `workspace/symbol` | `documentSymbolProvider`, `workspaceSymbolProvider` | `features.rs`, `assist.rs` |
-| `textDocument/prepareRename`, `rename` | `renameProvider { prepareProvider }` | `handlers.rs` |
+| `textDocument/prepareRename`, `rename` | `renameProvider { prepareProvider }` | `handlers.rs`, `scoping.rs` |
 | `textDocument/completion`, `completionItem/resolve` | `completionProvider { triggerCharacters: ["."], resolveProvider }` | `completion.rs` |
 | `textDocument/signatureHelp` | `signatureHelpProvider` (`(`, `,`) | `assist.rs` |
 | `textDocument/inlayHint`, `inlayHint/resolve` | `inlayHintProvider { resolveProvider }` | `assist.rs` |
@@ -127,6 +127,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/codeLens`, `codeLens/resolve` | `codeLensProvider { resolveProvider }` | `lens.rs` |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | `semanticTokensProvider { full: { delta: true }, range: true }` | `features.rs` |
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | `callHierarchyProvider` | `hierarchy.rs` |
+| `textDocument/prepareTypeHierarchy`, `typeHierarchy/supertypes`, `subtypes` | `typeHierarchyProvider` (дописывается в JSON `initialize`: в lsp-types 0.95 нет поля) | `typehier.rs` |
 | `textDocument/foldingRange`, `selectionRange` | `foldingRangeProvider`, `selectionRangeProvider` | `features.rs`, `nav.rs` |
 | `textDocument/formatting`, `rangeFormatting` | `documentFormattingProvider`, `documentRangeFormattingProvider` | `assist.rs` |
 | `textDocument/onTypeFormatting` | `documentOnTypeFormattingProvider` (`}`, `\n`) | `assist.rs` |
@@ -150,10 +151,44 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 - **Rename**: `WorkspaceEdit` одним ответом на все файлы (в том числе
   неоткрытые); `documentChanges` с версиями открытых документов, если
   клиент объявил `workspace.workspaceEdit.documentChanges`, иначе
-  `changes`. Переименование, при котором имя совпало бы с видимым в месте
-  использования (локальная, член пространства имён, импорт) или с соседним
-  членом, отклоняется с объяснением; `prepareRename` там, где нет символа, —
-  `null`, на символе std/зависимости — ошибка с причиной.
+  `changes`. Переименование, меняющее смысл какого-либо имени, отклоняется
+  с объяснением (объявление, с которым конфликт, и его строка): соседний
+  член; локальная того же блока (объявленная до или после); локальная
+  внутреннего блока, которая перехватила бы использование, или
+  переименованная локальная, которая перехватила бы использование
+  другого объявления с новым именем; глобальное имя, у использования
+  которого (в любой функции) видна локальная с новым именем; член
+  пространства имён или импорт, видимый у использования глобального.
+  Области видимости блоков строятся по синтаксическому дереву файла
+  (`compiler/src/session/scopes.rs`, `Analysis::scopes`, по требованию):
+  параметры функции и лямбды, каждый блок, `for` с переменными цикла,
+  `catch` с переменной ошибки, ветка `switch`; `var`/`const` видны после
+  своего оператора. `prepareRename` там, где нет символа, —
+  `null`, на символе std/зависимости — ошибка с причиной. Псевдонимы
+  типов (`type Celsius = float`) — символы вида `TypeAlias`
+  (`SymKey::Alias` по полному имени): определение, hover, ссылки и
+  rename работают как у типов; использование псевдонима структуры
+  (`P{}` при `type P = Point`) — ссылка на псевдоним.
+- **Иерархия типов** и `implementation`: таблица удовлетворения
+  интерфейсов `Analysis::types` (`compiler/src/session/typegraph.rs`).
+  Каждый прогон единицы записывает «формы» своих структур, перечислений и
+  интерфейсов (`compiler/src/sema/shapes.rs`: методы с сигнатурами в
+  полных именах типов, встроенные структуры; обобщённый тип — по
+  абстрактному экземпляру проверки шаблона, параметры `$0`, `$1`); формы
+  std строятся раз на процесс. При сборке `Analysis` формы всех единиц и
+  std связываются заново (структурно, как в sema: методы с телом по
+  умолчанию можно не реализовывать, продвинутые из встроенных структур
+  методы считаются, у запечатанного интерфейса — только типы его
+  пространства имён; интерфейс — подтип другого, если у него есть все его
+  методы, решение 18). Поэтому правка интерфейса в одном пространстве
+  имён сразу меняет отношения типов в других, даже не импортирующих его,
+  без их переанализа. Надтипы структуры — интерфейсы, которым она
+  удовлетворяет, и встроенные структуры; подтипы интерфейса — типы и
+  интерфейсы, которые ему удовлетворяют; подтипы структуры — встраивающие
+  её структуры. Обобщённая структура удовлетворяет интерфейсу, если
+  удовлетворяет при каких-то аргументах (`Get() T` и `Get() int`).
+  Пустые интерфейсы и интерфейсы только с методами по умолчанию,
+  встроенный `error` и обобщённые структуры std в таблицу не входят.
 - **Синхронизация** инкрементальная: диапазоны `contentChanges` в
   согласованной кодировке применяются к копии текста у сервера по порядку (`\r` перед `\n` не часть
   строки, позиции за концом строки/текста прижимаются к концу); изменение
@@ -486,10 +521,11 @@ sema — режим единиц `sema::units`).
 сборка `Analysis` по всем фрагментам (растёт с размером проекта: символы
 и ссылки всех единиц копируются в общий индекс).
 
-`textDocument/implementation` и `typeDefinition` для функций читают
+`typeDefinition` для функций читает
 `Analysis::program_partial()` — полную программу с телами, которая
 анализируется по требованию один раз на анализ (на `tests/spec` около
-0,6 с при первом запросе после правки).
+0,6 с при первом запросе после правки); `implementation` берёт таблицу
+`Analysis::types` и полную программу больше не строит.
 
 В `std/` правка любого файла std пересчитывает всю единицу стандартной библиотеки
 (171 файл); зато эти файлы теперь анализируются в собственных

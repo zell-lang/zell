@@ -346,3 +346,90 @@ fn incremental_equals_full_on_synthetic_workspace() {
         compare(&inc.canonical(), &s.analyze_full().canonical(), &format!("edit {i} of {} ({stats:?})", texts[k].0));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The satisfaction table (type hierarchy) across namespaces.
+// ---------------------------------------------------------------------------
+
+const SHAPES: &str = "namespace app.shapes
+
+interface Shape {
+    func Area() int
+}
+
+interface Named {
+    Shape
+    func Name() string
+}
+
+interface Getter {
+    func Get() int
+}
+";
+
+const BASE: &str = "namespace app.base
+
+struct Base {
+    func Name() string { return \"b\" }
+}
+";
+
+const KINDS: &str = "namespace app.kinds
+
+import app.base
+
+struct Sq {
+    Base
+    Side int
+    func Area() int { return this.Side }
+}
+
+struct Box<T> {
+    V T
+    func Get() T { return this.V }
+}
+";
+
+fn supers(a: &zell::session::Analysis, name: &str) -> Vec<String> {
+    let g = &a.types;
+    let Some(t) = g.find(name) else { return vec![format!("no {name}")] };
+    g.supertypes(t).iter().map(|&i| g.types[i as usize].name.clone()).collect()
+}
+
+#[test]
+fn satisfaction_follows_edits_in_other_namespaces() {
+    let mut s = Session::new();
+    step(&mut s, "initial", |s| {
+        for (p, t) in [("shapes.zl", SHAPES), ("base.zl", BASE), ("kinds.zl", KINDS)] {
+            s.update_file(p, t);
+        }
+    });
+    let a = s.analyze();
+    assert_eq!(supers(&a, "app.kinds.Sq"), ["app.base.Base", "app.shapes.Named", "app.shapes.Shape"]);
+    assert_eq!(supers(&a, "app.kinds.Box"), ["app.shapes.Getter"], "Box<T> with T = int");
+    assert_eq!(supers(&a, "app.shapes.Named"), ["app.shapes.Shape"]);
+
+    // An interface edited in a namespace `kinds` does not import: only
+    // `shapes` is re-analysed, the relation follows.
+    let (_, st) = step(&mut s, "interface signature", |s| s.update_file("shapes.zl", SHAPES.replace("func Area() int", "func Area() float")));
+    assert_eq!(st.dirty, 1, "{st:?}");
+    assert_eq!(supers(&s.analyze(), "app.kinds.Sq"), ["app.base.Base"]);
+    let (_, st) = step(&mut s, "interface default", |s| s.update_file("shapes.zl", SHAPES.replace("func Get() int\n", "func Get() int\n    func Size() int { return 0 }\n")));
+    assert_eq!(st.dirty, 1, "{st:?}");
+    assert_eq!(supers(&s.analyze(), "app.kinds.Box"), ["app.shapes.Getter"]);
+    step(&mut s, "interface restored", |s| s.update_file("shapes.zl", SHAPES));
+
+    // A promoted method removed from the embedded struct.
+    step(&mut s, "embedded method removed", |s| s.update_file("base.zl", BASE.replace("func Name()", "func Label()")));
+    assert_eq!(supers(&s.analyze(), "app.kinds.Sq"), ["app.base.Base", "app.shapes.Shape"]);
+    step(&mut s, "embedded restored", |s| s.update_file("base.zl", BASE));
+    // The generic's method changes; then the type goes away.
+    step(&mut s, "generic method", |s| s.update_file("kinds.zl", KINDS.replace("func Get() T", "func Get() []T")));
+    assert!(supers(&s.analyze(), "app.kinds.Box").is_empty());
+    step(&mut s, "type removed", |s| s.update_file("kinds.zl", KINDS.replace("struct Sq", "struct Square")));
+    assert_eq!(supers(&s.analyze(), "app.kinds.Sq"), ["no app.kinds.Sq"]);
+    step(&mut s, "file removed", |s| {
+        s.remove_file("shapes.zl");
+    });
+    assert!(supers(&s.analyze(), "app.kinds.Square").iter().all(|n| !n.starts_with("app.shapes")));
+}

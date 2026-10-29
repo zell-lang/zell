@@ -4,12 +4,12 @@ Audit of `zell-lsp` (`lsp/`) against the Language Server Protocol 3.17.
 Status: **ok** (implemented, tested), **partial** (works, with the gap
 named), **missing** (not implemented), **n.a.** (does not apply to Zell or
 to a server). Evidence is a test in `lsp/tests/server.rs`,
-`lsp/tests/server/protocol.rs`, `lsp/tests/server/conformance.rs` or
-`lsp/tests/server/workspace.rs`
+`lsp/tests/server/protocol.rs`, `lsp/tests/server/conformance.rs`,
+`lsp/tests/server/typehier.rs` or `lsp/tests/server/workspace.rs`
 (`server::<name>`), or a source location. Method table and design notes:
 `docs/TOOLING.md` "LSP-сервер".
 
-Summary: **69 ok, 1 partial, 5 missing, 8 n.a.** (83 rows).
+Summary: **74 ok, 0 partial, 4 missing, 8 n.a.** (86 rows).
 
 ## Lifecycle and base protocol
 
@@ -53,7 +53,8 @@ Summary: **69 ok, 1 partial, 5 missing, 8 n.a.** (83 rows).
 | `textDocument/definition` | ok | `definition_of_method_call`, `definition_and_hover_reach_into_std_sources` (returns `file://` URIs of `std/` sources) | — |
 | `textDocument/declaration` | ok | `implementation_type_definition_and_declaration` | Same as definition (Zell has no separate declarations). |
 | `textDocument/typeDefinition` | ok | `implementation_type_definition_and_declaration` | — |
-| `textDocument/implementation` | ok | `implementation_type_definition_and_declaration` | — |
+| `textDocument/implementation` | ok | `implementation_type_definition_and_declaration`, `type_hierarchy_supertypes_and_subtypes` (promoted methods, from the satisfaction table) | — |
+| Type aliases: definition, hover, references, rename (`type Celsius = float`, `type P = Point` with `P{}`) | ok | `type_aliases_navigate_and_rename` | A use of an alias of a struct, enum or interface is the alias's, not the aliased type's. |
 | `textDocument/references` | ok | `references_and_rename_across_files`, `dependencies_in_zell_deps_are_read_only_project_files` | — |
 | `textDocument/documentHighlight` | ok | `workspace_symbols_and_highlights` | — |
 | `textDocument/documentSymbol` | ok | `document_symbols_are_hierarchical` | — |
@@ -61,7 +62,7 @@ Summary: **69 ok, 1 partial, 5 missing, 8 n.a.** (83 rows).
 | `textDocument/rename`: one `WorkspaceEdit` across files | ok | `references_and_rename_across_files` | — |
 | rename: `documentChanges` with versions when supported | ok | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | — |
 | rename of a symbol declared in an unopened file | ok | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | — |
-| rename that would clash / shadow | partial | `rename_is_versioned_null_where_nothing_and_refuses_clashes` | Refused when the new name is a sibling member or a name visible at a use (local declared earlier in the function, namespace member, import). Not detected: a local declared *later* in the same block that a use would then capture, and clashes inside other functions' block scopes (the index has no block scopes). |
+| rename that would clash / shadow | ok | `rename_is_versioned_null_where_nothing_and_refuses_clashes`, `rename_refuses_every_shadowing_case` | Refused with the clashing declaration and its line: a sibling member; a local of the same block (declared before or after); a local whose use would be captured by an inner block's local, or that would capture a use of another declaration of the name; a global used where a local of the new name is visible, in any function; a global hidden by a namespace member or import at a use. Block scopes come from the syntax tree (`compiler/src/session/scopes.rs`); a `var` is visible after its statement, so its own initializer is not captured. |
 | `textDocument/completion` | ok | `completion_members_and_scope`, `completion_ranks_and_replaced_range`, `completion_snippets_and_insert_replace_with_capable_client`, `completion_auto_import_and_truncation`, `completion_on_fallible_weak_and_type_parameter_receivers`, `member_completion_on_typed_expressions` | `textEdit` with the typed prefix (`InsertReplaceEdit` with `insertReplaceSupport`); server-side filter (case-insensitive subsequence) and `sortText` (prefix matches first, then locals > params > fields > members > own namespace > imported/std/builtins > auto-import > keywords; members in declaration order, fields first); cut to 200 with `isIncomplete`; call and statement snippets only with `snippetSupport`; keywords filtered by position; auto-import items carry the `import` line as `additionalTextEdits`. Members after `.` come from the receiver's sema type (any expression; `T!` and `weak *T` give `T`'s members, a type parameter its constraint interface's methods); namespaces and types by name fall back to the chain of names in the text. |
 | `completionItem/resolve` | ok | `completion_resolve_adds_documentation` | — |
 | `textDocument/signatureHelp` | ok | `signature_help_shows_parameters_and_doc` | Parameter label offsets follow the negotiated encoding. |
@@ -77,7 +78,7 @@ Summary: **69 ok, 1 partial, 5 missing, 8 n.a.** (83 rows).
 | `textDocument/formatting`, `rangeFormatting` | ok | `formatting_whole_document_and_range` | — |
 | `textDocument/onTypeFormatting` | ok | `on_type_formatting_formats_the_enclosing_block_only` | `}` formats the block it closes, a newline the innermost block around the cursor (except the cursor's line); only edits inside that block; nothing on a syntax error or at the top level. |
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | ok | `call_hierarchy_incoming_and_outgoing` | A call is a reference followed by `(`; function values passed around are not calls. |
-| `textDocument/prepareTypeHierarchy`, `typeHierarchy/*` | missing | — | Structs satisfy interfaces structurally; the satisfaction check exists only inside `nav.rs` (implementation) and is not indexed. Needs a struct ↔ interface table in `sema/index.rs`. |
+| `textDocument/prepareTypeHierarchy`, `typeHierarchy/supertypes`, `typeHierarchy/subtypes` | ok | `type_hierarchy_supertypes_and_subtypes` (embedding, a generic struct, `io.Reader` from std, a namespace that does not import the interface, an edit of the interface) | `typeHierarchyProvider` is added to the `initialize` JSON (lsp-types 0.95 has no field for it). Supertypes of a struct or enum: interfaces it satisfies and structs it embeds; of an interface: interfaces whose methods it has. A generic struct is shown at its declaration and satisfies an interface when some type arguments make it (`Get() T` satisfies `Get() int`); generic std structs are not in the table. Empty interfaces (and defaults-only ones) and the builtin `error` are left out. |
 | `textDocument/documentLink` | ok | `imports_link_to_their_namespace` | `import a.b` (and `a.b.T`) links to the file declaring the namespace first (std: the first source declaring one of its members); a namespace spans files and directories, and editors do not open directories. Paths in `zell.toml` are not linked. |
 | `textDocument/linkedEditingRange` | n.a. | — | No paired tags in Zell. |
 | `textDocument/moniker` | n.a. | — | No cross-repository index format. |
@@ -154,9 +155,13 @@ Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
 4. ~~**Dynamic registration + workspace folders + `workspace/configuration`**~~
    — done 2026-10-29 (`lsp/src/workspace.rs`).
 5. ~~**Refresh requests**~~ — done 2026-10-29 (`lsp/src/workspace.rs`).
-6. **Type hierarchy** (M): index struct ↔ interface satisfaction.
-7. **Rename scoping** (M): block scopes in the index to detect every
-   shadowing case.
+6. ~~**Type hierarchy**~~ — done 2026-10-29: method-set shapes per unit
+   (`compiler/src/sema/shapes.rs`), satisfaction over the whole program
+   at assembly (`compiler/src/session/typegraph.rs`), shared with
+   `implementation`. Left: generic std structs, the builtin `error`.
+7. ~~**Rename scoping**~~ — done 2026-10-29 (`compiler/src/session/scopes.rs`,
+   `lsp/src/scoping.rs`); also type aliases are symbols now (definition,
+   hover, references, rename).
 8. **Refactoring code actions** (M each): extract variable/function,
    inline variable and organize imports are done (`lsp/src/refactor.rs`);
    still missing: inline function, fill struct fields, implement

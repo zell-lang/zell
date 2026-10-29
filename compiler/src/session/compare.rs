@@ -68,6 +68,15 @@ impl Analysis {
             ms.sort();
             out.push(format!("ns {ns} {ms:?}"));
         }
+        let g = &self.types;
+        for (t, sh) in g.types.iter().enumerate() {
+            if sh.loc.is_none_or(|l| l.file >= n_user) {
+                continue;
+            }
+            let names = |ids: &[u32]| ids.iter().map(|&i| g.types[i as usize].name.clone()).collect::<Vec<_>>();
+            let ms: Vec<String> = sh.methods.iter().map(|m| format!("{}{}{}", m.name, m.sig, if m.default { " default" } else { "" })).collect();
+            out.push(format!("type {} {:?} at={:?} methods={ms:?} embeds={:?} supers={:?} subs={:?}", sh.name, sh.kind, sh.loc.map(|l| (path(l.file), l.name_span.start)), sh.embeds, names(g.supertypes(t as u32)), names(g.subtypes(t as u32))));
+        }
         out.push(format!("ok {}", self.ok));
         out.sort();
         out

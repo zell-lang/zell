@@ -6,7 +6,7 @@
 //! main thread against the current text.
 
 use crate::snapshot::{Answer, Done, Snap};
-use crate::{assist, features, files, hierarchy, lens, nav, path_of, range, Running, Server};
+use crate::{assist, features, files, hierarchy, lens, nav, path_of, range, typehier, Running, Server};
 use lsp_server::{Request, RequestId};
 use lsp_types::request::Request as _;
 use lsp_types::*;
@@ -30,6 +30,8 @@ const PROJECT_WIDE: &[&str] = &[
     request::WorkspaceSymbolRequest::METHOD,
     request::CallHierarchyIncomingCalls::METHOD,
     request::CallHierarchyOutgoingCalls::METHOD,
+    request::TypeHierarchySupertypes::METHOD,
+    request::TypeHierarchySubtypes::METHOD,
     request::CodeLensResolve::METHOD,
 ];
 
@@ -74,6 +76,9 @@ impl Server {
             request::CallHierarchyPrepare => Snap::prepare_call_hierarchy,
             request::CallHierarchyIncomingCalls => Snap::incoming_calls,
             request::CallHierarchyOutgoingCalls => Snap::outgoing_calls,
+            request::TypeHierarchyPrepare => Snap::prepare_type_hierarchy,
+            request::TypeHierarchySupertypes => Snap::supertypes,
+            request::TypeHierarchySubtypes => Snap::subtypes,
         }
         route! { call:
             request::FoldingRangeRequest => Self::folding,
@@ -375,6 +380,21 @@ impl Snap {
         Ok(hierarchy::outgoing(a, v, &p.item, &|f| self.uri_of(a, f)))
     }
 
+    fn prepare_type_hierarchy(&self, p: TypeHierarchyPrepareParams) -> Reply<Option<Vec<TypeHierarchyItem>>> {
+        let tdp = p.text_document_position_params;
+        Ok(self.locate(&tdp.text_document, Some(tdp.position)).and_then(|(a, file, off)| typehier::prepare(&a, file, off, &|f| self.uri_of(&a, f))))
+    }
+
+    fn supertypes(&self, p: TypeHierarchySupertypesParams) -> Reply<Option<Vec<TypeHierarchyItem>>> {
+        let a = &self.analysis;
+        Ok(typehier::related(a, &p.item, true, &|f| self.uri_of(a, f)))
+    }
+
+    fn subtypes(&self, p: TypeHierarchySubtypesParams) -> Reply<Option<Vec<TypeHierarchyItem>>> {
+        let a = &self.analysis;
+        Ok(typehier::related(a, &p.item, false, &|f| self.uri_of(a, f)))
+    }
+
     fn prepare_rename(&self, p: TextDocumentPositionParams) -> Reply<Option<PrepareRenameResponse>> {
         let Some((a, file, off)) = self.locate(&p.text_document, Some(p.position)) else { return Ok(None) };
         // Nothing to rename here: null (the client says so); a symbol that
@@ -416,9 +436,10 @@ impl Snap {
     }
 
     /// Why renaming `sym` (written at `spans`) to `new_name` would change
-    /// what a name means: a sibling member or a name visible at one of the
-    /// uses (a local, a global of the namespace or an import) already
-    /// called `new_name`.
+    /// what a name means: a sibling member, a local of the same block or
+    /// one that would capture a use or be captured (`scoping.rs`, by block
+    /// scopes), or for a global a name of the namespace or an import
+    /// visible at a use.
     fn rename_conflict(a: &Analysis, sym: zell::sema::index::SymbolId, spans: &[(usize, Span)], new_name: &str) -> Option<String> {
         use zell::sema::index::SymbolKind as K;
         let s = a.index.symbol(sym);
@@ -438,7 +459,13 @@ impl Snap {
         if matches!(s.kind, K::Field | K::Method | K::Variant) {
             return None; // members are reached through a value: only siblings clash
         }
-        spans.iter().find_map(|&(f, sp)| crate::completion::resolve_name(a, f, sp.start, new_name).filter(|&o| o != sym).map(clash))
+        if let Some(o) = crate::scoping::conflict(a, sym, spans, new_name) {
+            return Some(clash(o));
+        }
+        if matches!(s.kind, K::Local | K::Param) || matches!(s.key, zell::sema::index::SymKey::LocalConst(..)) {
+            return None; // a local hides globals of the name where they are not used
+        }
+        spans.iter().find_map(|&(f, _)| crate::completion::global_name(a, f, new_name).filter(|&o| o != sym).map(clash))
     }
 
     /// A workspace edit of `changes`: versioned `documentChanges` when the

@@ -41,6 +41,7 @@ mod generics;
 mod ifaces;
 mod opover;
 pub mod index;
+pub mod shapes;
 pub mod lint;
 mod infer;
 mod iterate;

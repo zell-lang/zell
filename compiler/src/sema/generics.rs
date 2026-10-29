@@ -942,6 +942,7 @@ impl<'a> Sema<'a> {
                 }
                 TmplDecl::Struct(_) => {
                     if let Some(sid) = self.instantiate_struct(t, args, span) {
+                        self.ide_template_shape(t, Some(sid), None);
                         let ms: Vec<FuncId> = self.structs[sid as usize].methods.iter().map(|m| m.1).collect();
                         for f in ms {
                             self.check_function_body(f);
@@ -958,6 +959,7 @@ impl<'a> Sema<'a> {
                 }
                 TmplDecl::Enum(_) => {
                     if let Some(eid) = self.instantiate_enum(t, args, span) {
+                        self.ide_template_shape(t, None, Some(eid));
                         let ms: Vec<FuncId> = self.enums[eid as usize].methods.iter().map(|m| m.1).collect();
                         for f in ms {
                             self.check_function_body(f);

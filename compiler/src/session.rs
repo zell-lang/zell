@@ -29,6 +29,8 @@ mod incr;
 mod remap;
 mod stdblock;
 mod synthetic;
+pub mod scopes;
+pub mod typegraph;
 
 pub use incr::Stats;
 #[doc(hidden)]
@@ -292,13 +294,25 @@ pub struct Analysis {
     ok: bool,
     /// Per file: a read-only library file (dependency or std source).
     pub read_only: Vec<bool>,
+    /// Struct, enum and interface satisfaction over the whole program
+    /// (user and std types; see `typegraph`).
+    pub types: Arc<typegraph::TypeGraph>,
     /// The complete program, analysed on demand by [`Analysis::program`].
     full: OnceLock<Option<Program>>,
+    /// Block scopes per session file, on demand ([`Analysis::scopes`]).
+    scopes: Vec<OnceLock<scopes::FileScopes>>,
 }
 
 impl Analysis {
     fn new(files: Vec<Arc<SourceFile>>, asts: Vec<Arc<ast::File>>, diagnostics: Vec<Diagnostic>, index: SymbolIndex, hir: Program, ok: bool, read_only: Vec<bool>) -> Analysis {
-        Analysis { files, asts, diagnostics, index, hir, ok, read_only, full: OnceLock::new() }
+        let scopes = asts.iter().map(|_| OnceLock::new()).collect();
+        Analysis { files, asts, diagnostics, index, hir, ok, read_only, types: Arc::default(), full: OnceLock::new(), scopes }
+    }
+
+    /// The block scopes of session file `file` (none for std sources).
+    pub fn scopes(&self, file: usize) -> Option<&scopes::FileScopes> {
+        let ast = self.asts.get(file)?;
+        Some(self.scopes.get(file)?.get_or_init(|| scopes::FileScopes::of(ast)))
     }
 
     /// The analysed program (with function bodies) when every file parsed

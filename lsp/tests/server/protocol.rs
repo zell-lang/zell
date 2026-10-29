@@ -22,7 +22,7 @@ fn change_range(c: &Client, uri: &Url, version: i32, changes: Vec<TextDocumentCo
     c.notify::<notification::DidChangeTextDocument>(DidChangeTextDocumentParams { text_document: VersionedTextDocumentIdentifier { uri: uri.clone(), version }, content_changes: changes });
 }
 
-fn goto<R: request::Request<Params = GotoDefinitionParams, Result = Option<GotoDefinitionResponse>>>(c: &mut Client, uri: &Url, pos: Position) -> Vec<Location> {
+pub(crate) fn goto<R: request::Request<Params = GotoDefinitionParams, Result = Option<GotoDefinitionResponse>>>(c: &mut Client, uri: &Url, pos: Position) -> Vec<Location> {
     match c.request::<R>(GotoDefinitionParams { text_document_position_params: tdp(uri, pos), work_done_progress_params: Default::default(), partial_result_params: Default::default() }) {
         Some(GotoDefinitionResponse::Scalar(l)) => vec![l],
         Some(GotoDefinitionResponse::Array(v)) => v,

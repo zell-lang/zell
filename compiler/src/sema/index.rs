@@ -45,6 +45,8 @@ pub enum SymKey {
     Std(String),
     /// Builtin function or type (`len`, `int`).
     Builtin(String),
+    /// User type alias by full name (`app.Celsius`).
+    Alias(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -63,6 +65,7 @@ pub enum SymbolKind {
     Param,
     BuiltinType,
     BuiltinFunc,
+    TypeAlias,
 }
 
 /// Index into [`SymbolIndex::symbols`].
@@ -133,6 +136,9 @@ pub struct FileInfo {
 #[derive(Clone, Debug, Default)]
 pub struct SymbolIndex {
     pub symbols: Vec<Symbol>,
+    /// Struct, enum and interface shapes of the run (see `sema::shapes`);
+    /// related over the whole program in `Analysis::types`.
+    pub shapes: Vec<super::shapes::TypeShape>,
     pub references: Vec<Reference>,
     /// Indexed by file; `None` for files that were not analysed.
     pub files: Vec<Option<FileInfo>>,
@@ -285,7 +291,7 @@ impl SymbolIndex {
     /// `by_key` maps the key of every symbol to its id.
     pub(crate) fn from_parts(symbols: Vec<Symbol>, references: Vec<Reference>, files: Vec<Option<FileInfo>>, ns_members: HashMap<String, Vec<(String, SymbolId)>>, by_key: FxHashMap<SymKey, SymbolId>) -> SymbolIndex {
         let refs_by_symbol = RefTable::of(&references, symbols.len());
-        SymbolIndex { symbols, references, files, ns_members, by_key, refs_by_symbol, member_recvs: Vec::new() }
+        SymbolIndex { symbols, references, files, ns_members, by_key, refs_by_symbol, member_recvs: Vec::new(), shapes: Vec::new() }
     }
 
     fn add(&mut self, mut s: Symbol) -> SymbolId {
@@ -349,6 +355,10 @@ pub(crate) struct Recorder {
     ns_defined: HashSet<String>,
     /// Local constants by scope position (fn depth, scope, entry).
     local_consts: HashMap<(usize, usize, usize), SymKey>,
+    /// Full name of the user alias the last lookup looked through.
+    pub(crate) alias_hit: Option<String>,
+    /// Struct, enum and interface shapes for the type hierarchy.
+    pub(crate) shapes: Vec<super::shapes::TypeShape>,
 }
 
 /// Facts gathered from sema after analysis.
@@ -475,7 +485,7 @@ impl<'a> Sema<'a> {
 
     pub(crate) fn member_key(&self, m: Member) -> Option<SymKey> {
         Some(match m {
-            Member::Alias(_) => return None,
+            Member::Alias(a) => SymKey::Alias(self.alias_full_name(a)?),
             Member::Struct(i) => SymKey::Struct(i),
             Member::Interface(i) => SymKey::Interface(i),
             Member::Enum(i) => SymKey::Enum(i),
@@ -505,7 +515,11 @@ impl<'a> Sema<'a> {
         if !self.ide_on() {
             return;
         }
+        // A struct, enum or interface reached through an alias
+        // (`Sema::unalias`): the use is the alias's.
+        let hit = self.ide.as_mut().and_then(|r| r.alias_hit.take());
         let key = match res {
+            PathRes::Member(Member::Struct(_) | Member::Interface(_) | Member::Enum(_)) if hit.as_deref().is_some_and(|h| h.rsplit('.').next() == Some(seg.name.as_str())) => hit.map(SymKey::Alias),
             PathRes::Member(m) => self.member_key(m),
             PathRes::Builtin(_) | PathRes::BuiltinType(_) => Some(SymKey::Builtin(seg.name.clone())),
             PathRes::Variant(e, v) => Some(SymKey::Variant(e, v)),
@@ -547,6 +561,30 @@ impl<'a> Sema<'a> {
         let Some(func) = self.fns.last().and_then(|f| f.func) else { return };
         let ident = ast::Ident { name: name.to_string(), span };
         self.ide_def(SymKey::Local(func.0, id.0), &ident, span, Some(SymKey::Func(func.0)));
+    }
+
+    /// Full name of user alias `a` (std aliases have no symbol of their own).
+    pub(crate) fn alias_full_name(&self, a: u32) -> Option<String> {
+        let al = self.aliases.get(a as usize)?;
+        let ns = &self.nss[al.ns];
+        (!ns.is_std).then(|| format!("{}.{}", ns.path, al.decl.name.name))
+    }
+
+    /// Records the declaration of user alias `a`, resolved to `ty`.
+    pub(crate) fn ide_def_alias(&mut self, a: u32, ty: TypeId) {
+        if !self.ide_on() {
+            return;
+        }
+        let Some(full) = self.alias_full_name(a) else { return };
+        let al = &self.aliases[a as usize];
+        let (decl, file, ns) = (al.decl, al.file, al.ns);
+        if decl.name.span == Span::DUMMY {
+            return;
+        }
+        let detail = format!("type {} = {}", decl.name.name, self.tn(ty));
+        let container = Some(SymKey::Ns(self.nss[ns].path.clone()));
+        let r = self.ide.as_mut().unwrap();
+        r.defs.push(RawDef { key: SymKey::Alias(full), file, name: decl.name.name.clone(), name_span: decl.name.span, full_span: decl.span, container, detail: Some(detail) });
     }
 
     /// Records a local constant just pushed onto the innermost scope.
@@ -786,6 +824,8 @@ fn narrow(text: &str, span: Span, name: &str) -> Span {
 /// keys of other units are made of, not signatures or doc comments.
 pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&str], names: &[String], detailed: &dyn Fn(usize) -> bool) -> SymbolIndex {
     let mut idx = SymbolIndex::default();
+    let mut rec = rec;
+    idx.shapes = std::mem::take(&mut rec.shapes);
     let tn = |t| type_name(&p.types, t, &ShortNames(p, names));
     // Containers are resolved after all symbols exist.
     let mut containers: Vec<(SymbolId, SymKey)> = Vec::new();
@@ -931,6 +971,11 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
                 sym.is_readonly = true;
                 sym.signature = d.detail.clone().unwrap_or_default().into();
             }
+            SymKey::Alias(full) => {
+                sym.kind = SymbolKind::TypeAlias;
+                sym.full_name = full.clone().into();
+                sym.signature = d.detail.clone().unwrap_or_default().into();
+            }
             SymKey::Std(_) | SymKey::Builtin(_) => {}
         }
         if want_doc {
@@ -1058,6 +1103,11 @@ fn light_symbol(sym: &mut Symbol, d: &RawDef, p: &Program) {
             }
         }
         SymKey::LocalConst(..) => sym.kind = SymbolKind::Const,
+        SymKey::Alias(full) => {
+            sym.kind = SymbolKind::TypeAlias;
+            sym.full_name = full.as_str().into();
+            sym.signature = d.detail.clone().unwrap_or_default().into();
+        }
         SymKey::Std(_) | SymKey::Builtin(_) => {}
     }
 }

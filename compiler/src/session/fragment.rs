@@ -6,7 +6,8 @@
 
 use super::remap::{Copier, DeclStore, Keys};
 use crate::diagnostics::Diagnostic;
-use crate::sema::index::{ImportInfo, SymKey, Symbol, SymbolId, SymbolKind};
+use crate::sema::index::{ImportInfo, Location, SymKey, Symbol, SymbolId, SymbolKind};
+use crate::sema::shapes::TypeShape;
 use crate::sema::units::{MainInfo, RunOutput};
 use crate::span::Span;
 use crate::types::TypeId;
@@ -48,6 +49,8 @@ pub(crate) enum FKey {
     Local(u32, u32),
     /// (index into [`Fragment::paths`], start of the name)
     LocalConst(u32, u32),
+    /// A type alias by full name.
+    Alias(String),
 }
 
 /// A symbol declared in the fragment's files.
@@ -114,6 +117,8 @@ pub(crate) struct Fragment {
     pub n_globals: u32,
     /// Total lines of the unit's files (cost estimates).
     pub lines: usize,
+    /// Shapes of the unit's types; locations index `paths`.
+    pub shapes: Vec<TypeShape>,
 }
 
 /// Kind number of a declaration key in [`SKey::Decl`].
@@ -127,6 +132,7 @@ fn decl_kind(k: &SymKey) -> Option<u8> {
         SymKey::IfaceMethod(..) => 5,
         SymKey::Func(_) => 6,
         SymKey::Global(_) => 7,
+        SymKey::Alias(_) => 8,
         _ => return None,
     })
 }
@@ -184,6 +190,7 @@ pub(crate) fn split(run: &RunOutput, files: &[RunFile], wanted: &dyn Fn(usize) -
             n_funcs: 0,
             n_globals: 0,
             lines: 0,
+            shapes: Vec::new(),
         });
         path_idx.insert((f.unit, i), frag.paths.len() as u32);
         frag.paths.push(f.path.to_string());
@@ -223,6 +230,7 @@ pub(crate) fn split(run: &RunOutput, files: &[RunFile], wanted: &dyn Fn(usize) -
                 Some(&p) => FKey::LocalConst(p, *start),
                 None => continue,
             },
+            SymKey::Alias(n) => FKey::Alias(n.clone()),
             SymKey::Ns(_) | SymKey::Std(_) | SymKey::Builtin(_) => continue,
         };
         let ty = s.ty.map(|t| copier.ty(mini, t));
@@ -342,6 +350,19 @@ pub(crate) fn split(run: &RunOutput, files: &[RunFile], wanted: &dyn Fn(usize) -
         let Some(u) = unit_of(m.file) else { continue };
         let p = path_idx[&(u, m.file)];
         out.get_mut(&u).unwrap().mains.push(MainInfo { file: p as usize, ..m.clone() });
+    }
+    for sh in &idx.shapes {
+        let Some(loc) = sh.loc else { continue };
+        let Some(u) = unit_of(loc.file) else { continue };
+        let p = path_idx[&(u, loc.file)] as usize;
+        let mut sh = sh.clone();
+        sh.loc = Some(Location { file: p, ..loc });
+        for m in &mut sh.methods {
+            if let Some(l) = &mut m.loc {
+                l.file = p;
+            }
+        }
+        out.get_mut(&u).unwrap().shapes.push(sh);
     }
     for (u, frag) in out.iter_mut() {
         frag.mini_params = frag.mini.param_names();

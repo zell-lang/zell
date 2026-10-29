@@ -21,6 +21,8 @@ struct Client {
     /// Responses received while waiting for another one.
     responses: Vec<lsp_server::Response>,
     capabilities: ServerCapabilities,
+    /// The capabilities as sent (fields lsp-types does not model).
+    raw_capabilities: serde_json::Value,
 }
 
 impl Client {
@@ -32,7 +34,7 @@ impl Client {
     fn start_with(root: &Path, adjust: impl FnOnce(&mut InitializeParams)) -> Client {
         let (server_conn, client_conn) = Connection::memory();
         let server = std::thread::spawn(move || zell_lsp::run(server_conn).expect("server failed"));
-        let mut c = Client { conn: client_conn, server: Some(server), next_id: 0, notes: Vec::new(), server_requests: Vec::new(), responses: Vec::new(), capabilities: Default::default() };
+        let mut c = Client { conn: client_conn, server: Some(server), next_id: 0, notes: Vec::new(), server_requests: Vec::new(), responses: Vec::new(), capabilities: Default::default(), raw_capabilities: Default::default() };
         let root_uri = Url::from_file_path(root).unwrap();
         #[allow(deprecated)]
         let mut params = InitializeParams {
@@ -41,7 +43,9 @@ impl Client {
             ..Default::default()
         };
         adjust(&mut params);
-        let init: InitializeResult = serde_json::from_value(c.request_raw(request::Initialize::METHOD, serde_json::to_value(params).unwrap())).unwrap();
+        let raw = c.request_raw(request::Initialize::METHOD, serde_json::to_value(params).unwrap());
+        c.raw_capabilities = raw["capabilities"].clone();
+        let init: InitializeResult = serde_json::from_value(raw).unwrap();
         assert!(init.capabilities.semantic_tokens_provider.is_some());
         c.capabilities = init.capabilities;
         c.notify::<notification::Initialized>(InitializedParams {});
@@ -1126,6 +1130,9 @@ fn hover_renders_doc_markdown_and_std_examples() {
     let h = hover(&mut c, pos_of(text, "Split(s", 0, 1));
     assert!(h.contains("<details><summary>Example</summary>") && h.contains("// Output") == false && h.contains("3 [a b c]"), "{h}");
 }
+
+#[path = "server/typehier.rs"]
+mod typehier;
 
 #[path = "server/concurrency.rs"]
 mod concurrency;

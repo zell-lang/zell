@@ -97,6 +97,7 @@ fn completion_kind(k: SymbolKind) -> CompletionItemKind {
         SymbolKind::Const => CompletionItemKind::CONSTANT,
         SymbolKind::Global | SymbolKind::Local | SymbolKind::Param => CompletionItemKind::VARIABLE,
         SymbolKind::BuiltinType => CompletionItemKind::TYPE_PARAMETER,
+        SymbolKind::TypeAlias => CompletionItemKind::CLASS,
     }
 }
 
@@ -370,7 +371,7 @@ pub(crate) fn resolve_name(a: &Analysis, file: usize, off: u32, name: &str) -> O
 
 /// Resolves a non-local name like sema's global lookup: own namespace,
 /// imports, root namespaces.
-fn global_name(a: &Analysis, file: usize, name: &str) -> Option<SymbolId> {
+pub(crate) fn global_name(a: &Analysis, file: usize, name: &str) -> Option<SymbolId> {
     let info = a.index.files.get(file)?.as_ref()?;
     if let Some(m) = a.index.ns_members.get(&info.namespace).and_then(|ms| ms.iter().find(|(n, _)| n == name)) {
         return Some(m.1);

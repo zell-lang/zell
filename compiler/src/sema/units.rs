@@ -291,6 +291,7 @@ pub fn run_unit(files: &[&ast::File], texts: &[&str], full: Vec<bool>, index_ns:
         return None;
     }
     let mains = s.unit_mains();
+    s.ide_collect_shapes(false);
     let (extra, names) = s.ide_collect_extras_for(index_ns, false);
     let rec = *s.ide.take().unwrap();
     let unit = *s.unit.take().unwrap();
@@ -357,6 +358,7 @@ pub fn std_symbols() -> SymbolIndex {
     s.unit = Some(Box::new(UnitState { full: vec![true], ..Default::default() }));
     s.run();
     s.load_all_modules();
+    s.ide_collect_shapes(true);
     let (extra, names) = s.ide_collect_extras_for(&|p| crate::sema::stdlib::is_std_namespace(p), true);
     let rec = *s.ide.take().unwrap();
     let program = s.finish();

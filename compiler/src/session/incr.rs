@@ -399,5 +399,6 @@ fn empty_fragment(files: &[(&str, &FileState)], u: &Unit) -> Fragment {
         n_funcs: 0,
         n_globals: 0,
         lines: u.lines,
+        shapes: Vec::new(),
     }
 }

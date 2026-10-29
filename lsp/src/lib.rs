@@ -45,6 +45,8 @@ mod features;
 mod files;
 mod handlers;
 mod hierarchy;
+mod typehier;
+mod scoping;
 mod lens;
 mod links;
 mod nav;
@@ -185,7 +187,10 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn std::error::Error + Sen
         server_caps.diagnostic_provider = None;
     }
     let result = InitializeResult { capabilities: server_caps, server_info: Some(ServerInfo { name: "zell-lsp".into(), version: Some(env!("CARGO_PKG_VERSION").into()) }) };
-    connection.initialize_finish(id, serde_json::to_value(result)?)?;
+    let mut result = serde_json::to_value(result)?;
+    // Not a field of `ServerCapabilities` in lsp-types 0.95.
+    result["capabilities"]["typeHierarchyProvider"] = true.into();
+    connection.initialize_finish(id, result)?;
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let mut server = Server::new(connection.sender.clone(), events_tx, caps, mode);
     if let Some(opts) = &params.initialization_options {

@@ -3,6 +3,7 @@
 //! index) instead of once per analysis.
 
 use crate::sema::index::{Location, SymKey, Symbol, SymbolId, SymbolKind};
+use crate::sema::shapes::TypeShape;
 use crate::stdindex::StdIndex;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -13,6 +14,9 @@ pub(crate) struct StdBlock {
     pub symbols: Vec<Symbol>,
     pub by_key: crate::fxhash::FxHashMap<SymKey, SymbolId>,
     pub ns_members: HashMap<String, Vec<(String, SymbolId)>>,
+    /// Std struct, enum and interface shapes; locations index the std
+    /// index files.
+    pub shapes: Vec<TypeShape>,
 }
 
 /// The std symbols as the analysis sees them (no source locations).
@@ -44,7 +48,7 @@ fn plain() -> &'static StdBlock {
             .filter(|(p, _)| crate::sema::stdlib::is_std_namespace(p))
             .map(|(p, ms)| (p.clone(), ms.iter().filter_map(|(n, id)| map.get(id).map(|i| (n.clone(), *i))).collect()))
             .collect();
-        StdBlock { symbols, by_key, ns_members }
+        StdBlock { symbols, by_key, ns_members, shapes: idx.shapes.clone() }
     })
 }
 
@@ -79,7 +83,17 @@ pub(crate) fn block(std: Option<&Arc<StdIndex>>) -> Arc<StdBlock> {
     if let Some(std) = std {
         add_members(std, &mut symbols, &mut by_key);
     }
-    let b = Arc::new(StdBlock { symbols, by_key, ns_members: base.ns_members.clone() });
+    let mut shapes = base.shapes.clone();
+    if let Some(std) = std {
+        let loc = |name: &str| std.lookup(name).map(|d| Location { file: d.file, name_span: d.name_span, full_span: d.full_span });
+        for sh in &mut shapes {
+            sh.loc = loc(&sh.name);
+            for m in &mut sh.methods {
+                m.loc = loc(&format!("{}.{}", sh.name, m.name));
+            }
+        }
+    }
+    let b = Arc::new(StdBlock { symbols, by_key, ns_members: base.ns_members.clone(), shapes });
     *last = Some((key, b.clone()));
     b
 }

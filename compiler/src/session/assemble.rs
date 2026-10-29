@@ -141,17 +141,18 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
         let mut ids = Vec::with_capacity(frag.symbols.len());
         for fs in &frag.symbols {
             let m = u.map;
-            let key = match fs.key {
-                FKey::Struct(s) => SymKey::Struct(m.structs[s as usize]),
-                FKey::Interface(i) => SymKey::Interface(m.ifaces[i as usize]),
-                FKey::Enum(e) => SymKey::Enum(m.enums[e as usize]),
-                FKey::Variant(e, v) => SymKey::Variant(m.enums[e as usize], v),
-                FKey::Field(s, f) => SymKey::Field(m.structs[s as usize], f),
-                FKey::IfaceMethod(i, k) => SymKey::IfaceMethod(m.ifaces[i as usize], k),
-                FKey::Func(f) => SymKey::Func(fbase + f),
-                FKey::Global(g) => SymKey::Global(gbase + g),
-                FKey::Local(f, l) => SymKey::Local(fbase + f, l),
-                FKey::LocalConst(p, start) => SymKey::LocalConst(gfile(p as usize), start),
+            let key = match &fs.key {
+                &FKey::Struct(s) => SymKey::Struct(m.structs[s as usize]),
+                &FKey::Interface(i) => SymKey::Interface(m.ifaces[i as usize]),
+                &FKey::Enum(e) => SymKey::Enum(m.enums[e as usize]),
+                &FKey::Variant(e, v) => SymKey::Variant(m.enums[e as usize], v),
+                &FKey::Field(s, f) => SymKey::Field(m.structs[s as usize], f),
+                &FKey::IfaceMethod(i, k) => SymKey::IfaceMethod(m.ifaces[i as usize], k),
+                &FKey::Func(f) => SymKey::Func(fbase + f),
+                &FKey::Global(g) => SymKey::Global(gbase + g),
+                &FKey::Local(f, l) => SymKey::Local(fbase + f, l),
+                &FKey::LocalConst(p, start) => SymKey::LocalConst(gfile(p as usize), start),
+                FKey::Alias(n) => SymKey::Alias(n.clone()),
             };
             let id = SymbolId(symbols.len() as u32);
             let slot = match by_key.entry(key) {
@@ -347,7 +348,34 @@ pub(crate) fn assemble(files: &[FileView], units: &[UnitView], merged: &Program,
     all_files.extend(std_files.iter().cloned());
     let mut read_only: Vec<bool> = files.iter().map(|f| f.read_only).collect();
     read_only.extend(std::iter::repeat_n(true, std_files.len()));
-    Analysis::new(all_files, files.iter().map(|f| f.ast.clone()).collect(), diagnostics, index, merged.clone(), ok, read_only)
+    let mut a = Analysis::new(all_files, files.iter().map(|f| f.ast.clone()).collect(), diagnostics, index, merged.clone(), ok, read_only);
+    a.types = Arc::new(type_graph(units, std, n));
+    a
+}
+
+/// The type hierarchy from the shapes of every unit and of std (whose
+/// files follow the `n` session files).
+fn type_graph(units: &[UnitView], std: &StdBlock, n: usize) -> super::typegraph::TypeGraph {
+    let _t = crate::build::phase("ide-types");
+    let mut shapes = Vec::with_capacity(std.shapes.len() + units.iter().map(|u| u.frag.shapes.len()).sum::<usize>());
+    for u in units {
+        for sh in &u.frag.shapes {
+            let Some(file) = sh.loc.and_then(|l| u.files.get(l.file).copied()).filter(|&f| f < n) else { continue };
+            let mut sh = sh.clone();
+            let at = |l: &mut Location| l.file = file;
+            sh.loc.as_mut().map(at);
+            sh.methods.iter_mut().filter_map(|m| m.loc.as_mut()).for_each(at);
+            shapes.push(sh);
+        }
+    }
+    for sh in &std.shapes {
+        let mut sh = sh.clone();
+        let at = |l: &mut Location| l.file += n;
+        sh.loc.as_mut().map(at);
+        sh.methods.iter_mut().filter_map(|m| m.loc.as_mut()).for_each(at);
+        shapes.push(sh);
+    }
+    super::typegraph::TypeGraph::build(shapes)
 }
 
 /// The symbol for `key`, created as an implicit symbol (namespace, std

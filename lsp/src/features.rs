@@ -89,6 +89,7 @@ fn kind_word(k: SymbolKind) -> &'static str {
         SymbolKind::Param => "parameter",
         SymbolKind::BuiltinType => "builtin type",
         SymbolKind::BuiltinFunc => "builtin function",
+        SymbolKind::TypeAlias => "type alias",
     }
 }
 
@@ -159,7 +160,7 @@ pub(crate) fn lsp_kind(k: SymbolKind) -> lsp_types::SymbolKind {
         SymbolKind::Func | SymbolKind::BuiltinFunc => L::FUNCTION,
         SymbolKind::Const => L::CONSTANT,
         SymbolKind::Global | SymbolKind::Local | SymbolKind::Param => L::VARIABLE,
-        SymbolKind::BuiltinType => L::CLASS,
+        SymbolKind::BuiltinType | SymbolKind::TypeAlias => L::CLASS,
     }
 }
 
@@ -194,7 +195,7 @@ fn token_class(s: &Symbol, decl: bool) -> (u32, u32) {
         SymbolKind::Func | SymbolKind::BuiltinFunc => T_FUNCTION,
         SymbolKind::Const | SymbolKind::Global | SymbolKind::Local => T_VARIABLE,
         SymbolKind::Param => T_PARAMETER,
-        SymbolKind::BuiltinType => T_TYPE,
+        SymbolKind::BuiltinType | SymbolKind::TypeAlias => T_TYPE,
     };
     let mut m = 0;
     if decl {

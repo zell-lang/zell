@@ -285,7 +285,8 @@ impl<'a> Sema<'a> {
     pub(crate) fn resolve_aliases(&mut self) {
         self.aliases_ready = true;
         for a in 0..self.aliases.len() {
-            self.alias_type(a as u32);
+            let t = self.alias_type(a as u32);
+            self.ide_def_alias(a as u32, t);
         }
     }
 
@@ -323,12 +324,18 @@ impl<'a> Sema<'a> {
             return m;
         }
         let t = self.alias_type(a);
-        match *self.tt.get(t) {
+        let out = match *self.tt.get(t) {
             Type::Struct(d) => Member::Struct(d.0),
             Type::Enum(d) => Member::Enum(d.0),
             Type::Interface(d) => Member::Interface(d.0),
-            _ => m,
+            _ => return m,
+        };
+        // The use is recorded as the alias's (`Sema::ide_res`).
+        if self.ide.is_some() {
+            let full = self.alias_full_name(a);
+            self.ide.as_mut().unwrap().alias_hit = full;
         }
+        out
     }
 
     pub(crate) fn new_func(&mut self, d: &'a ast::FuncDecl, kind: FuncKind, src: FuncSrc<'a>, local_name: &str) -> FuncId {

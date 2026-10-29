@@ -3,19 +3,16 @@
 //! methods to their implementations), `textDocument/typeDefinition` and
 //! `textDocument/selectionRange`.
 //!
-//! Interfaces are structural (DESIGN.md): a type implements an interface
-//! when it has every method of it with the same signature (methods with a
-//! default body may be missing), so implementations are found by
-//! checking every struct and enum of the program like sema does; sealed
-//! interfaces only count types of their own namespace. Generic types are
-//! monomorphised, so their instances are separate HIR declarations that
-//! point at the template's source; they are reported once, at the
-//! template.
+//! Interfaces are structural (DESIGN.md): implementations come from the
+//! satisfaction table of the analysis ([`Analysis::types`], built from the
+//! method sets of every struct, enum and interface, std included), which
+//! the type hierarchy (`typehier.rs`) shares. Generic types are reported
+//! once, at their declaration.
 
 use crate::assist::Walker;
 use zell::ast;
 use zell::diagnostics::Diagnostics;
-use zell::hir::{FuncId, LocalKind, MethodSig, Program};
+use zell::hir::Program;
 use zell::sema::index::{SymKey, SymbolKind};
 use zell::session::Analysis;
 use zell::span::Span;
@@ -23,13 +20,6 @@ use zell::types::{Type, TypeId};
 
 /// A declaration's place: file index and the span of its name.
 pub(crate) type Target = (usize, Span);
-
-/// A type that can implement interfaces.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Implementor {
-    Struct(u32),
-    Enum(u32),
-}
 
 /// `task.Channel<int>` -> `task.Channel`.
 fn strip_type_args(name: &str) -> String {
@@ -108,74 +98,9 @@ fn iface_target(a: &Analysis, p: &Program, iid: u32) -> Option<Target> {
     decl_target(a, in_hir(a, p).then_some(SymKey::Interface(iid)), &i.full_name, i.file, i.span)
 }
 
-fn func_target(a: &Analysis, p: &Program, f: FuncId) -> Option<Target> {
-    let func = p.funcs.get(f.0 as usize)?;
-    decl_target(a, None, &func.full_name, func.file, func.span)
-}
-
-/// Whether function `f` (a method; its `this` is not compared) has the
-/// signature of interface method `m`.
-fn same_signature(p: &Program, f: FuncId, m: &MethodSig) -> bool {
-    let Some(func) = p.funcs.get(f.0 as usize) else { return false };
-    let params: Vec<TypeId> = func.params.iter().filter_map(|l| func.locals.get(l.0 as usize)).filter(|l| l.kind != LocalKind::This).map(|l| l.ty).collect();
-    params == m.params && func.ret == m.ret && !func.is_async
-}
-
-/// The non-static method `name` of struct `sid`, following embedded
-/// structs (the shallowest promotion wins, as in sema).
-fn find_method(p: &Program, sid: u32, name: &str, depth: usize) -> Option<(FuncId, usize)> {
-    let st = p.structs.get(sid as usize)?;
-    if let Some((_, f)) = st.methods.iter().find(|(n, f)| n == name && !is_static(p, *f)) {
-        return Some((*f, depth));
-    }
-    if depth > 8 {
-        return None;
-    }
-    st.fields
-        .iter()
-        .filter(|f| f.embedded)
-        .filter_map(|f| match p.types.get(f.ty) {
-            Type::Struct(d) => find_method(p, d.0, name, depth + 1),
-            _ => None,
-        })
-        .min_by_key(|x| x.1)
-}
-
-fn is_static(p: &Program, f: FuncId) -> bool {
-    p.funcs.get(f.0 as usize).is_some_and(|f| matches!(f.kind, zell::hir::FuncKind::Method { is_static: true, .. }))
-}
-
-fn method_of(p: &Program, imp: Implementor, name: &str) -> Option<FuncId> {
-    match imp {
-        Implementor::Struct(s) => find_method(p, s, name, 0).map(|x| x.0),
-        Implementor::Enum(e) => p.enums.get(e as usize)?.methods.iter().find(|(n, _)| n == name).map(|x| x.1),
-    }
-}
-
-/// The structs and enums implementing interface `iid` of `p`.
-fn implementors(p: &Program, iid: u32) -> Vec<Implementor> {
-    let Some(it) = p.interfaces.get(iid as usize) else { return Vec::new() };
-    let is_std = zell::sema::stdlib::is_std_namespace;
-    // Sealed: only types of the interface's own namespace.
-    let allowed = |ns: zell::hir::NamespaceId, full: &str| !it.sealed || (ns == it.namespace && is_std(full) == is_std(&it.full_name));
-    let satisfies = |imp: Implementor| {
-        it.methods.iter().all(|m| match method_of(p, imp, &m.name) {
-            Some(f) => same_signature(p, f, m),
-            None => m.default.is_some(),
-        })
-    };
-    let mut out = Vec::new();
-    for (i, st) in p.structs.iter().enumerate() {
-        if allowed(st.namespace, &st.full_name) && !st.is_attribute && satisfies(Implementor::Struct(i as u32)) {
-            out.push(Implementor::Struct(i as u32));
-        }
-    }
-    for (i, e) in p.enums.iter().enumerate() {
-        if allowed(e.namespace, &e.full_name) && satisfies(Implementor::Enum(i as u32)) {
-            out.push(Implementor::Enum(i as u32));
-        }
-    }
-    out
+/// Where a shape's declaration (or a method's) is.
+fn shape_target(l: Option<zell::sema::index::Location>) -> Option<Target> {
+    l.map(|l| (l.file, l.name_span))
 }
 
 fn push_unique(out: &mut Vec<Target>, t: Option<Target>) {
@@ -186,44 +111,29 @@ fn push_unique(out: &mut Vec<Target>, t: Option<Target>) {
     }
 }
 
-/// The interface of the full program `p` with the full name `full_name`.
-fn iface_in(p: &Program, full_name: &str) -> Option<u32> {
-    let full = strip_type_args(full_name);
-    p.interfaces.iter().position(|i| strip_type_args(&i.full_name) == full).map(|i| i as u32)
-}
-
-/// `textDocument/implementation` at `off`: for an interface, the types
-/// implementing it; for an interface method, the implementing methods
-/// (types that rely on a default body are skipped). Needs the methods of
-/// every type, so it works on the full program ([`Analysis::program_partial`]).
+/// `textDocument/implementation` at `off`: for an interface, the structs
+/// and enums satisfying it; for an interface method, the implementing
+/// methods (types that rely on a default body are skipped; promoted
+/// methods count, at their declaration).
 pub(crate) fn implementations(a: &Analysis, file: usize, off: u32) -> Vec<Target> {
     let Some(id) = a.symbol_at(file, off) else { return Vec::new() };
+    let s = a.index.symbol(id);
+    let g = &a.types;
     let mut out = Vec::new();
-    match a.index.symbol(id).key {
-        SymKey::Interface(_) => {
-            let p = a.program_partial();
-            let Some(iid) = iface_in(p, &a.index.symbol(id).full_name) else { return out };
-            // Interfaces are not their own implementations, and a value of
-            // an interface type is not an implementation either.
-            for imp in implementors(p, iid) {
-                push_unique(
-                    &mut out,
-                    match imp {
-                        Implementor::Struct(s) => struct_target(a, p, s),
-                        Implementor::Enum(e) => enum_target(a, p, e),
-                    },
-                );
-            }
+    let (iface, method) = match s.key {
+        SymKey::Interface(_) => (strip_type_args(&s.full_name), None),
+        SymKey::IfaceMethod(i, _) => match a.hir.interfaces.get(i as usize) {
+            Some(it) => (strip_type_args(&it.full_name), Some(s.name.to_string())),
+            None => return out,
+        },
+        _ => return out,
+    };
+    let Some(t) = g.find(&iface) else { return out };
+    for c in g.implementors(t) {
+        match &method {
+            None => push_unique(&mut out, shape_target(g.types[c as usize].loc)),
+            Some(m) => push_unique(&mut out, g.methods(c).into_iter().find(|x| x.name == *m).and_then(|x| shape_target(x.loc))),
         }
-        SymKey::IfaceMethod(i, m) => {
-            let p = a.program_partial();
-            let Some(iid) = a.hir.interfaces.get(i as usize).and_then(|it| iface_in(p, &it.full_name)) else { return out };
-            let Some(name) = p.interfaces[iid as usize].methods.get(m as usize).map(|m| m.name.clone()) else { return out };
-            for imp in implementors(p, iid) {
-                push_unique(&mut out, method_of(p, imp, &name).and_then(|f| func_target(a, p, f)));
-            }
-        }
-        _ => {}
     }
     out.sort_by_key(|t| (t.0, t.1.start, t.1.end));
     out
