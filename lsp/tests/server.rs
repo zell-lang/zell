@@ -613,6 +613,9 @@ mod inspect;
 #[path = "server/protocol.rs"]
 mod protocol;
 
+#[path = "server/intrinsics.rs"]
+mod intrinsics;
+
 // ---------------------------------------------------------------------------
 // Stage 3-5 features
 // ---------------------------------------------------------------------------

@@ -75,7 +75,55 @@ pub(crate) fn block(std: Option<&Arc<StdIndex>>) -> Arc<StdBlock> {
             }
         }
     }
-    let b = Arc::new(StdBlock { symbols, by_key: base.by_key.clone(), ns_members: base.ns_members.clone() });
+    let mut by_key = base.by_key.clone();
+    if let Some(std) = std {
+        add_members(std, &mut symbols, &mut by_key);
+    }
+    let b = Arc::new(StdBlock { symbols, by_key, ns_members: base.ns_members.clone() });
     *last = Some((key, b.clone()));
     b
+}
+
+/// The fields and methods of the std structs and enums (`testing.T.Fatal`,
+/// keyed `SymKey::Std` by path, the key sema records for their uses), and
+/// the `@intrinsic` structs that document a builtin type's methods
+/// (`task.Task.Cancel` for `Task<T>`), from the `std/` sources.
+fn add_members(std: &StdIndex, symbols: &mut Vec<Symbol>, by_key: &mut HashMap<SymKey, SymbolId>) {
+    let add = |symbols: &mut Vec<Symbol>, by_key: &mut HashMap<SymKey, SymbolId>, d: &crate::stdindex::StdDecl, kind: SymbolKind, container: Option<SymbolId>| -> SymbolId {
+        let id = SymbolId(symbols.len() as u32);
+        let key = SymKey::Std(d.full_name.clone());
+        symbols.push(Symbol {
+            id,
+            key: key.clone(),
+            kind,
+            name: d.name.clone(),
+            full_name: d.full_name.clone(),
+            loc: Some(Location { file: d.file, name_span: d.name_span, full_span: d.full_span }),
+            signature: d.signature.clone(),
+            ty: None,
+            doc: d.doc.clone(),
+            container,
+            is_static: d.is_static,
+            is_async: d.signature.starts_with("async "),
+            is_readonly: false,
+            is_std: true,
+        });
+        by_key.insert(key, id);
+        id
+    };
+    for d in &std.decls {
+        if !matches!(d.kind, SymbolKind::Method | SymbolKind::Field) || by_key.contains_key(&SymKey::Std(d.full_name.clone())) {
+            continue;
+        }
+        let Some((parent, _)) = d.full_name.rsplit_once('.') else { continue };
+        let pid = match by_key.get(&SymKey::Std(parent.to_string())) {
+            Some(&id) => id,
+            None => {
+                let Some(pd) = std.lookup(parent).filter(|p| p.intrinsic && p.kind == SymbolKind::Struct) else { continue };
+                let ns = parent.rsplit_once('.').and_then(|(ns, _)| by_key.get(&SymKey::Ns(ns.to_string())).copied());
+                add(symbols, by_key, pd, SymbolKind::BuiltinType, ns)
+            }
+        };
+        add(symbols, by_key, d, d.kind, Some(pid));
+    }
 }

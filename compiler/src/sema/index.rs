@@ -336,6 +336,26 @@ impl<'a> Sema<'a> {
         }
     }
 
+    /// Records a call of method `fid`: a method of a stdlib struct by its
+    /// path (`testing.T.Fatal`, `task.Channel.Send`), which the std block
+    /// declares from the `std/` sources (session/stdblock.rs).
+    pub(crate) fn ide_method_ref(&mut self, span: Span, fid: FuncId) {
+        if !self.ide_on() {
+            return;
+        }
+        let f = &self.funcs[fid.0 as usize];
+        // Instances of std templates live in the caller's namespace.
+        let std_owner = match f.kind {
+            FuncKind::Method { struct_id, .. } => self.gen.inst_structs.get(&struct_id).map(|(t, _)| &self.gen.templates[*t as usize]).filter(|t| t.is_std),
+            _ => None,
+        };
+        let key = match std_owner {
+            Some(t) => SymKey::Std(format!("{}.{}.{}", self.nss[t.ns].path, t.name, f.name)),
+            None => SymKey::Func(fid.0),
+        };
+        self.ide_ref(span, key);
+    }
+
     /// Records a declaration in the current file.
     pub(crate) fn ide_def(&mut self, key: SymKey, name: &ast::Ident, full_span: Span, container: Option<SymKey>) {
         // Synthesized std declarations (`errors.Frame`) are not in any file.
@@ -865,6 +885,21 @@ pub(crate) fn build_with(rec: Recorder, extra: Extras, p: &Program, texts: &[&st
         idx.files.push(Some(f));
     }
     idx
+}
+
+/// `task.Channel<int>.Send` without its type arguments.
+pub fn strip_type_args(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut depth = 0usize;
+    for c in name.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The symbol of a namespace, std member or builtin that no declaration

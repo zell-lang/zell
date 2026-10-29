@@ -426,6 +426,10 @@ enum Target {
     StructValue(u32),
     IfaceValue(u32),
     ErrorValue,
+    /// A value of a std struct or of a builtin type documented by an
+    /// `@intrinsic` std struct (`Task<T>`: `task.Task`): the members of
+    /// that std symbol (session/stdblock.rs).
+    StdValue(SymbolId),
 }
 
 fn is_ident_byte(b: u8) -> bool {
@@ -610,7 +614,10 @@ fn value_target(a: &Analysis, ty: TypeId) -> Option<Target> {
     if let Type::Pointer(inner) = t {
         t = tt.get(*inner);
     }
+    let std = |path: &str| a.index.lookup(&SymKey::Std(path.to_string())).map(Target::StdValue);
     match t {
+        Type::Struct(d) if a.index.lookup(&SymKey::Struct(d.0)).is_none() => a.hir.structs.get(d.0 as usize).and_then(|st| std(&zell::sema::index::strip_type_args(&st.full_name))),
+        Type::Task(_) => std("task.Task"),
         Type::Struct(d) => Some(Target::StructValue(d.0)),
         Type::Interface(d) => Some(Target::IfaceValue(d.0)),
         Type::Error => Some(Target::ErrorValue),
@@ -698,6 +705,14 @@ fn member_completions(a: &Analysis, file: usize, off: u32, segs: &[&str]) -> Vec
             }
         }
         Target::ErrorValue => out.push(plain("Message", CompletionItemKind::METHOD, Some("func Message() string"))),
+        Target::StdValue(id) => {
+            for c in a.index.children(id) {
+                let cs = a.index.symbol(c);
+                if matches!(cs.kind, SymbolKind::Field | SymbolKind::Method) && !cs.is_static && exported(&cs.name) && seen.insert(cs.name.clone()) {
+                    out.push(item(a, &cs.name, c));
+                }
+            }
+        }
     }
     out
 }

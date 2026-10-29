@@ -594,6 +594,16 @@ impl<'a> Sema<'a> {
             TmplDecl::Method(d, s) => (d, Some(s)),
             _ => return None,
         };
+        // `@intrinsic` stubs (`testing.T.Must`) document a call the
+        // compiler lowers itself; any other use would run the stub body.
+        if tm.is_std && decl.attrs.iter().any(|a| a.path.to_string() == "intrinsic") {
+            let what = match owner {
+                Some(s) => format!("{}.{}", super::index::strip_type_args(&self.structs[s as usize].full_name), decl.name.name),
+                None => format!("{}.{}", self.nss[tm.ns].path, decl.name.name),
+            };
+            self.err(format!("{what} is a compiler intrinsic: call it directly, without type arguments"), span);
+            return None;
+        }
         let root = tm.root;
         let name = self.inst_name(&tm.name.clone(), &args);
         if !self.depth_ok(&name, span) {

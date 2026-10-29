@@ -130,6 +130,25 @@ struct T {
         this.FailNow()
     }
 
+    // Must returns the value of x, a call returning V! (the only argument
+    // that may stay unhandled; x may contain await). If x fails, Must ends
+    // the test as failed with the file:line of the call, the error message
+    // and its trace. For a void! argument it yields nothing. A compiler
+    // intrinsic (sema/testing.rs): only `t.Must(x)` is allowed.
+    @intrinsic
+    func Must<V>(x V!) V {
+        panic("testing: t.Must is a compiler intrinsic")
+    }
+
+    // MustFail returns the error of x, a call returning V! that is expected
+    // to fail. If x succeeds, MustFail ends the test as failed with the
+    // file:line of the call and "expected an error". A compiler intrinsic
+    // (sema/testing.rs): only `t.MustFail(x)` is allowed.
+    @intrinsic
+    func MustFail<V>(x V!) error {
+        panic("testing: t.MustFail is a compiler intrinsic")
+    }
+
     // t.Must(x) when x failed (lowered by the compiler, sema/testing.rs):
     // logs `at: message` and the error trace, ends the test.
     func mustError(err error, at string) {

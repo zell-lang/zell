@@ -30,6 +30,7 @@ impl Sema<'_> {
         if targs.is_some() || !self.struct_of(base.ty).is_some_and(|sid| self.structs[sid as usize].full_name == "testing.T") {
             return Err(base);
         }
+        self.ide_ref(name.span, super::index::SymKey::Std(format!("testing.T.{}", name.name)));
         let what = format!("t.{}", name.name);
         if !self.arity(&what, args, 1, span) {
             return Ok(self.invalid(span));

@@ -361,6 +361,7 @@ impl<'a> Sema<'a> {
         // `t.Cancel()` on a `Task<T>`: cancels that task and its descendants
         // (DESIGN.md «Отмена»); idempotent, a no-op on a completed task.
         if matches!(self.tt.get(base.ty), Type::Task(_)) && name.name == "Cancel" {
+            self.ide_ref(name.span, index::SymKey::Std("task.Task.Cancel".into()));
             if !self.arity("Task.Cancel", args, 0, span) {
                 return self.invalid(span);
             }
@@ -397,7 +398,7 @@ impl<'a> Sema<'a> {
             }
             self.check_std_method(sid, &name.name, name.span);
             if let Some((fid, path)) = self.find_method(sid, &name.name) {
-                self.ide_ref(name.span, index::SymKey::Func(fid.0));
+                self.ide_method_ref(name.span, fid);
                 let owner = self.funcs[fid.0 as usize].namespace;
                 self.check_member_visibility(owner, &name.name, name.span, true);
                 let is_ptr = matches!(self.tt.get(base.ty), Type::Pointer(_));

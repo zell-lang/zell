@@ -183,6 +183,9 @@ enum SumDecl {
     Enum(String, Vec<ast::GenericParam>),
     /// With its spans erased (see [`parse_module`]).
     Interface(ast::InterfaceDecl),
+    /// An `@intrinsic` struct: documentation of the methods of a builtin
+    /// type (`task.Task` for `Task<T>`), read by tools from `std/` only.
+    Doc,
 }
 
 /// The summaries of [`MODULES`] (parsed once per process).
@@ -216,6 +219,7 @@ fn summarize(file: ast::File) -> Vec<SumDecl> {
     file.decls
         .into_iter()
         .map(|d| match d {
+            ast::Decl::Struct(s) if s.attrs.iter().any(|a| a.path.to_string() == "intrinsic") => SumDecl::Doc,
             ast::Decl::Struct(s) => SumDecl::Struct(s.name.name, s.generics),
             ast::Decl::Func(f) => SumDecl::Func(f.name.name, f.generics),
             ast::Decl::Enum(e) => SumDecl::Enum(e.name.name, e.generics),
@@ -337,6 +341,7 @@ impl<'a> Sema<'a> {
             self.cur_file = 0;
             for (di, d) in sum.decls.iter().enumerate() {
                 let (name, t) = match d {
+                    SumDecl::Doc => continue,
                     SumDecl::Struct(name, g) => (name, self.new_template(name, TmplDecl::Struct(ph_struct), g, Vec::new(), false)),
                     SumDecl::Func(name, g) => (name, self.new_template(name, TmplDecl::Func(ph_func), g, Vec::new(), false)),
                     SumDecl::Enum(name, g) => (name, self.new_template(name, TmplDecl::Enum(ph_enum), g, Vec::new(), false)),

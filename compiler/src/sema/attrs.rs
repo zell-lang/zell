@@ -1,7 +1,7 @@
 //! Attribute resolution and checking.
 //!
 //! An attribute is either a builtin (`@attribute`, `@reflect`,
-//! `@deprecated`, `@inline`, `@test`, `@json`, `@log`, `@allowCycle`, `@acyclic`) or a struct declared with
+//! `@deprecated`, `@inline`, `@test`, `@json`, `@log`, `@allowCycle`, `@acyclic`, std-only `@intrinsic`) or a struct declared with
 //! `@attribute`, whose fields are its parameters. Arguments are positional
 //! (in field order) or named, must be compile-time constants, and are stored
 //! evaluated in [`hir::Attr`].
@@ -200,6 +200,11 @@ impl<'a> Sema<'a> {
                 }
                 if n == "required" && target != "Field" {
                     self.err("@required can only be applied to a field of an @attribute struct (the argument must then be given)", a.span);
+                }
+                // `@intrinsic`: a std declaration that only documents a
+                // compiler-lowered call (see stdsrc.rs and generics.rs).
+                if n == "intrinsic" && !self.nss[self.cur_ns].is_std {
+                    self.err("@intrinsic is reserved for the standard library", a.span);
                 }
                 if (n == "allowCycle" || n == "acyclic") && target != "Struct" && target != "Enum" {
                     self.err(format!("@{n} can only be applied to a struct or an enum"), a.span);

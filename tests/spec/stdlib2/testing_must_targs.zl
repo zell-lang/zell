@@ -1,0 +1,16 @@
+// error: testing.T.Must is a compiler intrinsic: call it directly, without type arguments
+// status: passing
+namespace spec.stdlib2.testing_must_targs
+
+func parse() int! {
+    return 1
+}
+
+func testIt(t *testing.T) {
+    var n = t.Must<int>(parse())
+    testing.Equal(t, n, 1)
+}
+
+async func main() {
+    os.Exit(await testing.Main([testing.Case{Name: "TestIt", Run: testIt}]))
+}

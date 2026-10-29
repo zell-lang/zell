@@ -7,6 +7,20 @@
 // across an await) and the task context slot (rtGetCtx/rtSetCtx).
 namespace task
 
+// Task<T> is the builtin type of a started async call: `await t` waits
+// for its result. This declaration only documents the methods every
+// Task<T> has; they are compiler intrinsics (sema/call.rs) and Task is not
+// a member of this namespace.
+@intrinsic
+struct Task<T> {
+    // Cancel cancels the task and its descendants (DESIGN.md "Отмена"):
+    // their waits wake with task.ErrCancelled and Delay returns at once;
+    // `await t` then follows the usual rules for T! and T. Repeated calls
+    // are no-ops and a completed task keeps its result.
+    func Cancel() {
+    }
+}
+
 // Mutex is an async mutual-exclusion lock. The zero value is unlocked;
 // `await m.Lock()` waits until the caller owns it, `m.Unlock()` frees it
 // and wakes the oldest waiter, Go's sync.Mutex rules (DESIGN.md

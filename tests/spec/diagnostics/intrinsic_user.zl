@@ -1,0 +1,13 @@
+// error: @intrinsic is reserved for the standard library
+// status: passing
+namespace spec.diagnostics.intrinsic_user
+
+import io
+
+@intrinsic
+func f() {
+}
+
+func main() {
+    f()
+}

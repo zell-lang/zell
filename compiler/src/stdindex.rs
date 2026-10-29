@@ -26,6 +26,11 @@ pub struct StdDecl {
     /// The declaration's first source line (`func Get(url string) Task<Response!>`).
     pub signature: String,
     pub doc: Option<String>,
+    /// A static method.
+    pub is_static: bool,
+    /// Marked `@intrinsic`: a compiler-lowered member (`testing.T.Must`)
+    /// or a struct documenting a builtin type's methods (`task.Task`).
+    pub intrinsic: bool,
 }
 
 /// The parsed `std/` tree.
@@ -78,7 +83,7 @@ impl StdIndex {
         let file = crate::parser::parse_file(tokens, &mut diags);
         let fi = self.files.len();
         let ns = file.namespace.to_string();
-        let push = |idx: &mut StdIndex, full: String, name: &ast::Ident, full_span: Span, kind: SymbolKind| {
+        let push = |idx: &mut StdIndex, full: String, name: &ast::Ident, full_span: Span, kind: SymbolKind, attrs: &[ast::Attribute], is_static: bool| {
             if name.span == Span::DUMMY {
                 return;
             }
@@ -91,6 +96,8 @@ impl StdIndex {
                 full_span,
                 signature: signature(&text, full_span, name.span),
                 doc: crate::sema::index::doc_comment(&text, full_span.start),
+                is_static,
+                intrinsic: attrs.iter().any(|a| a.path.to_string() == "intrinsic"),
             };
             // The first declaration wins (`@cfg` variants share a name).
             idx.by_name.entry(full).or_insert(idx.decls.len());
@@ -98,33 +105,33 @@ impl StdIndex {
         };
         for d in &file.decls {
             match d {
-                ast::Decl::Func(f) => push(self, format!("{ns}.{}", f.name.name), &f.name, f.span, SymbolKind::Func),
+                ast::Decl::Func(f) => push(self, format!("{ns}.{}", f.name.name), &f.name, f.span, SymbolKind::Func, &f.attrs, false),
                 ast::Decl::Struct(s) => {
-                    push(self, format!("{ns}.{}", s.name.name), &s.name, s.span, SymbolKind::Struct);
+                    push(self, format!("{ns}.{}", s.name.name), &s.name, s.span, SymbolKind::Struct, &s.attrs, false);
                     for fl in &s.fields {
-                        push(self, format!("{ns}.{}.{}", s.name.name, fl.name.name), &fl.name, fl.span, SymbolKind::Field);
+                        push(self, format!("{ns}.{}.{}", s.name.name, fl.name.name), &fl.name, fl.span, SymbolKind::Field, &fl.attrs, false);
                     }
                     for m in &s.methods {
-                        push(self, format!("{ns}.{}.{}", s.name.name, m.name.name), &m.name, m.span, SymbolKind::Method);
+                        push(self, format!("{ns}.{}.{}", s.name.name, m.name.name), &m.name, m.span, SymbolKind::Method, &m.attrs, m.is_static);
                     }
                 }
                 ast::Decl::Interface(i) => {
-                    push(self, format!("{ns}.{}", i.name.name), &i.name, i.span, SymbolKind::Interface);
+                    push(self, format!("{ns}.{}", i.name.name), &i.name, i.span, SymbolKind::Interface, &i.attrs, false);
                     for m in &i.methods {
-                        push(self, format!("{ns}.{}.{}", i.name.name, m.name.name), &m.name, m.span, SymbolKind::Method);
+                        push(self, format!("{ns}.{}.{}", i.name.name, m.name.name), &m.name, m.span, SymbolKind::Method, &m.attrs, m.is_static);
                     }
                 }
                 ast::Decl::Enum(e) => {
-                    push(self, format!("{ns}.{}", e.name.name), &e.name, e.span, SymbolKind::Enum);
+                    push(self, format!("{ns}.{}", e.name.name), &e.name, e.span, SymbolKind::Enum, &e.attrs, false);
                     for m in &e.methods {
-                        push(self, format!("{ns}.{}.{}", e.name.name, m.name.name), &m.name, m.span, SymbolKind::Method);
+                        push(self, format!("{ns}.{}.{}", e.name.name, m.name.name), &m.name, m.span, SymbolKind::Method, &m.attrs, m.is_static);
                     }
                 }
-                ast::Decl::Const(c) => push(self, format!("{ns}.{}", c.name.name), &c.name, c.span, SymbolKind::Const),
-                ast::Decl::TypeAlias(a) => push(self, format!("{ns}.{}", a.name.name), &a.name, a.span, SymbolKind::BuiltinType),
+                ast::Decl::Const(c) => push(self, format!("{ns}.{}", c.name.name), &c.name, c.span, SymbolKind::Const, &c.attrs, false),
+                ast::Decl::TypeAlias(a) => push(self, format!("{ns}.{}", a.name.name), &a.name, a.span, SymbolKind::BuiltinType, &[], false),
                 ast::Decl::Var(v) => {
                     if let Some(n) = v.names.first() {
-                        push(self, format!("{ns}.{}", n.name), n, v.span, SymbolKind::Global);
+                        push(self, format!("{ns}.{}", n.name), n, v.span, SymbolKind::Global, &v.attrs, false);
                     }
                 }
                 ast::Decl::Error(_) => {}
