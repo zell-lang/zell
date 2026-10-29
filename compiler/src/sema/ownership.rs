@@ -476,16 +476,27 @@ fn collect_types(p: &Program, f: &Function) -> Vec<(TypeId, Span)> {
 impl super::Sema<'_> {
     /// [`has_dtor`] during analysis (on the analyser's declarations).
     pub(crate) fn type_has_dtor(&self, t: TypeId) -> bool {
+        self.type_has_dtor_at(t, 0)
+    }
+
+    /// `type_has_dtor` with a depth bound: a type that contains itself by
+    /// value is reported by `check_recursive_struct`/`check_recursive_enum`
+    /// and must not overflow the stack here.
+    fn type_has_dtor_at(&self, t: TypeId, depth: u32) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        let d1 = depth + 1;
         match self.tt.get(t) {
             Type::Struct(d) => {
                 let s = &self.structs[d.0 as usize];
                 s.methods.iter().any(|(n, f)| n == "Drop" && matches!(self.funcs[f.0 as usize].kind, FuncKind::Method { is_static: false, .. }))
-                    || s.fields.iter().any(|f| self.type_has_dtor(f.ty))
+                    || s.fields.iter().any(|f| self.type_has_dtor_at(f.ty, d1))
             }
-            Type::Array(e, n) => *n > 0 && self.type_has_dtor(*e),
-            Type::Tuple(ts) => ts.iter().any(|t| self.type_has_dtor(*t)),
-            Type::Fallible(t) => self.type_has_dtor(*t),
-            Type::Enum(d) => self.enums[d.0 as usize].variants.iter().any(|v| v.fields.iter().any(|f| self.type_has_dtor(f.1))),
+            Type::Array(e, n) => *n > 0 && self.type_has_dtor_at(*e, d1),
+            Type::Tuple(ts) => ts.iter().any(|t| self.type_has_dtor_at(*t, d1)),
+            Type::Fallible(t) => self.type_has_dtor_at(*t, d1),
+            Type::Enum(d) => self.enums[d.0 as usize].variants.iter().any(|v| v.fields.iter().any(|f| self.type_has_dtor_at(f.1, d1))),
             _ => false,
         }
     }

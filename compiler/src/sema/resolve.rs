@@ -956,7 +956,6 @@ impl<'a> Sema<'a> {
             self.cur_ns = self.file_scopes[self.cur_file].ns;
             self.resolve_struct_fields(sid);
         }
-        self.check_recursive_structs();
         for eid in 0..self.enums.len() {
             if self.gen.inst_enums.contains_key(&(eid as u32)) {
                 continue;
@@ -965,6 +964,7 @@ impl<'a> Sema<'a> {
             self.cur_ns = self.file_scopes[self.cur_file].ns;
             self.resolve_enum_variants(eid);
         }
+        self.check_recursive_structs();
         for iid in 0..self.interfaces.len() {
             if self.std_iface_lazy.contains_key(&(iid as u32)) || self.std_iface_forced.contains(&(iid as u32)) {
                 continue;
@@ -1206,41 +1206,66 @@ impl<'a> Sema<'a> {
         self.sigs[fid] = Sig { params, ret, is_async: decl.is_async };
     }
 
-    /// Reports structs that contain themselves by value.
+    /// Reports structs and enums that contain themselves by value.
     fn check_recursive_structs(&mut self) {
         for sid in 0..self.structs.len() {
             self.check_recursive_struct(sid);
+        }
+        for eid in 0..self.enums.len() {
+            self.check_recursive_enum(eid);
+        }
+    }
+
+    /// True if a value of type `ty` holds the struct (`is_enum == false`) or
+    /// enum `target` by value, through fields, arrays, tuples and variants.
+    fn holds_by_value(&self, target: (bool, u32), ty: TypeId, seen: &mut Vec<(bool, u32)>) -> bool {
+        let key = match self.tt.get(ty) {
+            Type::Struct(d) => (false, d.0),
+            Type::Enum(e) => (true, e.0),
+            Type::Array(t, _) => return self.holds_by_value(target, *t, seen),
+            Type::Tuple(ts) => return ts.iter().any(|t| self.holds_by_value(target, *t, seen)),
+            _ => return false,
+        };
+        if key == target {
+            return true;
+        }
+        if seen.contains(&key) {
+            return false;
+        }
+        seen.push(key);
+        if key.0 {
+            self.enums.get(key.1 as usize).is_some_and(|e| e.variants.iter().any(|v| v.fields.iter().any(|f| self.holds_by_value(target, f.1, seen))))
+        } else {
+            self.structs[key.1 as usize].fields.iter().any(|f| self.holds_by_value(target, f.ty, seen))
         }
     }
 
     /// Reports struct `sid` if it contains itself by value.
     pub(crate) fn check_recursive_struct(&mut self, sid: usize) {
-        fn contains(s: &Sema, target: u32, ty: TypeId, seen: &mut Vec<u32>) -> bool {
-            match s.tt.get(ty) {
-                Type::Struct(d) => {
-                    if d.0 == target {
-                        return true;
-                    }
-                    if seen.contains(&d.0) {
-                        return false;
-                    }
-                    seen.push(d.0);
-                    s.structs[d.0 as usize].fields.iter().any(|f| contains(s, target, f.ty, seen))
-                }
-                Type::Array(t, _) => contains(s, target, *t, seen),
-                Type::Tuple(ts) => ts.iter().any(|t| contains(s, target, *t, seen)),
-                Type::Enum(e) => s.enums.get(e.0 as usize).is_some_and(|e| e.variants.iter().any(|v| v.fields.iter().any(|f| contains(s, target, f.1, seen)))),
-                _ => false,
-            }
-        }
         let mut seen = Vec::new();
-        if self.structs[sid].fields.iter().any(|f| contains(self, sid as u32, f.ty, &mut seen)) {
+        if self.structs[sid].fields.iter().any(|f| self.holds_by_value((false, sid as u32), f.ty, &mut seen)) {
             let saved = self.cur_file;
             if !self.gen.inst_structs.contains_key(&(sid as u32)) {
                 self.cur_file = self.structs[sid].file;
             }
             let name = self.structs[sid].name.clone();
             let span = self.struct_src[sid].name.span;
+            self.err(format!("invalid recursive type {name}: it contains itself by value (use a pointer)"), span);
+            self.cur_file = saved;
+        }
+    }
+
+    /// Reports enum `eid` if a variant contains the enum itself by value.
+    pub(crate) fn check_recursive_enum(&mut self, eid: usize) {
+        let mut seen = Vec::new();
+        let target = (true, eid as u32);
+        if self.enums[eid].variants.iter().any(|v| v.fields.iter().any(|f| self.holds_by_value(target, f.1, &mut seen))) {
+            let saved = self.cur_file;
+            if !self.gen.inst_enums.contains_key(&(eid as u32)) {
+                self.cur_file = self.enums[eid].file;
+            }
+            let name = self.enums[eid].name.clone();
+            let span = self.enum_src[eid].name.span;
             self.err(format!("invalid recursive type {name}: it contains itself by value (use a pointer)"), span);
             self.cur_file = saved;
         }

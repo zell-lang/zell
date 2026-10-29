@@ -1,0 +1,14 @@
+// error: invalid recursive type Expr: it contains itself by value
+// status: passing
+namespace spec.diagnostics.recursive_value_enum
+
+import io
+
+enum Expr {
+    Num(n int)
+    Neg(e Expr)
+}
+
+func main() {
+    println(Expr.Num(1).IsNum())
+}

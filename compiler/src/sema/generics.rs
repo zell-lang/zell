@@ -771,6 +771,7 @@ impl<'a> Sema<'a> {
         self.unit_bind(node, units::MemoKey::Inst(Inst::Enum(eid).into()));
         self.gen.inst_enums.insert(eid, (t, args));
         self.resolve_enum_variants(eid as usize);
+        self.check_recursive_enum(eid as usize);
         // Methods: instantiated with the enum, like a generic struct's
         // (the receiver is the enum value, as for a plain enum).
         for m in &decl.methods {

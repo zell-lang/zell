@@ -1,0 +1,19 @@
+// error: invalid recursive type Pair: it contains itself by value
+// status: passing
+namespace spec.diagnostics.recursive_value_enum_struct
+
+import io
+
+struct Pair {
+    Left  Tree
+    Right Tree
+}
+
+enum Tree {
+    Leaf(v int)
+    Node(p Pair)
+}
+
+func main() {
+    println("x")
+}
