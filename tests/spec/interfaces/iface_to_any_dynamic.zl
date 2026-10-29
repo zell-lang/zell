@@ -1,0 +1,42 @@
+// test: an interface value converted to any keeps its dynamic type for type switches
+// status: passing
+// run-flags: --leak-check
+// no-stderr: leak
+namespace spec.interfaces.iface_to_any_dynamic
+import io
+interface Named { func Name() string }
+struct Dog { Tag string
+  func Name() string { return "dog " + this.Tag } }
+struct Cat { func Name() string { return "cat" } }
+func show(a any) {
+    switch a {
+    case Dog d: println("Dog", d.Name())
+    case *Cat c: println("*Cat", c.Name())
+    case Named x: println("Named", x.Name())
+    default: println("none")
+    }
+}
+func asNamed(a any) {
+    switch a {
+    case Named x: println("as Named", x.Name())
+    default: println("not Named")
+    }
+}
+func main() {
+    var n Named = Dog{Tag: "rex"}
+    show(n)
+    asNamed(n)
+    var p Named = new Cat{}
+    show(p)
+    asNamed(p)
+    var z Named
+    show(z)
+    var a any = n
+    println(a)
+    var xs []any = [n, p]
+    println(len(xs))
+    n = Dog{Tag: "b"}
+    var b any = n
+    n = p
+    show(b)
+}

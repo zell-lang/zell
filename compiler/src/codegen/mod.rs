@@ -619,6 +619,9 @@ pub struct CodeGen<'a, 'ctx> {
     /// Interface-to-interface conversion functions by target interface
     /// (bodies emitted last, see `iface::finish_iface_convs`).
     pub(crate) iface_convs: Vec<(TypeId, FunctionValue<'ctx>)>,
+    /// `iface.anybox(typeid, ptr) -> box`: boxes the `*S` stored in an
+    /// interface for an `any` (body emitted with the conversions).
+    pub(crate) iface_anybox: Option<FunctionValue<'ctx>>,
     /// Run-time type ids by type (with reflection: `TypeInfo` payloads).
     pub(crate) type_infos: HashMap<TypeId, PointerValue<'ctx>>,
     /// Reflection tables of builtin types under another spelling (`int64`).
@@ -759,6 +762,7 @@ pub fn emit_with<'ctx>(program: &Program, ctx: &'ctx Context, module_name: &str,
         cstrings: HashMap::new(),
         error_sites: HashMap::new(),
         iface_convs: Vec::new(),
+        iface_anybox: None,
         type_infos: HashMap::new(),
         reflect_aliases: HashMap::new(),
         rc_helpers: HashMap::new(),

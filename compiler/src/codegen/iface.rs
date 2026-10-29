@@ -324,6 +324,20 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         })
     }
 
+    /// `ptr iface.anybox(ptr typeid, ptr p)`: a new `any` box (+1, owning
+    /// `p`) for the `*S` with type id `typeid` stored in an interface.
+    /// Declared here; the body is emitted by
+    /// [`finish_iface_convs`](Self::finish_iface_convs).
+    fn iface_anybox_fn(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.iface_anybox {
+            return f;
+        }
+        let fty = self.ptr_ty().fn_type(&[self.ptr_ty().into(), self.ptr_ty().into()], false);
+        let f = self.module.add_function("iface.anybox", fty, Some(Linkage::Internal));
+        self.iface_anybox = Some(f);
+        f
+    }
+
     /// Emits the bodies of the `iface.conv.*` functions: a comparison
     /// against the type id of every type stored in some interface.
     pub(crate) fn finish_iface_convs(&mut self) -> R<()> {
@@ -364,6 +378,28 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     cg.b.position_at_end(next);
                 }
                 cg.b.build_return(Some(&cg.ptr_ty().const_null())).unwrap();
+                Ok(())
+            })?;
+        }
+        if let Some(f) = self.iface_anybox {
+            let mut ptrs: Vec<TypeId> = self.vtables.keys().map(|(t, _)| *t).filter(|t| matches!(self.ty(*t), Type::Pointer(_))).collect();
+            ptrs.sort();
+            ptrs.dedup();
+            self.with_helper(f, |cg| {
+                let tid = f.get_nth_param(0).unwrap().into_pointer_value();
+                let p = f.get_nth_param(1).unwrap();
+                for t in ptrs {
+                    let yes = cg.block("is");
+                    let next = cg.block("next");
+                    let ti = cg.type_info(t);
+                    let eq = cg.ptr_eq(tid, ti);
+                    cg.b.build_conditional_branch(eq, yes, next).unwrap();
+                    cg.b.position_at_end(yes);
+                    let obj = cg.new_box(t, p);
+                    cg.b.build_return(Some(&obj)).unwrap();
+                    cg.b.position_at_end(next);
+                }
+                cg.b.build_unreachable().unwrap();
                 Ok(())
             })?;
         }
@@ -477,6 +513,41 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 Ok(Val { v: Some(self.make_pair(data, nvt)), owned: pv.owned })
             }
             (Type::Any, Type::Any) => self.expr(value),
+            (Type::Any, Type::Interface(_)) => {
+                // The `any` keeps the dynamic type (Go semantics): the type
+                // id from the vtable and the same value box; a stored `*S`
+                // (vtable `boxed` = 0) is boxed, as `any` boxes pointers.
+                let v = self.expr_owned(value)?.into_struct_value();
+                let data = self.b.build_extract_value(v, 0, "").unwrap().into_pointer_value();
+                let vt = self.b.build_extract_value(v, 1, "").unwrap().into_pointer_value();
+                let entry = self.b.get_insert_block().unwrap();
+                let has = self.block("toany.has");
+                let ptrb = self.block("toany.ptr");
+                let done = self.block("toany.done");
+                let isnull = self.b.build_is_null(vt, "").unwrap();
+                self.b.build_conditional_branch(isnull, done, has).unwrap();
+                self.b.position_at_end(has);
+                let tid = self.b.build_load(self.ptr_ty(), vt, "tid").unwrap().into_pointer_value();
+                let bp = self.byte_gep(vt, 8);
+                let boxed = self.b.build_load(self.i64_ty(), bp, "").unwrap().into_int_value();
+                let is_ptr = self.b.build_int_compare(IntPredicate::EQ, boxed, self.i64_ty().const_zero(), "").unwrap();
+                self.b.build_conditional_branch(is_ptr, ptrb, done).unwrap();
+                self.b.position_at_end(ptrb);
+                let f = self.iface_anybox_fn();
+                let obj = self.b.build_call(f, &[tid.into(), data.into()], "").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                let pd = self.payload(obj);
+                let ptr_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).unwrap();
+                self.b.position_at_end(done);
+                let null = self.ptr_ty().const_null();
+                let dphi = self.b.build_phi(self.ptr_ty(), "anyd").unwrap();
+                dphi.add_incoming(&[(&null, entry), (&data, has), (&pd, ptr_end)]);
+                let tphi = self.b.build_phi(self.ptr_ty(), "anyt").unwrap();
+                tphi.add_incoming(&[(&null, entry), (&tid, has), (&tid, ptr_end)]);
+                let d = dphi.as_basic_value().into_pointer_value();
+                let t = tphi.as_basic_value().into_pointer_value();
+                Ok(Val::owned(self.make_pair(d, t)))
+            }
             (Type::Any, _) => {
                 if !self.any_dyn_tys.contains(&from) {
                     self.any_dyn_tys.push(from);
