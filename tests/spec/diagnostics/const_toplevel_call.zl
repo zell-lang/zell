@@ -1,0 +1,16 @@
+// error: const initializer is not a constant expression
+// status: passing
+namespace spec.diagnostics.const_toplevel_call
+
+import io
+
+func f() int {
+    println("called")
+    return 3
+}
+
+const C = f()
+
+func main() {
+    println(C)
+}

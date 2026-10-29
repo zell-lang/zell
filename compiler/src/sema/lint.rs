@@ -206,14 +206,21 @@ fn referenced_funcs(p: &Program) -> HashSet<u32> {
     if let Some(e) = p.entry {
         out.insert(e.0);
     }
+    let mut visit = |e: &hir::Expr, _| match &e.kind {
+        ExprKind::FuncRef(id) | ExprKind::Call { callee: Callee::Func(id), .. } | ExprKind::Closure { func: id, .. } => {
+            out.insert(id.0);
+        }
+        ExprKind::EnvClosures { funcs, .. } => out.extend(funcs.iter().map(|f| f.0)),
+        _ => {}
+    };
     for f in &p.funcs {
-        hir::ownership::walk_function(p, f, &mut |e, _| match &e.kind {
-            ExprKind::FuncRef(id) | ExprKind::Call { callee: Callee::Func(id), .. } | ExprKind::Closure { func: id, .. } => {
-                out.insert(id.0);
-            }
-            ExprKind::EnvClosures { funcs, .. } => out.extend(funcs.iter().map(|f| f.0)),
-            _ => {}
-        });
+        hir::ownership::walk_function(p, f, &mut visit);
+    }
+    // `var V = f()`: global initializers call functions too.
+    for g in &p.globals {
+        if let Some(e) = &g.init {
+            hir::ownership::walk_expr(p, e, hir::ownership::Pos::Store, &mut visit);
+        }
     }
     // Enum methods are free functions reached through vtables: a method
     // that implements an interface the enum satisfies counts as used.

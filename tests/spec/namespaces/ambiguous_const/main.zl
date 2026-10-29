@@ -1,0 +1,9 @@
+namespace spec.ns.ambconst
+
+import io
+import spec.ns.ambconst.a
+import spec.ns.ambconst.b
+
+func main() {
+    println(Limit)
+}

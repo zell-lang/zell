@@ -1,0 +1,5 @@
+// error: ambiguous name Limit: imported from both spec.ns.ambconst.a and spec.ns.ambconst.b
+// status: passing
+namespace spec.ns.ambconst.a
+
+const Limit = 1

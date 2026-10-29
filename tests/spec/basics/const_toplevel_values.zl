@@ -1,0 +1,20 @@
+// test: top-level const takes sentinels, constants, nil and composite literals of them; var takes calls
+// status: passing
+// no-warning: L0007
+namespace spec.basics.const_toplevel_values
+import io
+import errors
+func f() int { return 3 }
+enum Col { Red, Green }
+struct P { X int; Y string }
+const E1 = error("x")
+const E2 = errors.New("y")
+const E3 = E1
+const S = ["a", "b"]
+const M = map[string]int{"a": 1}
+const T = (1, "t")
+const Q = P{X: 1, Y: "p"}
+const K = Col.Green
+const N = 2 * 3
+var V = f()
+func main() { println(len(S), M["a"], T.0, Q.X, K, N, V, errors.Is(E3, E1), E2.Message()) }

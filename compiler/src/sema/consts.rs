@@ -78,6 +78,9 @@ impl<'a> Sema<'a> {
                 if n != segs.len() {
                     return None;
                 }
+                if matches!(res, PathRes::Member(Member::Global(_) | Member::StdConst(_))) {
+                    self.report_ambiguous(segs[0]);
+                }
                 match res {
                     PathRes::Member(Member::Global(g)) if self.globals[g.0 as usize].is_const => {
                         self.ensure_global(g);
@@ -249,6 +252,47 @@ impl<'a> Sema<'a> {
     }
 
     /// Types (and folds or checks the initialiser of) a global, once.
+    /// Reports `name` if two imports export it (folding resolves quietly
+    /// and would take the first), once per use even if folded repeatedly.
+    fn report_ambiguous(&mut self, name: &ast::Ident) {
+        let before = self.diags.items.len();
+        self.lookup_global(name, true);
+        if self.diags.items.len() > before {
+            let d = &self.diags.items[before];
+            if self.diags.items[..before].iter().any(|x| x.message == d.message && x.span == d.span && x.file == d.file) {
+                self.diags.items.truncate(before);
+            }
+        }
+    }
+
+    /// Whether `e` may initialise a top-level `const`: a constant
+    /// expression, another constant, `nil`, an error sentinel
+    /// (`error(c)`, `errors.New(c)`) or a composite literal of such values.
+    /// Any other call is run-time work and belongs in a `var`.
+    fn const_init_ok(&mut self, e: &ast::Expr) -> bool {
+        use ast::ExprKind as K;
+        if self.fold(e).is_some() {
+            return true;
+        }
+        match &e.kind {
+            K::Nil => true,
+            K::Paren(x) => self.const_init_ok(x),
+            K::SliceLit(es) | K::Tuple(es) => es.iter().all(|x| self.const_init_ok(x)),
+            K::MapLit { entries, .. } => entries.iter().all(|(k, v)| self.const_init_ok(k) && self.const_init_ok(v)),
+            K::StructLit { fields, .. } => fields.iter().all(|f| self.const_init_ok(&f.value)),
+            K::CompositeLit { elems, .. } => elems.iter().all(|(k, v)| k.as_ref().is_none_or(|k| self.const_init_ok(k)) && self.const_init_ok(v)),
+            K::Ident(_) | K::Field { .. } => {
+                let Some(segs) = Self::flatten_path(e) else { return false };
+                matches!(self.resolve_segments(&segs, false), Some((PathRes::Member(Member::Global(g)), n)) if n == segs.len() && self.globals[g.0 as usize].is_const)
+            }
+            K::Call { callee, args } => {
+                let name: Option<Vec<&str>> = Self::flatten_path(callee).map(|v| v.iter().map(|i| i.name.as_str()).collect());
+                matches!(name.as_deref(), Some(["error"]) | Some(["errors", "New"])) && args.iter().all(|a| self.const_init_ok(a))
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn ensure_global(&mut self, g: GlobalId) {
         let gi = g.0 as usize;
         match self.global_state[gi] {
@@ -317,6 +361,9 @@ impl<'a> Sema<'a> {
                     s.globals[gi].value = Some(value);
                     return;
                 }
+            }
+            if is_const && !s.const_init_ok(src) {
+                s.err("const initializer is not a constant expression (use var for a value computed at startup)", src.span);
             }
             s.fns.push(FnCtx::new(None, s.tt.void, false, "global initializer".into()));
             if let Some(f) = s.fns.last_mut() {
