@@ -1,6 +1,9 @@
 //! Refactoring code actions: extract variable (`refactor.extract`),
 //! extract function (`refactor.extract`), inline variable
-//! (`refactor.inline`) and organize imports (`source.organizeImports`).
+//! (`refactor.inline`), organize imports (`source.organizeImports`), and
+//! (`refactor.rewrite`) fill struct fields, implement interface
+//! (`generate.rs`) and `?` <-> `try ... catch err { return err }`
+//! (`errconv.rs`).
 //!
 //! Every refactoring is computed by [`compute`] from (kind, file,
 //! selection). When the client resolves code actions lazily
@@ -18,25 +21,35 @@ use zell::sema::index::{short_type_name, SymbolKind};
 use zell::session::Analysis;
 use zell::span::{SourceFile, Span};
 
-/// The refactorings, by id: (id, title prefix, kind).
-const KINDS: &[&str] = &["extract_var", "extract_fn", "inline_var", "organize_imports"];
+/// The refactorings with a fixed id. "Implement" ids name the struct and
+/// the interface: `impl|S|I` (required interface, a quick fix) and
+/// `impl_any|S|I` (`generate::impl_candidates`).
+const KINDS: &[&str] = &["extract_var", "extract_fn", "inline_var", "organize_imports", "fill_fields", "to_try", "to_propagate"];
 
 fn kind_of(id: &str) -> CodeActionKind {
     match id {
         "extract_var" | "extract_fn" => CodeActionKind::REFACTOR_EXTRACT,
         "inline_var" => CodeActionKind::REFACTOR_INLINE,
-        _ => CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+        "organize_imports" => CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+        _ if id.starts_with("impl|") => CodeActionKind::QUICKFIX,
+        _ => CodeActionKind::REFACTOR_REWRITE,
     }
 }
 
+/// Refactorings whose edits are passed through the formatter.
+fn generated(id: &str) -> bool {
+    matches!(id, "fill_fields" | "to_try" | "to_propagate") || id.starts_with("impl")
+}
+
 /// An edit in byte offsets.
-type Edits = Vec<(Span, String)>;
+pub(crate) type Edits = Vec<(Span, String)>;
 
 /// The refactorings available for `sel` in `file`, filtered by `only`
 /// (the requested kinds, as prefixes).
 pub(crate) fn actions(a: &Analysis, file: usize, uri: &Url, sel: Span, lazy: bool, only: Option<&[CodeActionKind]>) -> Vec<CodeActionOrCommand> {
     let mut out = Vec::new();
-    for id in KINDS {
+    let ids: Vec<String> = KINDS.iter().map(|k| k.to_string()).chain(crate::generate::impl_candidates(a, file, sel)).collect();
+    for id in &ids {
         let kind = kind_of(id);
         if let Some(only) = only {
             if !only.iter().any(|k| kind.as_str() == k.as_str() || kind.as_str().starts_with(&format!("{}.", k.as_str()))) {
@@ -49,7 +62,7 @@ pub(crate) fn actions(a: &Analysis, file: usize, uri: &Url, sel: Span, lazy: boo
         if lazy {
             action.data = Some(serde_json::json!({ "zell": "refactor", "id": id, "uri": uri, "start": sel.start, "end": sel.end }));
         } else {
-            action.edit = Some(workspace_edit(f, uri, edits));
+            action.edit = Some(workspace_edit(f, uri, finish(&f.text, id, edits)));
         }
         out.push(CodeActionOrCommand::CodeAction(action));
     }
@@ -67,7 +80,7 @@ pub(crate) fn resolve(a: &Analysis, file_of: impl Fn(&Url) -> Option<usize>, mut
     let (Some(id), Some(uri), Some(start), Some(end)) = (d["id"].as_str(), d["uri"].as_str().and_then(|u| Url::parse(u).ok()), d["start"].as_u64(), d["end"].as_u64()) else { return action };
     let Some(file) = file_of(&uri) else { return action };
     if let Some((_, edits)) = compute(a, file, id, Span::new(start as u32, end as u32)) {
-        action.edit = Some(workspace_edit(&a.files[file], &uri, edits));
+        action.edit = Some(workspace_edit(&a.files[file], &uri, finish(&a.files[file].text, id, edits)));
     }
     action
 }
@@ -82,8 +95,41 @@ pub(crate) fn compute(a: &Analysis, file: usize, id: &str, sel: Span) -> Option<
         "extract_fn" => extract_fn(a, file, ast, text, sel),
         "inline_var" => inline_var(a, file, ast, text, sel),
         "organize_imports" => organize_imports(a, file, ast, text),
+        "fill_fields" => crate::generate::fill_fields(a, file, ast, text, sel),
+        "to_try" => crate::errconv::to_try(ast, text, sel),
+        "to_propagate" => crate::errconv::to_propagate(ast, text, sel),
+        _ if id.starts_with("impl") => crate::generate::implement(a, ast, text, id),
         _ => None,
     }
+}
+
+fn finish(text: &str, id: &str, edits: Edits) -> Edits {
+    if generated(id) {
+        formatted(text, edits)
+    } else {
+        edits
+    }
+}
+
+/// `edits` with the code they produce laid out by `zell::fmt`: when the
+/// file is formatted, the line hunks between it and the formatted result
+/// of the edits; otherwise (or when the result does not parse) the edits
+/// as they are.
+pub(crate) fn formatted(text: &str, edits: Edits) -> Edits {
+    let mut sorted = edits.clone();
+    sorted.sort_by_key(|(s, _)| s.start);
+    let mut new = String::with_capacity(text.len());
+    let mut at = 0;
+    for (s, t) in &sorted {
+        new.push_str(&text[at..s.start as usize]);
+        new.push_str(t);
+        at = s.end as usize;
+    }
+    new.push_str(&text[at..]);
+    let (Ok(true), Ok(fmt)) = (zell::fmt::is_formatted(text), zell::fmt::format_source(&new)) else { return edits };
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let line = |l: usize| *starts.get(l).unwrap_or(&text.len()) as u32;
+    zell::fmt::line_hunks(text, &fmt).into_iter().map(|h| (Span::new(line(h.old_start), line(h.old_start + h.old_len)), h.new_lines.concat())).collect()
 }
 
 fn trim(text: &str, s: Span) -> Span {
@@ -97,31 +143,31 @@ fn trim(text: &str, s: Span) -> Span {
     Span::new(a as u32, b as u32)
 }
 
-fn slice(text: &str, s: Span) -> &str {
+pub(crate) fn slice(text: &str, s: Span) -> &str {
     &text[s.start as usize..s.end as usize]
 }
 
 /// Whitespace before the line of `at`.
-fn indent_of(text: &str, at: u32) -> (u32, String) {
+pub(crate) fn indent_of(text: &str, at: u32) -> (u32, String) {
     let ls = text[..at as usize].rfind('\n').map_or(0, |i| i + 1);
     let ws: String = text[ls..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
     (ls as u32, ws)
 }
 
 /// Every block of the file's function bodies.
-fn blocks(ast: &ast::File) -> Vec<&ast::Block> {
+pub(crate) fn blocks(ast: &ast::File) -> Vec<&ast::Block> {
     let mut out = Vec::new();
     Walker { on_stmt: &mut |_| {}, on_expr: &mut |_| {}, on_block: &mut |b| out.push(b) }.file(ast);
     out
 }
 
 /// The innermost statement (directly in a block) containing `sel`.
-fn enclosing_stmt(ast: &ast::File, sel: Span) -> Option<&Stmt> {
+pub(crate) fn enclosing_stmt(ast: &ast::File, sel: Span) -> Option<&Stmt> {
     blocks(ast).into_iter().flat_map(|b| b.stmts.iter()).filter(|s| s.span.start <= sel.start && sel.end <= s.span.end).min_by_key(|s| s.span.end - s.span.start)
 }
 
 /// The function whose body contains `sel`.
-fn enclosing_func(ast: &ast::File, sel: Span) -> Option<&ast::FuncDecl> {
+pub(crate) fn enclosing_func(ast: &ast::File, sel: Span) -> Option<&ast::FuncDecl> {
     let mut found = None;
     for d in &ast.decls {
         let fs: Vec<&ast::FuncDecl> = match d {
@@ -139,7 +185,7 @@ fn enclosing_func(ast: &ast::File, sel: Span) -> Option<&ast::FuncDecl> {
     found
 }
 
-fn is_word(text: &str, w: &str) -> bool {
+pub(crate) fn is_word(text: &str, w: &str) -> bool {
     text.match_indices(w).any(|(i, _)| {
         let before = text[..i].chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_');
         let after = text[i + w.len()..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');

@@ -135,7 +135,7 @@ func main() {
 }
 ";
 
-fn span_range(text: &str, from: &str, to: &str) -> Range {
+pub(super) fn span_range(text: &str, from: &str, to: &str) -> Range {
     let s = text.find(from).unwrap();
     let e = text[s..].find(to).unwrap() + s + to.len();
     let p = |off: usize| Position { line: text[..off].matches('\n').count() as u32, character: (off - text[..off].rfind('\n').map_or(0, |i| i + 1)) as u32 };
@@ -144,7 +144,7 @@ fn span_range(text: &str, from: &str, to: &str) -> Range {
 
 /// Runs the refactoring titled `title` at `at` (resolving it when listed
 /// lazily), applies its edit and checks the result compiles.
-fn refactor(c: &mut Client, uri: &Url, text: &str, at: Range, title: &str, version: i32) -> String {
+pub(super) fn refactor(c: &mut Client, uri: &Url, text: &str, at: Range, title: &str, version: i32) -> String {
     let actions = code_actions(c, uri, at);
     let mut a = actions.iter().find(|a| a.title.starts_with(title)).unwrap_or_else(|| panic!("no action {title:?} in {:?}", actions.iter().map(|a| &a.title).collect::<Vec<_>>())).clone();
     if a.edit.is_none() {

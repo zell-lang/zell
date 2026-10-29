@@ -123,7 +123,7 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/completion`, `completionItem/resolve` | `completionProvider { triggerCharacters: ["."], resolveProvider }` | `completion.rs` |
 | `textDocument/signatureHelp` | `signatureHelpProvider` (`(`, `,`) | `assist.rs` |
 | `textDocument/inlayHint`, `inlayHint/resolve` | `inlayHintProvider { resolveProvider }` | `assist.rs` |
-| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix, refactor.extract, refactor.inline, source.organizeImports], resolveProvider }` | `assist.rs`, `refactor.rs` |
+| `textDocument/codeAction`, `codeAction/resolve` | `codeActionProvider { codeActionKinds: [quickfix, refactor.extract, refactor.inline, refactor.rewrite, source.organizeImports], resolveProvider }` | `assist.rs`, `refactor.rs`, `generate.rs`, `errconv.rs` |
 | `textDocument/codeLens`, `codeLens/resolve` | `codeLensProvider { resolveProvider }` | `lens.rs` |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | `semanticTokensProvider { full: { delta: true }, range: true }` | `features.rs` |
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | `callHierarchyProvider` | `hierarchy.rs` |
@@ -365,8 +365,36 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
   через `this.`); `refactor.inline` — «Inline variable» (локальная `var` с
   инициализатором без присваиваний и `&x`: подстановка, в скобках если
   нужно, и удаление объявления); `source.organizeImports` — сортировка
-  импортов и удаление неиспользуемых (`E0003`). Quick fix'ы инспекций — см.
-  «Инспекции».
+  импортов и удаление неиспользуемых (`E0003`); `refactor.rewrite`
+  (`lsp/src/generate.rs`, `lsp/src/errconv.rs`) — «Fill missing fields»
+  (курсор в литерале структуры: `Имя: <нулевое значение>` для каждого
+  недостающего поля в порядке объявления; нулевые значения `0`, `0.0`,
+  `""`, `false`, `'\0'`, `nil` для указателей/срезов/map/функций/
+  интерфейсов/`error`/`any`, `T{}` для вложенной структуры, первый вариант
+  простого enum; пропускаются встроенные поля, поля со значением по
+  умолчанию, приватные поля чужого пространства имён и типы без
+  записываемого нуля — массивы, кортежи, `Task`, enum с данными),
+  «Implement interface I» (на заголовке структуры, для пользовательских
+  интерфейсов своего и импортированных пространств, которым она не
+  удовлетворяет) и quick fix «Implement I» (интерфейс из `implements` или
+  из ошибки «S does not implement I» — и на заголовке, и в месте ошибки,
+  если структура в том же файле): заглушки недостающих методов с точной
+  сигнатурой (`async func` для `Task<T>`, `T!`, имена параметров из
+  объявления интерфейса) и телом `panic("not implemented")` после
+  последнего члена; generic-интерфейсы не предлагаются. «Convert `?` to
+  try/catch» (`var v = f()?`, `v = f()?`, `f()?` →
+  `try f() catch err { return err }`, имя `err` уникально в функции) и
+  обратно «Convert try/catch to `?`» (catch только `return err`; `(x)?`
+  для `await`/операторов): только вне тела блочного `try` (там `?` уходит
+  в его `catch`), `?` — только в функции/лямбде с `T!`, `?("ctx")` не
+  трогается; разница лишь в строке записи трассы (`returned via` у `?` или
+  у `return err`). Типы в сгенерированном коде: своего или
+  импортированного пространства — коротко, stdlib — полным путём, прочие
+  пользовательские — коротко с добавленным `import` (`refactor::import_edit`);
+  правки проходят через `zell::fmt` (если файл был отформатирован —
+  возвращаются строки-ханки форматированного результата, так что длинный
+  литерал разбивается по полю на строку), иначе как есть. Quick fix'ы
+  инспекций — см. «Инспекции».
 - **Code lens**: на `@test`/`@bench`-функциях «▶ Run test» (`zell.runTest`)
   и «Debug test» (`zell.debugTest`) с аргументами `[uri файла, имя]`, на
   `main` — «▶ Run» (`zell.run`, `[uri]`); на экспортируемых объявлениях

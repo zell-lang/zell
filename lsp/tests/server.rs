@@ -1136,3 +1136,6 @@ mod typehier;
 
 #[path = "server/concurrency.rs"]
 mod concurrency;
+
+#[path = "server/generate.rs"]
+mod generate;

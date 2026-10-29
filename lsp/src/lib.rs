@@ -42,7 +42,9 @@ mod assist;
 mod completion;
 mod encoding;
 mod features;
+mod errconv;
 mod files;
+mod generate;
 mod handlers;
 mod hierarchy;
 mod typehier;
@@ -291,7 +293,7 @@ pub fn capabilities() -> ServerCapabilities {
         }),
         inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(InlayHintOptions { resolve_provider: Some(true), work_done_progress_options: Default::default() }))),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR_EXTRACT, CodeActionKind::REFACTOR_INLINE, CodeActionKind::SOURCE_ORGANIZE_IMPORTS]),
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR_EXTRACT, CodeActionKind::REFACTOR_INLINE, CodeActionKind::REFACTOR_REWRITE, CodeActionKind::SOURCE_ORGANIZE_IMPORTS]),
             resolve_provider: Some(true),
             ..Default::default()
         })),
