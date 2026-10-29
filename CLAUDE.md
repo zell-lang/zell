@@ -148,11 +148,11 @@ Next, in this order:
    secrets, path traversal, weak hashes), fuzz targets for every parser
    (HTTP/1.1, HTTP/2, TLS records, YAML/TOML/XML, zstd/brotli, regex) like
    `make -C runtime fuzz-json`, release signing (minisign/sigstore).
-4. **LSP pass 3** — `docs/LSP_CONFORMANCE.md` missing items: inline
-   function, implement interface, change signature, completion quality
-   (textEdit/sortText/snippets), cancellation off the main thread, dynamic
-   registration + `workspace/configuration`, incremental analysis per
-   namespace; go-to-definition on type aliases.
+4. **LSP pass 3** — done 2026-10-29 (typed completion, workspace protocol,
+   worker pool + cancellation, per-namespace incremental analysis, type
+   hierarchy, rename scoping, aliases, refactorings incl. inline function and
+   change signature). Left: generic functions in the symbol index, IDEA
+   plugin grammar sync (variadics, labels, bare lambdas, `t.0`).
 5. **Feedback leftovers** — `docs/LANGUAGE_FEEDBACK.md`: generic/local type
    aliases (20), async `Drop` (27; superseded by `defer await` 2026-10-29, postponed), panics:
    inlined frames in backtraces (28; sync-frame unwinding done 2026-10-25,
