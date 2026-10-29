@@ -1123,3 +1123,6 @@ fn hover_renders_doc_markdown_and_std_examples() {
     let h = hover(&mut c, pos_of(text, "Split(s", 0, 1));
     assert!(h.contains("<details><summary>Example</summary>") && h.contains("// Output") == false && h.contains("3 [a b c]"), "{h}");
 }
+
+#[path = "server/concurrency.rs"]
+mod concurrency;
