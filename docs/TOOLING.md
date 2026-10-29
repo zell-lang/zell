@@ -129,7 +129,13 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | `callHierarchyProvider` | `hierarchy.rs` |
 | `textDocument/foldingRange`, `selectionRange` | `foldingRangeProvider`, `selectionRangeProvider` | `features.rs`, `nav.rs` |
 | `textDocument/formatting`, `rangeFormatting` | `documentFormattingProvider`, `documentRangeFormattingProvider` | `assist.rs` |
-| `workspace/didChangeWatchedFiles`, `didChangeConfiguration` | — | `lib.rs` |
+| `textDocument/onTypeFormatting` | `documentOnTypeFormattingProvider` (`}`, `\n`) | `assist.rs` |
+| `textDocument/documentLink` | `documentLinkProvider` | `links.rs` |
+| `workspace/didChangeWatchedFiles`, `didChangeConfiguration` | наблюдатели регистрируются сервером (`client/registerCapability`), если клиент объявил `didChangeWatchedFiles.dynamicRegistration` | `lib.rs`, `workspace.rs` |
+| `workspace/configuration` (сервер → клиент) | если клиент объявил `workspace.configuration` | `workspace.rs` |
+| `workspace/didChangeWorkspaceFolders` | `workspace.workspaceFolders { supported, changeNotifications }` | `workspace.rs` |
+| `workspace/semanticTokens/refresh`, `inlayHint/refresh`, `codeLens/refresh` (сервер → клиент) | если клиент объявил `refreshSupport` | `workspace.rs` |
+| `$/setTrace`, `$/logTrace` | `initialize.trace` | `workspace.rs` |
 | `workspace/willRenameFiles`, `didRenameFiles` | `workspace.fileOperations { willRename, didRename }` (`**/*.zl`, папки) | `files.rs`, `lib.rs` |
 | `window/workDoneProgress/create` + `$/progress` (сервер → клиент) | если клиент объявил `window.workDoneProgress` | `lib.rs` |
 | `zell/analyzerStatus`, `zell/documentText` | служебные: счётчики планировщика, текст документа у сервера (для отладки и тестов) | `handlers.rs` |
@@ -170,7 +176,47 @@ zell (CLI)  zell-lsp  zell fmt  zell test  IDEA plugin (через LSP)
   `workspace/diagnostic`, в котором всё `unchanged`, «паркуется» до
   анализа, который что-то меняет (клиенты, переспрашивающие сразу, не
   крутятся); после анализа — `workspace/diagnostic/refresh`, если клиент
-  его поддерживает.
+  его поддерживает. С `partialResultToken` отчёт `workspace/diagnostic`
+  идёт по файлу в `$/progress`, ответ — пустой. В push у
+  `publishDiagnostics` (и в отчётах `workspace/diagnostic`) — `version`
+  открытого документа. У диагностик с quick fix'ами в `data` лежат сами
+  исправления (`{"v": версия документа, "fixes": [{title, edits}]}`):
+  `codeAction` берёт их из `context.diagnostics`, если версия совпадает,
+  иначе пересчитывает по анализу. Заметки о другом файле (`related`
+  диагностики, например «previously declared here» у дубликата из другого
+  файла пространства имён) — `relatedInformation` с URI того файла.
+- **Состояние workspace** (`workspace.rs`). После `initialized` сервер
+  регистрирует наблюдатели `**/*.zl`, `**/zell.toml`, `**/zell.lock`
+  (если клиент умеет dynamic registration; VS Code-клиент свой наблюдатель
+  больше не создаёт) и запрашивает секцию `zell` через
+  `workspace/configuration` — и снова на каждый `didChangeConfiguration`;
+  `initializationOptions` и `settings.zell` в `didChangeConfiguration`
+  остаются запасным путём. Изменение `zell.lock`/манифеста корня
+  перезагружает исходники зависимостей. Папки, добавленные
+  `didChangeWorkspaceFolders`, загружаются как корни, удалённые —
+  выгружаются (открытые документы остаются). Устаревший `didChange`
+  (версия ниже записанной) отбрасывается. `$/setTrace` (`messages`,
+  `verbose`) включает `$/logTrace`: время каждого запроса и анализа,
+  отброшенные правки.
+- **Refresh.** После анализа сервер сравнивает отпечатки индекса:
+  объявления (вид, полное имя, сигнатура) и число ссылок на каждое. Если
+  изменились объявления и открыт документ кроме правленых —
+  `workspace/semanticTokens/refresh` и `workspace/inlayHint/refresh`; если
+  изменились объявления или число ссылок — `workspace/codeLens/refresh`
+  (каждый — не больше одного на анализ и только при `refreshSupport`).
+  Смена настроек inlay hints — `workspace/inlayHint/refresh`.
+- **On-type formatting**: на `}` — блок, который он закрыл, на перевод
+  строки — самый внутренний блок вокруг курсора; формат `zell::fmt` всего
+  файла, но в ответе только правки целиком внутри блока (после перевода
+  строки — не трогая строку курсора). При синтаксической ошибке и на
+  верхнем уровне — ничего. VS Code-клиент включает `editor.formatOnType`
+  для `[zell]` по умолчанию.
+- **Document links**: путь каждого `import a.b` (и `import a.b.T`) — ссылка
+  на файл, где пространство имён объявлено первым (символ namespace; для
+  std — первый исходник с его членом). Пространство имён может занимать
+  много файлов и папок, поэтому ссылка ведёт на файл, а не на папку
+  (папку редакторы не открывают). Пути в `zell.toml` ссылками не
+  становятся.
 - **Semantic tokens**: на документ хранится последний результат с
   `resultId`; `full/delta` от него — одна правка между общим префиксом и
   суффиксом (в единицах массива: 5 чисел на токен), от неизвестного id —

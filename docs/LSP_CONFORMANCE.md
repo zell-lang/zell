@@ -4,11 +4,12 @@ Audit of `zell-lsp` (`lsp/`) against the Language Server Protocol 3.17.
 Status: **ok** (implemented, tested), **partial** (works, with the gap
 named), **missing** (not implemented), **n.a.** (does not apply to Zell or
 to a server). Evidence is a test in `lsp/tests/server.rs`,
-`lsp/tests/server/protocol.rs` or `lsp/tests/server/conformance.rs`
+`lsp/tests/server/protocol.rs`, `lsp/tests/server/conformance.rs` or
+`lsp/tests/server/workspace.rs`
 (`server::<name>`), or a source location. Method table and design notes:
 `docs/TOOLING.md` "LSP-сервер".
 
-Summary: **55 ok, 6 partial, 12 missing, 8 n.a.** (81 rows).
+Summary: **67 ok, 1 partial, 5 missing, 8 n.a.** (81 rows).
 
 ## Lifecycle and base protocol
 
@@ -23,11 +24,11 @@ Summary: **55 ok, 6 partial, 12 missing, 8 n.a.** (81 rows).
 | Unknown method → `MethodNotFound` | ok | `errors_use_the_protocol_codes` | — |
 | Malformed params → `InvalidParams` | ok | `errors_use_the_protocol_codes` | — |
 | Handler panic → `InternalError`, server keeps running | ok | `handlers.rs` `call` (`catch_unwind`) | No test (no known panicking input). |
-| `$/setTrace`, `$/logTrace` | missing | — | Ignored; the server has no trace output of its own. |
+| `$/setTrace`, `$/logTrace` | ok | `trace_and_stale_changes` | `initialize.trace` or `$/setTrace`; traces each request's and analysis's time and dropped stale changes (`verbose` adds nothing yet). |
 | `window/workDoneProgress/create`, `$/progress` | ok | `progress_is_reported_for_initial_indexing` | — |
 | `window/logMessage`, `window/showMessage` | ok | `lib.rs` `log` | — |
 | `window/showDocument` | n.a. | — | Nothing to show. |
-| `client/registerCapability` (dynamic registration) | missing | — | File watchers are not registered by the server: clients must send `didChangeWatchedFiles` on their own (the VS Code client does; Neovim/Helix users must configure it). |
+| `client/registerCapability` (dynamic registration) | ok | `file_watchers_are_registered_dynamically` | After `initialized`, `workspace/didChangeWatchedFiles` for `**/*.zl`, `**/zell.toml`, `**/zell.lock` when the client supports `didChangeWatchedFiles.dynamicRegistration`. Other capabilities are static. |
 | `telemetry/event` | n.a. | — | — |
 
 ## Document synchronisation
@@ -37,10 +38,10 @@ Summary: **55 ok, 6 partial, 12 missing, 8 n.a.** (81 rows).
 | `didOpen` / `didChange` (incremental) | ok | `incremental_sync_matches_a_reference_model` (fuzz) | — |
 | Change range spanning lines, change at the very end, positions past the line/text end | ok | `crlf_documents_and_clamped_positions` | — |
 | CRLF documents (a column past the end of a `\r\n` line lands before `\r`) | ok | `crlf_documents_and_clamped_positions`; `SourceFile::offset_in` | — |
-| Document versions | partial | `lib.rs` `doc_versions` | Versions are recorded (used in rename edits) but not checked: a stale or out-of-order `didChange` is applied as it comes (stdio keeps order, as in rust-analyzer). |
+| Document versions | ok | `trace_and_stale_changes` | Recorded (rename edits, `publishDiagnostics.version`, fix `data`); a `didChange` with a lower version than the recorded one is dropped (and traced). |
 | `didSave` with `includeText` | ok | `crlf_documents_and_clamped_positions` | — |
 | `didClose`, then requests on the closed document | ok | `closed_unsaved_documents_drop_their_diagnostics_and_answer_null` (null, no panic) | — |
-| `willSave`, `willSaveWaitUntil` | missing | — | Format-on-save goes through `textDocument/formatting`. |
+| `willSave`, `willSaveWaitUntil` | missing | — | Deliberately not advertised: clients that send `willSaveWaitUntil` (VS Code does) would then format on every save regardless of the user's format-on-save setting; format-on-save goes through `textDocument/formatting`. |
 | `notebookDocument/*` | n.a. | — | — |
 
 ## Language features
@@ -73,10 +74,10 @@ Summary: **55 ok, 6 partial, 12 missing, 8 n.a.** (81 rows).
 | `textDocument/foldingRange` | ok | `folding_ranges_cover_blocks_and_comments` | — |
 | `textDocument/selectionRange` | ok | `selection_ranges_expand_from_the_token_to_the_file` | — |
 | `textDocument/formatting`, `rangeFormatting` | ok | `formatting_whole_document_and_range` | — |
-| `textDocument/onTypeFormatting` | missing | — | Cheap with `zell::fmt` over the enclosing block (`}` / newline); not done. |
+| `textDocument/onTypeFormatting` | ok | `on_type_formatting_formats_the_enclosing_block_only` | `}` formats the block it closes, a newline the innermost block around the cursor (except the cursor's line); only edits inside that block; nothing on a syntax error or at the top level. |
 | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `outgoingCalls` | ok | `call_hierarchy_incoming_and_outgoing` | A call is a reference followed by `(`; function values passed around are not calls. |
 | `textDocument/prepareTypeHierarchy`, `typeHierarchy/*` | missing | — | Structs satisfy interfaces structurally; the satisfaction check exists only inside `nav.rs` (implementation) and is not indexed. Needs a struct ↔ interface table in `sema/index.rs`. |
-| `textDocument/documentLink` | missing | — | `import a.b` names a namespace that can span many files; a link would need a target per import (the namespace directory or its first file). |
+| `textDocument/documentLink` | ok | `imports_link_to_their_namespace` | `import a.b` (and `a.b.T`) links to the file declaring the namespace first (std: the first source declaring one of its members); a namespace spans files and directories, and editors do not open directories. Paths in `zell.toml` are not linked. |
 | `textDocument/linkedEditingRange` | n.a. | — | No paired tags in Zell. |
 | `textDocument/moniker` | n.a. | — | No cross-repository index format. |
 | `textDocument/inlineValue` | missing | — | Debugger integration goes through the DAP agent. |
@@ -86,14 +87,14 @@ Summary: **55 ok, 6 partial, 12 missing, 8 n.a.** (81 rows).
 
 | Method / rule | Status | Evidence | Gap |
 |---|---|---|---|
-| `textDocument/publishDiagnostics` (push) | partial | `error_is_reported_with_range_and_cleared` | `version` is not set. |
+| `textDocument/publishDiagnostics` (push) | ok | `error_is_reported_with_range_and_cleared`, `diagnostics_carry_version_fix_data_and_cross_file_notes` | `version` of open documents. |
 | `textDocument/diagnostic` (pull), push XOR pull | ok | `pull_diagnostics_for_documents_and_the_workspace` | — |
-| `workspace/diagnostic` | partial | `pull_diagnostics_for_documents_and_the_workspace` | No partial results (`partialResultToken` ignored); unchanged reports are parked until an analysis changes something. |
+| `workspace/diagnostic` | ok | `pull_diagnostics_for_documents_and_the_workspace`, `workspace_diagnostics_stream_partial_results` | With `partialResultToken` one `$/progress` per file, then an empty result; unchanged reports are parked until an analysis changes something. |
 | `workspace/diagnostic/refresh` | ok | `pull_diagnostics_for_documents_and_the_workspace` | — |
 | Diagnostics cleared on `didClose` of an unsaved new file | ok | `closed_unsaved_documents_drop_their_diagnostics_and_answer_null` | — |
-| `relatedInformation` | partial | `lib.rs` `to_lsp_diag` | Notes with a span become related information in the same file; notes without a span are appended to the message. |
+| `relatedInformation` | ok | `diagnostics_carry_version_fix_data_and_cross_file_notes` | Notes with a span: same file; the diagnostic's `related` notes (e.g. a duplicate declared in another file of the namespace): that file; notes without a span are appended to the message. |
 | `tags` (`Unnecessary`) | ok | `unused_code_is_tagged_unnecessary` | `Deprecated` n.a. (no deprecation attribute yet). |
-| `data` for quick fixes | partial | `code_actions_fix_structured_diagnostics` | Fixes are recomputed from the code and range; `data` is not sent (works with every client, costs a lookup). |
+| `data` for quick fixes | ok | `diagnostics_carry_version_fix_data_and_cross_file_notes`, `code_actions_fix_structured_diagnostics` | `data` = the fixes with their edits and the document version; `codeAction` uses the context diagnostics' `data` at the current version, else recomputes from the analysis (clients that drop `data`, stale versions). |
 | `codeDescription` | missing | — | No online error index to link to. |
 
 ## Workspace
@@ -102,15 +103,15 @@ Summary: **55 ok, 6 partial, 12 missing, 8 n.a.** (81 rows).
 |---|---|---|---|
 | `workspace/symbol` (substring + fuzzy subsequence) | ok | `workspace_symbols_and_highlights` | — |
 | `workspaceSymbol/resolve` | n.a. | — | Locations are always sent. |
-| `workspace/didChangeWatchedFiles` (file edited outside the editor) | ok | `watched_files_are_added_and_removed` | See dynamic registration above. |
-| `workspace/didChangeConfiguration` | ok | `inlay_hints_types_and_parameter_names` | Push only. |
-| `workspace/configuration` (pull) | missing | — | Settings come from `initializationOptions` and `didChangeConfiguration`. |
-| `workspace/didChangeWorkspaceFolders` | missing | — | Folders are read once at `initialize`; adding a folder needs a restart. |
+| `workspace/didChangeWatchedFiles` (file edited outside the editor) | ok | `watched_files_are_added_and_removed` | Registered by the server (see dynamic registration above); a changed `zell.lock` or manifest of a root reloads its dependency sources. |
+| `workspace/didChangeConfiguration` | ok | `inlay_hints_types_and_parameter_names`, `configuration_is_pulled_from_the_client` | `settings.zell` is applied, then the section is pulled when supported. |
+| `workspace/configuration` (pull) | ok | `configuration_is_pulled_from_the_client` | Section `zell` after `initialized` and on each `didChangeConfiguration`; `initializationOptions` stay the fallback. |
+| `workspace/didChangeWorkspaceFolders` | ok | `workspace_folders_are_added_and_removed` | `workspaceFolders.changeNotifications`; added folders are loaded as roots, removed ones unloaded (open documents stay). |
 | `workspace/willRenameFiles` (edits imports and the namespace line) | ok | `renaming_a_file_updates_its_namespace_and_imports`, `renaming_a_file_of_a_shared_namespace_adds_imports` | — |
 | `workspace/didRenameFiles` | ok | same tests | — |
 | `workspace/willCreateFiles` etc., `didCreateFiles`, `didDeleteFiles` | missing | — | Covered by watched files. |
 | `workspace/executeCommand` | n.a. | — | Code lens commands run in the client. |
-| `workspace/semanticTokens/refresh`, `inlayHint/refresh`, `codeLens/refresh` | missing | — | After an edit in one file, other open files' tokens/hints/lenses update only when the client asks again. |
+| `workspace/semanticTokens/refresh`, `inlayHint/refresh`, `codeLens/refresh` | ok | `refresh_requests_follow_changes_seen_by_other_documents`, `configuration_is_pulled_from_the_client` | Sent when another open document may show something different: tokens and hints when declarations (kind, name, signature) changed, lenses also when reference counts did; at most one of each per analysis; hints also after their settings change. |
 
 ## Robustness
 
@@ -136,11 +137,9 @@ Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
 3. **Handlers off the main thread** (M): long requests (references and
    workspace symbols on a big project) block other requests and cannot be
    cancelled once running.
-4. **Dynamic registration + workspace folders + `workspace/configuration`**
-   (S): watchers registered by the server, folders added at run time,
-   settings pulled — needed for non-VS Code clients.
-5. **Refresh requests** (S): `semanticTokens/refresh`, `inlayHint/refresh`,
-   `codeLens/refresh` after an analysis that changed other open files.
+4. ~~**Dynamic registration + workspace folders + `workspace/configuration`**~~
+   — done 2026-10-29 (`lsp/src/workspace.rs`).
+5. ~~**Refresh requests**~~ — done 2026-10-29 (`lsp/src/workspace.rs`).
 6. **Type hierarchy** (M): index struct ↔ interface satisfaction.
 7. **Rename scoping** (M): block scopes in the index to detect every
    shadowing case.
@@ -148,7 +147,9 @@ Ranked by value for the cost (S < 1 day, M 1–3 days, L > 3 days):
    inline variable and organize imports are done (`lsp/src/refactor.rs`);
    still missing: inline function, fill struct fields, implement
    interface stubs, change signature, `if err` <-> `?` conversion.
-9. **`onTypeFormatting`, `documentLink`** (S each).
-10. **Diagnostics details** (S): `version` in `publishDiagnostics`,
-    `data` for quick fixes, cross-file related information, partial
-    results for `workspace/diagnostic`.
+9. ~~**`onTypeFormatting`, `documentLink`**~~ — done 2026-10-29
+   (`assist.rs` `on_type_edits`, `links.rs`).
+10. ~~**Diagnostics details**~~ — done 2026-10-29: `version`, `data` with
+    the fixes, cross-file related information, partial results. Left:
+    `codeDescription` (no online error index), `willSaveWaitUntil` (see
+    above).
