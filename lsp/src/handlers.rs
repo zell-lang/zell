@@ -56,6 +56,8 @@ impl Server {
             request::CodeLensResolve => Self::resolve_code_lens,
             request::Formatting => Self::formatting,
             request::RangeFormatting => Self::range_formatting,
+            request::OnTypeFormatting => Self::on_type_formatting,
+            request::DocumentLinkRequest => Self::document_links,
             request::WorkspaceSymbolRequest => Self::workspace_symbols,
             request::DocumentHighlightRequest => Self::highlights,
             request::DocumentDiagnosticRequest => Self::document_diagnostic,
@@ -91,7 +93,12 @@ impl Server {
         match serde_json::from_value::<R::Params>(req.params) {
             // A handler bug answers its request with `InternalError`
             // instead of taking the server down.
-            Ok(p) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, p))) {
+            Ok(p) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let t = std::time::Instant::now();
+                let r = f(self, p);
+                self.log_trace(&format!("{} answered in {} ms", req.method, t.elapsed().as_millis()), None);
+                r
+            })) {
                 Ok(Ok(r)) => self.reply(req.id, r),
                 Ok(Err((code, msg))) => self.reply_err(req.id, code, msg),
                 Err(_) => self.reply_err(req.id, lsp_server::ErrorCode::InternalError as i32, format!("internal error in {}", req.method)),
@@ -426,7 +433,9 @@ impl Server {
             let span = assist::span_of(&a.files[file], &p.range);
             let only = p.context.only.as_deref();
             let mut out = if only.is_none_or(|o| o.iter().any(|k| k.as_str() == "quickfix")) {
-                assist::code_actions(&a, file, &p.text_document.uri, span, |d| self.to_lsp_diag(&a, d))
+                let version = self.doc_versions.get(&path_of(&p.text_document.uri)).copied();
+                assist::fixes_from_data(&p.context.diagnostics, &p.text_document.uri, version)
+                    .unwrap_or_else(|| assist::code_actions(&a, file, &p.text_document.uri, span, |d| self.to_lsp_diag(&a, d)))
             } else {
                 Vec::new()
             };
@@ -459,6 +468,15 @@ impl Server {
 
     fn range_formatting(&mut self, p: DocumentRangeFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
         Ok(self.current_source(&p.text_document.uri).and_then(|f| assist::format_edits(&f, Some((p.range.start.line, p.range.end.line)))))
+    }
+
+    fn on_type_formatting(&mut self, p: DocumentOnTypeFormattingParams) -> Reply<Option<Vec<TextEdit>>> {
+        let tdp = p.text_document_position;
+        Ok(self.current_source(&tdp.text_document.uri).and_then(|f| assist::on_type_edits(&f, tdp.position, &p.ch)))
+    }
+
+    fn document_links(&mut self, p: DocumentLinkParams) -> Reply<Option<Vec<DocumentLink>>> {
+        Ok(self.locate(&p.text_document, None).map(|(a, file, _)| crate::links::document_links(&a, file, |f| self.uri_of(&a, f))))
     }
 
     // -- pull diagnostics ------------------------------------------------------------
@@ -502,18 +520,19 @@ impl Server {
             }
             let Some(uri) = self.uri_of(&a, i) else { continue };
             let (result_id, diags) = self.report(&a, i);
+            let version = self.doc_versions.get(&a.files[i].path).map(|&v| i64::from(v));
             let known = previous.iter().find(|p| p.uri == uri).map(|p| p.value.as_str());
             if known == Some(result_id.as_str()) {
                 items.push(WorkspaceDocumentDiagnosticReport::Unchanged(WorkspaceUnchangedDocumentDiagnosticReport {
                     uri,
-                    version: None,
+                    version,
                     unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport { result_id },
                 }));
             } else {
                 changed = true;
                 items.push(WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
                     uri,
-                    version: None,
+                    version,
                     full_document_diagnostic_report: FullDocumentDiagnosticReport { result_id: Some(result_id), items: diags },
                 }));
             }
@@ -530,6 +549,16 @@ impl Server {
 
     fn workspace_diagnostic(&mut self, id: RequestId, p: WorkspaceDiagnosticParams) {
         match self.workspace_report(&p.previous_result_ids) {
+            // Partial results: one `$/progress` per file, then an empty answer.
+            Some(r) if p.partial_result_params.partial_result_token.is_some() => {
+                let token = p.partial_result_params.partial_result_token.unwrap_or(NumberOrString::Number(0));
+                for item in r.items {
+                    let value = WorkspaceDiagnosticReportPartialResult { items: vec![item] };
+                    let params = serde_json::json!({"token": token, "value": value});
+                    let _ = self.sender.send(lsp_server::Message::Notification(lsp_server::Notification::new("$/progress".into(), params)));
+                }
+                self.reply(id, WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items: Vec::new() }))
+            }
             Some(r) => self.reply(id, WorkspaceDiagnosticReportResult::Report(r)),
             None => self.parked.push((id, p)),
         }

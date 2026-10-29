@@ -622,6 +622,9 @@ mod members;
 #[path = "server/completion.rs"]
 mod completion;
 
+#[path = "server/workspace.rs"]
+mod workspace;
+
 // ---------------------------------------------------------------------------
 // Stage 3-5 features
 // ---------------------------------------------------------------------------

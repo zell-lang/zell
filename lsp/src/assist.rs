@@ -375,7 +375,7 @@ pub(crate) fn signature_help(a: &Analysis, file: usize, off: u32) -> Option<Sign
 // ---------------------------------------------------------------------------
 
 /// Which inlay hints to show (`zell.inlayHints.*` settings).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HintSettings {
     pub types: bool,
     pub parameter_names: bool,
@@ -583,6 +583,51 @@ pub(crate) fn code_actions(a: &Analysis, file: usize, uri: &Url, span: Span, to_
     out
 }
 
+/// `Diagnostic.data` of a diagnostic with quick fixes: the fixes with
+/// their edits, and the document version they were computed for.
+pub(crate) fn fixes_data(f: &SourceFile, fixes: &[zell::diagnostics::Fix], version: Option<i32>) -> serde_json::Value {
+    let fixes: Vec<serde_json::Value> = fixes
+        .iter()
+        .map(|fix| {
+            let edits: Vec<TextEdit> = fix.edits.iter().map(|e| TextEdit { range: range(f, e.span), new_text: e.new_text.clone() }).collect();
+            serde_json::json!({"title": fix.title, "edits": edits})
+        })
+        .collect();
+    serde_json::json!({"v": version, "fixes": fixes})
+}
+
+/// Quick fixes read from the `data` of the client's context diagnostics
+/// ([`fixes_data`]) when every one of ours was made for `version`; `None`
+/// (recompute from the analysis) when there are none or one is stale.
+pub(crate) fn fixes_from_data(diags: &[lsp_types::Diagnostic], uri: &Url, version: Option<i32>) -> Option<Vec<CodeActionOrCommand>> {
+    let ours: Vec<&lsp_types::Diagnostic> = diags.iter().filter(|d| d.source.as_deref() == Some("zell")).collect();
+    if ours.is_empty() || version.is_none() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for d in ours {
+        let Some(data) = &d.data else { continue };
+        if data.get("v").and_then(|v| v.as_i64()) != version.map(i64::from) {
+            return None;
+        }
+        for (i, fix) in data.get("fixes")?.as_array()?.iter().enumerate() {
+            let title = fix.get("title")?.as_str()?.to_string();
+            let edits: Vec<TextEdit> = serde_json::from_value(fix.get("edits")?.clone()).ok()?;
+            let mut d = d.clone();
+            d.data = None;
+            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title,
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![d]),
+                edit: Some(WorkspaceEdit { changes: Some(HashMap::from([(uri.clone(), edits)])), ..Default::default() }),
+                is_preferred: Some(i == 0),
+                ..Default::default()
+            }));
+        }
+    }
+    Some(out)
+}
+
 /// Text edits turning `file`'s text into its formatted form, limited to
 /// hunks touching lines `lines` (inclusive) when given. `None` when the
 /// file does not parse.
@@ -600,6 +645,69 @@ pub(crate) fn format_edits(f: &SourceFile, lines: Option<(u32, u32)>) -> Option<
         let start = f.line_start(h.old_start);
         let end = f.line_start(h.old_start + h.old_len);
         out.push(TextEdit { range: range(f, Span::new(start, end.max(start))), new_text: h.new_lines.concat() });
+    }
+    Some(out)
+}
+
+/// `textDocument/onTypeFormatting`: after `}` the block it closes, after
+/// a newline the innermost block around the cursor, is formatted with
+/// `zell::fmt`; only hunks lying entirely inside that block are returned
+/// (after a newline, none touching the cursor's line, so the indentation
+/// the editor just inserted stays). Nothing on a syntax error, or at the
+/// top level.
+pub(crate) fn on_type_edits(f: &SourceFile, pos: lsp_types::Position, ch: &str) -> Option<Vec<TextEdit>> {
+    use zell::token::TokenKind;
+    let off = crate::encoding::offset(f, pos);
+    let tokens = zell::lexer::lex(&f.text, &mut zell::diagnostics::Diagnostics::new());
+    let mut open: Vec<u32> = Vec::new();
+    let mut block = None;
+    let mut iter = tokens.iter();
+    for t in iter.by_ref() {
+        if t.span.start >= off {
+            break;
+        }
+        match t.kind {
+            TokenKind::LBrace => open.push(t.span.start),
+            TokenKind::RBrace => {
+                let start = open.pop();
+                if ch == "}" && t.span.end <= off {
+                    block = start.map(|s| (s, t.span.end));
+                }
+            }
+            _ => {}
+        }
+    }
+    if ch != "}" {
+        // The `}` closing the innermost open block, scanning on.
+        let start = *open.last()?;
+        let mut depth = 0usize;
+        let rest = tokens.iter().skip_while(|t| t.span.start < off);
+        for t in rest {
+            match t.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace if depth == 0 => {
+                    block = Some((start, t.span.end));
+                    break;
+                }
+                TokenKind::RBrace => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    let (start, end) = block?;
+    let (first, last) = (f.line_col(start).0 - 1, f.line_col(end).0 - 1);
+    let cursor = pos.line as usize;
+    let formatted = zell::fmt::format_source(&f.text).ok()?;
+    let mut out = Vec::new();
+    for h in zell::fmt::line_hunks(&f.text, &formatted) {
+        let (hs, he) = (h.old_start, h.old_start + h.old_len);
+        let inside = hs >= first && he <= last + 1 && (h.old_len > 0 || hs > first);
+        let touches_cursor = ch != "}" && hs <= cursor && (he > cursor || (h.old_len == 0 && hs == cursor));
+        if !inside || touches_cursor {
+            continue;
+        }
+        let (a, b) = (f.line_start(hs), f.line_start(he));
+        out.push(TextEdit { range: range(f, Span::new(a, b.max(a))), new_text: h.new_lines.concat() });
     }
     Some(out)
 }

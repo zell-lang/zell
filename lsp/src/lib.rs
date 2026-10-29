@@ -6,9 +6,11 @@
 //! rename (also of import paths when files move), hover, highlights,
 //! semantic tokens (full, delta, range), completion (with lazy resolve),
 //! signature help, inlay hints, code actions, code lenses, formatting
-//! (`zell::fmt`) and workspace symbols; `.zl` files created, deleted or
-//! renamed on disk are picked up through `workspace/didChangeWatchedFiles`
-//! and `workspace/didRenameFiles`.
+//! (`zell::fmt`, also on type), document links and workspace symbols;
+//! `.zl` files created, deleted or renamed on disk are picked up through
+//! `workspace/didChangeWatchedFiles` (watchers registered by the server)
+//! and `workspace/didRenameFiles`; workspace folders, pulled settings,
+//! tracing and refresh requests are in `workspace.rs`.
 //!
 //! Library sources are part of the project, read-only (docs/TOOLING.md):
 //! the standard library from `std/` ([`zell::sema::stdfs::std_dir`],
@@ -40,9 +42,11 @@ mod files;
 mod handlers;
 mod hierarchy;
 mod lens;
+mod links;
 mod nav;
 mod refactor;
 mod sync;
+mod workspace;
 
 use crossbeam_channel::{Receiver, Sender};
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
@@ -108,6 +112,15 @@ struct ClientCaps {
     resolve_edits: bool,
     /// `completionItem.snippetSupport` / `insertReplaceSupport`.
     completion: completion::CompletionCaps,
+    /// `workspace.configuration`: settings are pulled.
+    configuration: bool,
+    /// `workspace.didChangeWatchedFiles.dynamicRegistration`: the server
+    /// registers its file watchers.
+    watcher_registration: bool,
+    /// `workspace.{semanticTokens,inlayHint,codeLens}.refreshSupport`.
+    tokens_refresh: bool,
+    hints_refresh: bool,
+    lens_refresh: bool,
 }
 
 impl ClientCaps {
@@ -131,6 +144,11 @@ impl ClientCaps {
                     insert_replace: ci.and_then(|i| i.insert_replace_support).unwrap_or(false),
                 }
             },
+            configuration: c.workspace.as_ref().and_then(|w| w.configuration).unwrap_or(false),
+            watcher_registration: c.workspace.as_ref().and_then(|w| w.did_change_watched_files.as_ref()).and_then(|d| d.dynamic_registration).unwrap_or(false),
+            tokens_refresh: c.workspace.as_ref().and_then(|w| w.semantic_tokens.as_ref()).and_then(|d| d.refresh_support).unwrap_or(false),
+            hints_refresh: c.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|d| d.refresh_support).unwrap_or(false),
+            lens_refresh: c.workspace.as_ref().and_then(|w| w.code_lens.as_ref()).and_then(|d| d.refresh_support).unwrap_or(false),
         }
     }
 }
@@ -171,7 +189,9 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn std::error::Error + Sen
             server.analysis_delay = Duration::from_millis(ms);
         }
     }
+    server.trace = params.trace.unwrap_or(TraceValue::Off);
     server.initial_index(&params);
+    server.after_initialized();
     let result = event_loop(&connection, &mut server, &events_rx);
     if let Some(f) = &server.inflight {
         f.cancel.store(true, Ordering::Relaxed);
@@ -216,7 +236,7 @@ fn event_loop(connection: &Connection, server: &mut Server, events: &Receiver<Ev
                     }
                     Message::Notification(_) if shut_down => {}
                     Message::Notification(n) => server.handle_notification(n),
-                    Message::Response(_) => {}
+                    Message::Response(r) => server.on_response(r),
                 }
             }
             recv(events) -> ev => {
@@ -260,6 +280,8 @@ pub fn capabilities() -> ServerCapabilities {
         })),
         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(true) }),
         document_formatting_provider: Some(OneOf::Left(true)),
+        document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions { first_trigger_character: "}".into(), more_trigger_character: Some(vec!["\n".into()]) }),
+        document_link_provider: Some(DocumentLinkOptions { resolve_provider: Some(false), work_done_progress_options: Default::default() }),
         document_range_formatting_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
@@ -286,7 +308,7 @@ pub fn capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         })),
         workspace: Some(WorkspaceServerCapabilities {
-            workspace_folders: None,
+            workspace_folders: Some(WorkspaceFoldersServerCapabilities { supported: Some(true), change_notifications: Some(OneOf::Left(true)) }),
             file_operations: Some(WorkspaceFileOperationsServerCapabilities { will_rename: Some(sl_files.clone()), did_rename: Some(sl_files), ..Default::default() }),
         }),
         ..Default::default()
@@ -308,6 +330,7 @@ enum Outcome {
 struct Inflight {
     version: u64,
     cancel: Arc<AtomicBool>,
+    started: Instant,
 }
 
 /// Scheduler counters (`zell/analyzerStatus`).
@@ -372,6 +395,15 @@ struct Server {
     /// Artificial delay of each analysis (`initializationOptions.debug.analysisDelayMs`).
     analysis_delay: Duration,
     stats: Stats,
+    /// `$/setTrace` / `initialize.trace`: `$/logTrace` output when not off.
+    trace: TraceValue,
+    /// Ids of pending `workspace/configuration` requests.
+    config_requests: HashSet<RequestId>,
+    /// Open documents edited since the last analysis (see [`workspace`]'s
+    /// refresh requests).
+    changed_docs: HashSet<String>,
+    /// Fingerprints of the last analysis: (declarations, reference counts).
+    fingerprint: Option<(u64, u64)>,
 }
 
 /// Session key for a URI: the file path for `file:` URIs.
@@ -431,6 +463,10 @@ impl Server {
             hints: assist::HintSettings::default(),
             analysis_delay: Duration::ZERO,
             stats: Stats::default(),
+            trace: TraceValue::Off,
+            config_requests: HashSet::new(),
+            changed_docs: HashSet::new(),
+            fingerprint: None,
         }
     }
 
@@ -591,7 +627,7 @@ impl Server {
         let snapshot = self.session.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let version = self.version;
-        self.inflight = Some(Inflight { version, cancel: cancel.clone() });
+        self.inflight = Some(Inflight { version, cancel: cancel.clone(), started: Instant::now() });
         self.stats.started += 1;
         let events = self.events.clone();
         let delay = self.analysis_delay;
@@ -627,13 +663,15 @@ impl Server {
             if let Some(text) = self.docs.get(&key) {
                 self.session.update_file(key.clone(), text.clone());
             }
+            self.changed_docs.insert(key);
         }
     }
 
     fn on_event(&mut self, ev: Event) {
         let Event::Analyzed { version, outcome } = ev;
+        let mut started = None;
         if self.inflight.as_ref().is_some_and(|f| f.version == version) {
-            self.inflight = None;
+            started = self.inflight.take().map(|f| f.started);
         }
         if version != self.version {
             self.stats.cancelled += 1;
@@ -642,12 +680,19 @@ impl Server {
         match outcome {
             Outcome::Done(a) => {
                 self.stats.completed += 1;
+                if self.trace != TraceValue::Off {
+                    let ms = started.map_or(0, |s| s.elapsed().as_millis());
+                    self.log_trace(&format!("analysis {version}: {} files, {} diagnostics in {ms} ms", a.files.len(), a.diagnostics.len()), None);
+                }
+                self.refresh_after(&a);
                 self.analysis = Some(Arc::from(a));
                 self.analysis_version = version;
                 self.dirty = None;
                 match self.diag_mode {
                     DiagMode::Push => self.publish(),
-                    DiagMode::Pull if self.caps.diagnostic_refresh => self.server_request::<request::WorkspaceDiagnosticRefresh>(()),
+                    DiagMode::Pull if self.caps.diagnostic_refresh => {
+                        self.server_request::<request::WorkspaceDiagnosticRefresh>(());
+                    }
                     DiagMode::Pull => {}
                 }
                 if let Some(t) = self.indexing.take() {
@@ -677,6 +722,7 @@ impl Server {
             DOCUMENT_TEXT,
             request::Formatting::METHOD,
             request::RangeFormatting::METHOD,
+            request::OnTypeFormatting::METHOD,
             request::FoldingRangeRequest::METHOD,
             request::SelectionRangeRequest::METHOD,
         ];
@@ -729,6 +775,9 @@ impl Server {
                 for (n, s) in &d.notes {
                     (n, s.map(|s| (s.start, s.end))).hash(&mut h);
                 }
+                for (n, file, s) in &d.related {
+                    (n, file, s.start, s.end).hash(&mut h);
+                }
             }
             let h = h.finish();
             now.insert(uri.clone(), h);
@@ -736,7 +785,7 @@ impl Server {
                 continue;
             }
             let diags: Vec<Diagnostic> = by_file[i].iter().map(|d| self.to_lsp_diag(a, d)).collect();
-            out.push(PublishDiagnosticsParams { uri: uri.clone(), diagnostics: diags, version: None });
+            out.push(PublishDiagnosticsParams { uri: uri.clone(), diagnostics: diags, version: self.doc_versions.get(&f.path).copied() });
         }
         for uri in self.published.keys() {
             if !now.contains_key(uri) {
@@ -767,6 +816,16 @@ impl Server {
                 _ => message.push_str(&format!("\nnote: {note}")),
             }
         }
+        // Notes about other files (e.g. the other declaration of a duplicate).
+        for (note, other, s) in &d.related {
+            match (a.files.get(*other), self.uri_of(a, *other)) {
+                (Some(f), Some(uri)) => related.push(DiagnosticRelatedInformation { location: Location { uri, range: range(f, *s) }, message: note.clone() }),
+                _ => message.push_str(&format!("\nnote: {note}")),
+            }
+        }
+        // The quick fixes travel with the diagnostic: `codeAction` uses them
+        // when the document is still at this version.
+        let data = (!d.fixes.is_empty()).then(|| assist::fixes_data(file, &d.fixes, self.doc_versions.get(&file.path).copied()));
         Diagnostic {
             range: range(file, d.span),
             severity: Some(match d.severity {
@@ -782,6 +841,7 @@ impl Server {
             // Unused code is faded out by editors.
             tags: (matches!(d.code, Some(zell::diagnostics::codes::UNUSED_VARIABLE | zell::diagnostics::codes::UNUSED_IMPORT)) || d.code.and_then(zell::sema::lint::lint).is_some_and(|l| l.unnecessary))
                 .then(|| vec![DiagnosticTag::UNNECESSARY]),
+            data,
             ..Default::default()
         }
     }
@@ -797,11 +857,13 @@ impl Server {
         let _ = self.sender.send(Message::Notification(Notification::new(N::METHOD.to_string(), params)));
     }
 
-    /// Sends a request to the client (its response is ignored).
-    fn server_request<R: request::Request>(&mut self, params: R::Params) {
+    /// Sends a request to the client; returns its id (responses are
+    /// ignored except those [`Server::on_response`] waits for).
+    fn server_request<R: request::Request>(&mut self, params: R::Params) -> RequestId {
         self.next_server_request += 1;
         let id = RequestId::from(format!("zell-lsp/{}", self.next_server_request));
-        let _ = self.sender.send(Message::Request(Request::new(id, R::METHOD.to_string(), params)));
+        let _ = self.sender.send(Message::Request(Request::new(id.clone(), R::METHOD.to_string(), params)));
+        id
     }
 
     fn log(&self, typ: MessageType, message: &str) {
@@ -870,6 +932,12 @@ impl Server {
             notification::DidChangeTextDocument::METHOD => {
                 let Ok(p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params) else { return };
                 let key = path_of(&p.text_document.uri);
+                // A stale or out-of-order change (lower version than the
+                // recorded one) is dropped instead of corrupting the text.
+                if let Some(&known) = self.doc_versions.get(&key).filter(|&&v| p.text_document.version < v) {
+                    self.log_trace(&format!("dropped stale didChange of {key}: version {} < {known}", p.text_document.version), None);
+                    return;
+                }
                 let Some(text) = self.docs.get_mut(&key) else { return };
                 self.doc_versions.insert(key.clone(), p.text_document.version);
                 for change in p.content_changes {
@@ -895,8 +963,13 @@ impl Server {
             }
             notification::DidChangeWatchedFiles::METHOD => {
                 let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else { return };
+                let mut manifests = Vec::new();
                 for ev in p.changes {
                     let Ok(path) = ev.uri.to_file_path() else { continue };
+                    if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "zell.lock" || MANIFESTS.contains(&n)) {
+                        manifests.push(path);
+                        continue;
+                    }
                     if path.extension().is_none_or(|x| x != "zl") {
                         continue;
                     }
@@ -914,6 +987,7 @@ impl Server {
                         }
                     }
                 }
+                self.manifests_changed(&manifests);
                 self.touch();
             }
             notification::DidRenameFiles::METHOD => {
@@ -923,7 +997,17 @@ impl Server {
             notification::DidChangeConfiguration::METHOD => {
                 let Ok(p) = serde_json::from_value::<DidChangeConfigurationParams>(n.params) else { return };
                 if let Some(zell) = p.settings.get("zell") {
-                    self.hints.update(zell);
+                    self.apply_settings(zell);
+                }
+                self.pull_configuration();
+            }
+            notification::DidChangeWorkspaceFolders::METHOD => {
+                let Ok(p) = serde_json::from_value::<DidChangeWorkspaceFoldersParams>(n.params) else { return };
+                self.folders_changed(p.event);
+            }
+            notification::SetTrace::METHOD => {
+                if let Ok(p) = serde_json::from_value::<SetTraceParams>(n.params) {
+                    self.trace = p.value;
                 }
             }
             notification::DidCloseTextDocument::METHOD => {
