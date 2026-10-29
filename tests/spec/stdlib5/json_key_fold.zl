@@ -1,0 +1,12 @@
+// test: json.Parse<T> matches keys exactly first, else ASCII case-insensitively, and skips unknown keys
+// status: passing
+namespace spec.stdlib5.json_key_fold
+import io
+import encoding.json
+struct U { Name string; UserId int; @json(name: "mail") Email string }
+func main() {
+    var u = try json.Parse<U>(`{"name":"ann","USERID":7,"MAIL":"a@b","extra":1}`) else U{}
+    println(u.Name, u.UserId, u.Email)
+    var v = try json.Parse<U>(`{"name":"low","Name":"exact"}`) else U{}
+    println(v.Name)
+}

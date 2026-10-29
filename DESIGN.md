@@ -1988,7 +1988,10 @@ type only inside a loop unrolled at compile time».
   skip:)`, вложенные структуры, срезы, массивы, `map` со строковыми
   ключами — при выводе отсортированы, указатели, `nil` → `null`, строки,
   числа, `bool`, простые enum по имени варианта, `json.Value`, `any`),
-  ошибки с путём (`users[2].id: expected int, found string`);
+  ошибки с путём (`users[2].id: expected int, found string`); ключи
+  объекта сопоставляются с полями как в Go: сначала точное совпадение имени
+  (или `@json(name:)`), иначе без учёта регистра (ASCII; `"userid"` →
+  `UserId`), незнакомые ключи пропускаются;
   `ParseValue(text) Value!` — динамическое дерево (`Type`, `IsNull`,
   `Bool`, `Float`, `Int`, `String`, `Len`, `Index`, `Get`, `Has`, `Keys`,
   `Items`, `Format`; `IsObject`/`IsArray` — общие имена контейнеров у

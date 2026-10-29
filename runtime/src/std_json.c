@@ -744,6 +744,30 @@ int64_t zell_encoding_json_rt_get(int64_t n, const zell_string *key) {
     return (int64_t)(intptr_t)found;
 }
 
+/* ASCII case-insensitive equality of n bytes. */
+static int zell__json_fold_eq(const char *a, const char *b, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t x = (uint8_t)a[i], y = (uint8_t)b[i];
+        if (x >= 'A' && x <= 'Z') x = (uint8_t)(x + 32);
+        if (y >= 'A' && y <= 'Z') y = (uint8_t)(y + 32);
+        if (x != y) return 0;
+    }
+    return 1;
+}
+
+int64_t zell_encoding_json_rt_get_fold(int64_t n, const zell_string *key) {
+    if (!n || NODE(n)->type != ZELL__JSON_OBJ) return 0;
+    const char *kd = zell_string_data(key);
+    uint32_t kl = (uint32_t)zell_string_len(key);
+    zell__json_node *k = NODE(n) + 1;
+    zell__json_node *found = NULL;
+    for (uint32_t i = 0, cnt = NODE(n)->len; i < cnt; i++) {
+        if (k->len == kl && zell__json_fold_eq(k->u.s, kd, kl)) found = k + 1;
+        k = node_next(k + 1);
+    }
+    return (int64_t)(intptr_t)found;
+}
+
 int64_t zell_encoding_json_rt_index(int64_t d, int64_t n, int64_t i) {
     if (!n || NODE(n)->type != ZELL__JSON_ARR || i < 0 || i >= (int64_t)NODE(n)->len) return 0;
     zell__json_node *arr = NODE(n);

@@ -1096,6 +1096,7 @@ int64_t       zell_encoding_json_rt_len(int64_t node);                 /* elemen
 int64_t       zell_encoding_json_rt_first(int64_t node);               /* first element / first key, 0 if none */
 int64_t       zell_encoding_json_rt_next(int64_t node);                /* next sibling (after a key: its value) */
 int64_t       zell_encoding_json_rt_get(int64_t obj, const zell_string *key); /* member value, 0 if absent */
+int64_t       zell_encoding_json_rt_get_fold(int64_t obj, const zell_string *key); /* the same, ASCII case-insensitive */
 int64_t       zell_encoding_json_rt_index(int64_t doc, int64_t arr, int64_t i); /* element i, 0 if out of range */
 int64_t       zell_encoding_json_rt_w_new(void);                        /* writer */
 zell_string *zell_encoding_json_rt_w_finish(int64_t w);               /* +1 the text; frees the writer */

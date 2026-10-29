@@ -904,6 +904,7 @@ pub const FUNCS: &[StdFunc] = &[
     f!("encoding.json", "rtFirst", "int", "int", "zell_encoding_json_rt_first"),
     f!("encoding.json", "rtNext", "int", "int", "zell_encoding_json_rt_next"),
     f!("encoding.json", "rtGet", "int, string", "int", "zell_encoding_json_rt_get"),
+    f!("encoding.json", "rtGetFold", "int, string", "int", "zell_encoding_json_rt_get_fold"),
     f!("encoding.json", "rtIndex", "int, int, int", "int", "zell_encoding_json_rt_index"),
     f!("encoding.json", "rtWNew", "", "int", "zell_encoding_json_rt_w_new"),
     f!("encoding.json", "rtWFinish", "int", "string", "zell_encoding_json_rt_w_finish"),

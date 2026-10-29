@@ -60,6 +60,10 @@ extern func rtNext(a int) int
 extern func rtGet(a int, b string) int
 
 // Internal runtime primitive (used by the Zell sources of this namespace).
+// C: zell_encoding_json_rt_get_fold (runtime/src/std_*.c).
+extern func rtGetFold(a int, b string) int
+
+// Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_encoding_json_rt_index (runtime/src/std_*.c).
 extern func rtIndex(a int, b int, c int) int
 

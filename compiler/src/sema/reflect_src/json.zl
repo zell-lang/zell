@@ -379,6 +379,10 @@ func decode<T>(d *document, n int, out *T) void! {
                 name = f.Attribute<reflect.json>().name
             }
             var c = rtGet(n, name)
+            if c == 0 {
+                // Like Go: an exact key first, else a case-insensitive one.
+                c = rtGetFold(n, name)
+            }
             if c != 0 {
                 try decode(d, c, &f.Get(*out)) catch err {
                     return at(err, name)
